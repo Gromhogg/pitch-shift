@@ -170,6 +170,66 @@ Mean of the 6 songs, going up:
   uses 2.5× the CPU and adds a 44 MB download. Its separation also has to cope with real songs it has never seen.
 - If the owner prefers the AI version by ear, it is ready on `v2-advanced3-ai`.
 
+## Bass fix (after 2.0.0, branch `v2-bass`)
+
+The owner: "improve low bass notes, especially at higher pitches. Target sounds that are 100 Hz or lower. The advanced
+processing seems to actually balance out the sounds better, but in the meantime it removes some of those low bass
+notes."
+
+**Test set** (never the owner's music): 16 clips. 5 made-up ones (a bass line with notes from 35 to 98 Hz, a kick drum,
+three long sub notes, and the bass line and sub notes mixed with chords and hi-hats), the 6 Apple Loops songs A-F, and
+the bass parts of A, B, C, D and F alone. Rendered with the engine itself (same output as `--render-file`).
+Measures: "lost bass" = the share of 100 ms moments where 20-100 Hz is more than 6 dB below the original (only moments
+where the original has bass); the median 20-100 Hz level; the same through an earbud-like curve; per-note levels; and
+the research's tone balance (tbDev) and 1/3-octave levels.
+
+**What removed low bass notes in 2.0.0 (going up):**
+1. **The tone EQ.** Since balanced3 it may cut up to 18 dB below 100 Hz, without smoothing, also going up. The fold
+   and its floor move bass notes into other 1/3-octave bands, and the EQ then cut them there because the original
+   had little in that band. Examples: the piano song's low notes at +8 (79 % of its bass moments more than 6 dB
+   down); an 82 Hz test tone at +8 came out 7 dB quieter than it went in.
+2. **The fold floor's split** (LR4 at 35 Hz × 2^((12-N)/12)). Its two sides end up an octave apart, so they add as
+   powers: up to 3.5 dB lost for notes within about 4 half-steps of the split, plus up to 7 dB more from the 30 Hz
+   high-pass on +4..+6. Its gentle slope also leaked the EDM song's 41 Hz sub down to 32 Hz (the +16 dB weak spot).
+3. Not the cause: the peak limiter (switched off: the same within 0.2 dB), Rubber Band itself (normal mode keeps
+   bass notes that stay under 100 Hz within 0.7 dB; it only "loses" them by moving them above 100 Hz).
+
+**The fix** (engine recipe 4, now the default; `advanced_tune(chain, "recipe", 3)` gives 2.0.0's output sample for
+sample, checked):
+- Going up, the EQ treats the bass like the rest (target smoothed over ±1 third-octave, cuts up to 9 dB). Going down
+  is unchanged.
+- Fold floor: a steep 8th-order Butterworth split, whose two sides keep the full power. The main path's upper band
+  goes through a matching all-pass, so the main path's two parts can't cancel (a plain steep split made a -14 dB
+  notch at 60 Hz at +4).
+- Floor at 45 Hz up to +8, easing to 35 Hz at +11 (at +9..+11 the fold moves bass down only 1-3 half-steps).
+- Unchanged: pitch-down, +12, the delay (engine 138 ms; live at +8: 201 ms total, 0 dropouts), normal mode
+  (byte-identical). CPU about +1 %.
+
+| N | lost bass moments | median bass level | earbud: lost | tbDev, 6 songs | EDM 32 Hz vs original |
+|---|---|---|---|---|---|
+| +3 | 15.5 → 14.3 % | -1.2 → -0.5 dB | 0.2 → 0.2 % | 3.7 → 3.7 | |
+| +4 | 15.4 → 15.8 % | -1.6 → -0.8 dB | 0.4 → 0.6 % | 3.9 → 3.8 | +4.5 → +0.2 dB |
+| +5 | 17.0 → 3.2 % | -1.8 → +0.6 dB | 2.5 → 1.0 % | 3.7 → 3.8 | +7.5 → +2.0 dB |
+| +6 | 12.0 → 2.4 % | -1.2 → +0.7 dB | 4.2 → 0.6 % | 3.7 → 3.8 | +6.3 → +1.1 dB |
+| +8 | 11.5 → 1.7 % | -1.5 → +0.1 dB | 2.9 → 0.4 % | 3.6 → 3.7 | +16.0 → +9.2 dB |
+| +9 | 8.0 → 1.3 % | -1.6 → -0.4 dB | 0.2 → 0.4 % | 3.4 → 3.6 | +16.7 → +15.6 dB |
+| +10 | 3.6 → 1.2 % | -1.3 → -0.4 dB | 0.8 → 0.3 % | 2.9 → 3.0 | +12.1 → +13.6 dB |
+| +11 | 0.3 → 1.0 % | -0.3 → +0.1 dB | 0.2 → 0.2 % | 2.4 → 2.3 | +8.5 → +6.4 dB |
+| +12, -5, -8 | identical | | | | |
+
+Tone balance above 100 Hz is unchanged at every amount; the small tbDev changes are in the bass bands.
+
+**Weak spots left:**
+- **Overtone collisions.** When a bass note's lowest part goes up with the main path (below the floor) and its 2nd
+  harmonic is folded down, both land on the same frequency from two different shifters and can cancel by chance.
+  2.0.0 had this too, for lower notes; the higher floor moves it into common bass notes (at +5: notes of 34-67 Hz,
+  was 26-52 Hz). Example: the funk bass part alone at +5 has 14.7 % lost moments (2.0.0: 5.0 %); the whole funk song
+  1.5 % (0.6 %). A 40 Hz floor avoids that case but leaves the EDM weak spot as bad as 2.0.0.
+- Bass is a little more often louder than the original (moments more than 6 dB above: +5 6.4 → 7.8 %, +8 5.1 → 6.1 %).
+- EDM sub bass at 32 Hz (see the table) and the piano left hand: better at most amounts, not solved.
+- Not checked by ear yet. Samples: `~/Downloads/Pitch Shift bass samples/` (5 test songs, original / 2.0.0 / new at
+  +5 and +8).
+
 ## Not verified yet
 
 - Listening (all choices were made by measurements).
@@ -189,3 +249,6 @@ All at the same loudness (-18 LUFS). README.txt in the folder says what to liste
   code (normal or advanced); `--steps-at` changes the amount while it plays.
 - `PitchShift --test --pid N --steps N --advanced --watch [--record-out F.wav] [--steps-at ...]`: live test with a
   quiet tone; prints the delay parts every half second; `--record-out` saves what Advanced processing played.
+- Bass fix measurements: the harness, scripts and test-clip maker are in the git-ignored `research/advanced/bass/`
+  (`advrender.cpp` renders like `--render-file --advanced` with `advanced_tune` settings; `run.py` renders all clips
+  and measures; `cmp.py` compares setups; `synth.py` makes the made-up bass clips).

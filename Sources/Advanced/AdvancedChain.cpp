@@ -66,6 +66,10 @@ struct Biquad {
         double w = 2 * M_PI * f / sr, al = sin(w) / (2 * q), c = cos(w);
         set((1 + c) / 2, -(1 + c), (1 + c) / 2, 1 + al, -2 * c, 1 - al);
     }
+    void allpass(double f, double q, double sr) {  // gain 1 at every frequency, only the phase turns
+        double w = 2 * M_PI * f / sr, al = sin(w) / (2 * q), c = cos(w);
+        set(1 - al, -2 * c, 1 + al, 1 + al, -2 * c, 1 - al);
+    }
     void peaking(double f, double q, double gdb, double sr) {
         double A = pow(10, gdb / 40), w = 2 * M_PI * f / sr, al = sin(w) / (2 * q), c = cos(w);
         set(1 + al * A, -2 * c, 1 - al * A, 1 + al / A, -2 * c, 1 - al / A);
@@ -86,16 +90,30 @@ struct Biquad {
     }
 };
 
-// Linkwitz-Riley 4th order = two identical Butterworth stages. Its low and high outputs are in phase and add up flat.
+// Two second-order filters in a row. Usually a Linkwitz-Riley 4th order filter (two identical Butterworth stages: its
+// low and high outputs are in phase and add up flat). The fold floor uses two of them for one steep 8th order
+// Butterworth filter, or as a 4th order all-pass (see FilterKind).
+// Butterworth 8 stage Qs: 1 / (2 sin((2k-1) pi / 16)); Butterworth 4: 1 / (2 sin((2k-1) pi / 8)).
+const double BW8Q[4] = {0.50979558, 2.56291545, 0.60134489, 0.89997622}, BW4Q[2] = {0.54119610, 1.30656296};
 struct LR4 {
     Biquad s1, s2;
     void lowpass(double f, double sr) { s1.lowpass(f, M_SQRT1_2, sr); s2 = s1; clear(); }
     void highpass(double f, double sr) { s1.highpass(f, M_SQRT1_2, sr); s2 = s1; clear(); }
+    void bw8(bool high, int half, double f, double sr) {  // half 0 or 1 of a Butterworth 8th order filter
+        if (high) { s1.highpass(f, BW8Q[2 * half], sr); s2.highpass(f, BW8Q[2 * half + 1], sr); }
+        else { s1.lowpass(f, BW8Q[2 * half], sr); s2.lowpass(f, BW8Q[2 * half + 1], sr); }
+        clear();
+    }
+    // All-pass with the phase of a Butterworth 8 split at f (exactly that of an LR8 split, within ~0.3 dB of a B8 one
+    // where it matters), so a band that skipped the split stays in phase with one that went through it.
+    void allpass8(double f, double sr) { s1.allpass(f, BW4Q[0], sr); s2.allpass(f, BW4Q[1], sr); clear(); }
     void clear() { s1.clear(); s2.clear(); }
     inline float run(float x) { return s2.run(s1.run(x)); }
 };
 inline double lrLP(double f, double fc) { double x = f / fc; x *= x; x *= x; return 1.0 / (1.0 + x); }  // |LR4 low-pass|
 inline double lrHP(double f, double fc) { double x = f / fc; x *= x; x *= x; return x / (1.0 + x); }    // |LR4 high-pass|
+inline double bwLP8(double f, double fc) { double x = f / fc; x *= x; x *= x; x *= x; return 1.0 / sqrt(1.0 + x * x); }  // |Butterworth 8 low-pass|
+inline double bwHP8(double f, double fc) { double x = f / fc; x *= x; x *= x; x *= x; return x / sqrt(1.0 + x * x); }    // |Butterworth 8 high-pass|
 
 // One channel of sound kept by absolute sample number (power-of-two size, so the index wraps with a mask).
 struct Ring {
@@ -170,15 +188,26 @@ struct RealFFT {
 
 // ------------------------------------------------------------------------------------------------- recipe
 
-// What feeds a path: a sum of up to 3 "terms"; each term is the input through up to 3 LR4 filters, times a gain.
+// What feeds a path: a sum of up to 3 "terms"; each term is the input through up to 3 filter pairs, times a gain.
 // Example (balanced3 at +8): main = HP150(x) + LP35'(LP300(x)) (the fold floor's sub bass), fold = HP35'(LP300(x)).
 const int MAXTERMS = 3, MAXF = 3;
+// LR4: one Linkwitz-Riley 4th order filter. BW8A + BW8B: the two halves of one Butterworth 8th order filter (BW8A
+// carries its whole gain in mag()). AP8: the all-pass of LR4::allpass8 (gain 1).
+enum FilterKind { LR4F = 0, BW8A = 1, BW8B = 2, AP8 = 3 };
 struct Term {
     float gain = 1;
     int nf = 0;                 // filters in the cascade (0 = the input itself)
     double fc[MAXF] = {};       // corner (Hz)
     bool hp[MAXF] = {};         // high-pass (else low-pass)
-    double mag(double f) const { double m = gain; for (int i = 0; i < nf; i++) m *= hp[i] ? lrHP(f, fc[i]) : lrLP(f, fc[i]); return m; }
+    int kind[MAXF] = {};        // FilterKind
+    double mag(double f) const {
+        double m = gain;
+        for (int i = 0; i < nf; i++) {
+            if (kind[i] == LR4F) m *= hp[i] ? lrHP(f, fc[i]) : lrLP(f, fc[i]);
+            else if (kind[i] == BW8A) m *= hp[i] ? bwHP8(f, fc[i]) : bwLP8(f, fc[i]);
+        }
+        return m;
+    }
 };
 
 struct PathSpec {
@@ -190,8 +219,12 @@ struct PathSpec {
     double outHP = 0;           // 8th-order high-pass on the path's output (Hz), 0 = none (balanced3: 30 Hz on the +4..+6 fold)
     Term &add(float gain) { Term &x = t[nt++]; x.gain = gain; return x; }
 };
-inline Term &lp(Term &x, double f) { x.fc[x.nf] = f; x.hp[x.nf++] = false; return x; }
-inline Term &hp(Term &x, double f) { x.fc[x.nf] = f; x.hp[x.nf++] = true; return x; }
+inline Term &filt(Term &x, double f, bool high, int kind) { x.fc[x.nf] = f; x.hp[x.nf] = high; x.kind[x.nf++] = kind; return x; }
+inline Term &lp(Term &x, double f) { return filt(x, f, false, LR4F); }
+inline Term &hp(Term &x, double f) { return filt(x, f, true, LR4F); }
+inline Term &lp8(Term &x, double f) { return filt(filt(x, f, false, BW8A), f, false, BW8B); }  // steep Butterworth 8
+inline Term &hp8(Term &x, double f) { return filt(filt(x, f, true, BW8A), f, true, BW8B); }
+inline Term &ap8(Term &x, double f) { return filt(x, f, false, AP8); }
 
 struct Spec {           // the recipe for one amount N
     double N = 0;
@@ -248,6 +281,9 @@ struct Chain {
 struct TonalEQ {
     double sr = 48000, tau = 4, boost = 9, cut = 9, alpha = 1, lowcap = 6, midcap = 6, shelfLo = 44;
     double loF = 100, loCut = 15;        // balanced3: below 100 Hz the target is not smoothed and may cut up to 15 dB
+    bool loUp = false;                   // ... also going up (recipe 3 = 2.0.0). Off: going up, the bass is treated like
+                                         // the rest (smoothed over +-1 band, cuts up to 9 dB), so the EQ doesn't cut
+                                         // bass notes just because the shift moved them to a band the original had empty
     int smooth = 1, N = 16384, period = 2048;
 #if ADVANCED_VDSP
     FFTSetup setup = nullptr; int log2n = 14;
@@ -445,8 +481,8 @@ struct Engine {
     int PIECE = 512;      // largest piece handed to a shifter at once
     double range = 24;
     // tunables (see AdvancedTuning.h)
-    int recipe = 3, fold2 = 1, floor2 = 1; double airMin = 7000; int catchup = 2; double fadeMs = 80, foldStart = 3, foldFull = 7;
-    double floorHz = 35, floorOut = 30;
+    int recipe = 4, fold2 = 1, floor2 = 1; double airMin = 7000; int catchup = 2; double fadeMs = 80, foldStart = 3, foldFull = 7;
+    double floorHz = 45, floorEndHz = 35, floor2Hz = 35, floorOut = 30;
     int64_t fadeLen = 3840, prerollLen = 1024;
 
     std::vector<std::unique_ptr<Shifter>> pool;
@@ -554,6 +590,13 @@ struct Engine {
 
     // ---------------------------------------------------------------- the rule for any N
 
+    // The fold floor at amount N (recipe 4): floorHz up to +8, then easing to floorEndHz at +11. At +9..+11 the fold
+    // moves the bass down only 1-3 half-steps, so a 41 Hz bass note may fold to 37-39 Hz instead of jumping up 9-11.
+    double floorAt(double N) const {
+        if (recipe != 4 || N <= 8) return floorHz;
+        return floorHz + (floorEndHz - floorHz) * std::min(1.0, (N - 8) / 3);
+    }
+
     // The recipe for amount N ("balanced3", research round 4, extended to +-24 by the numbers in the engine report):
     //  N = 0      the input, untouched.
     //  N < 0      shift the whole input by N; above the air cut-off max(15 kHz x 2^(N/12), 7 kHz) use the unshifted input.
@@ -561,8 +604,14 @@ struct Engine {
     //  3 < N < 7  fold ramp that splits by frequency: t = (N-3)/4; main = above 150t Hz, shifted by N;
     //             fold = below 300t Hz, shifted by N-12, with a 30 Hz high-pass on its output.
     //  7 <= N <= 15  main = above 150 Hz (N); fold = below 300 Hz (N-12; at exactly +12 not shifted, only delayed).
-    //  Fold floor (folds that move down, +3 < N < +12): fold-band bass that would land below 35 Hz,
-    //             i.e. below 35 x 2^((12-N)/12) Hz, goes to the main path instead.
+    //  Fold floor (folds that move down, +3 < N < +12): fold-band bass that would land below F = 45 Hz (easing to
+    //             35 Hz from +8 to +11, see floorAt), i.e. below FX = F x 2^((12-N)/12) Hz, goes to the main path
+    //             instead (so it is shifted up by N).
+    //             The split at FX is a steep 8th order Butterworth: its two sides keep the full power between them
+    //             (they end up an octave apart, so they add as powers), and a note goes almost entirely one way.
+    //             The main path's band above 150t Hz goes through the all-pass of that split, so its two parts stay
+    //             in phase and never cancel each other. (recipe 3 = 2.0.0: floor at 35 Hz, LR4 splits, which lost up
+    //             to 3 dB of a note near the split and leaked the EDM sub bass down to 32 Hz.)
     //  15 < N < 19  second fold comes in the same way: t2 = (N-15)/4; fold2 = below 600t2 Hz shifted by N-24;
     //             fold = 300t2..300 Hz (N-12); main as before. (3 shifters only here.)
     //  19 <= N <= 24  main = above 150 Hz (N); fold2 = below 600 Hz (N-24; at +24 only delayed). Two octaves overlap,
@@ -589,6 +638,16 @@ struct Engine {
         if (N <= 15 || !fold2) {  // one fold
             double t = std::min(1.0, (N - foldStart) / (foldFull - foldStart));
             double FH = 150 * t, FL = 300 * t;
+            if (recipe == 4 && N < 12) {  // fold floor with a steep, power-keeping split
+                double FX = floorAt(N) * pow(2.0, (12 - N) / 12.0);
+                PathSpec &m = path(N); m.coherent = true;
+                ap8(hp(m.add(1), FH), FX);   // above FH, in phase with the sub below
+                lp8(lp(m.add(1), FH), FX);   // the sub below FX
+                PathSpec &f = path(N - 12);
+                hp8(lp(f.add(1), FL), FX);   // FX..FL is folded
+                if (N < foldFull) f.outHP = floorOut;
+                return s;
+            }
             PathSpec &m = path(N); hp(m.add(1), FH);
             PathSpec &f = path(N - 12); Term &ft = lp(f.add(1), FL);
             if (recipe == 3 && N < 12) {  // fold floor
@@ -606,7 +665,7 @@ struct Engine {
         if (t2 < 1) { f1 = &path(N - 12); hp(lp(f1->add(1), 300), x); }
         PathSpec &f2 = path(N - 24); Term &ft = lp(f2.add(1), 2 * x);
         if (floor2 && N < 24) {  // its sub bass goes one level up: to the first fold while it is there, else to main
-            double FX = floorHz * pow(2.0, (24 - N) / 12.0);
+            double FX = floor2Hz * pow(2.0, (24 - N) / 12.0);
             PathSpec &up = f1 ? *f1 : m;
             lp(lp(up.add(1), 2 * x), FX);
             hp(ft, FX);
@@ -655,8 +714,12 @@ struct Engine {
             for (int i = 0; i < p.spec.nt; i++)
                 for (int k = 0; k < p.spec.t[i].nf; k++)
                     for (int c = 0; c < nch; c++) {
-                        if (p.spec.t[i].hp[k]) p.filt[i][k][c].highpass(p.spec.t[i].fc[k], sr);
-                        else p.filt[i][k][c].lowpass(p.spec.t[i].fc[k], sr);
+                        const Term &tm = p.spec.t[i];
+                        LR4 &fl = p.filt[i][k][c];
+                        if (tm.kind[k] == AP8) fl.allpass8(tm.fc[k], sr);
+                        else if (tm.kind[k] == BW8A || tm.kind[k] == BW8B) fl.bw8(tm.hp[k], tm.kind[k] == BW8B, tm.fc[k], sr);
+                        else if (tm.hp[k]) fl.highpass(tm.fc[k], sr);
+                        else fl.lowpass(tm.fc[k], sr);
                     }
             if (p.spec.outHP > 0)
                 for (int k = 0; k < 4; k++) for (int c = 0; c < nch; c++) { p.outF[k][c].highpass(p.spec.outHP, M_SQRT1_2, sr); p.outF[k][c].clear(); }
@@ -864,6 +927,7 @@ struct Engine {
             for (size_t j = 0; j < E.fcs.size(); j++) { E.pqs[j] = a2 * E.pqs[j] + (1 - a2) * E.pq[j]; E.pcs[j] = a2 * E.pcs[j] + (1 - a2) * E.pcur[j]; }
         }
         double mx = *std::max_element(E.pref.begin(), E.pref.end());
+        double loF = (c->spec.N > 0 && !E.loUp) ? 0.0 : E.loF;  // the deeper bass cuts: going down only (see loUp)
         double ramp = std::min(1.0, (double)E.blocks2 * E.period / sr / (2 * E.tau));
         size_t nb = E.fcs.size();
         for (size_t j = 0; j < nb; j++) {
@@ -871,14 +935,14 @@ struct Engine {
             if (E.blocks2 > 0) d += ramp * std::max(-3.0, std::min(3.0, 10 * log10((E.pqs[j] + 1e-20) / (E.pcs[j] + 1e-20))));
             if (E.pref[j] < mx * 1e-6 && E.pq[j] < mx * 1e-6) d = 0;
             if (E.pref[j] < mx * 1e-6 && E.pcur[j] < mx * 1e-6) d = 0;  // both quiet: leave alone
-            bool lo = E.loF > 0 && E.fcs[j] < E.loF;  // balanced3: deeper cuts allowed below 100 Hz
+            bool lo = loF > 0 && E.fcs[j] < loF;  // balanced3: deeper cuts allowed below 100 Hz
             E.T[j] = E.alpha * std::max(lo ? -E.loCut : -E.cut, std::min(E.boost, d));
             if (E.fcs[j] < 70) E.T[j] = std::min(E.T[j], E.lowcap);
         }
         for (int j = 0; j < (int)nb; j++) {  // broad target only: average over +-1 band (not below loF)
             double s = 0; int n = 0;
             for (int q = std::max(0, j - E.smooth); q <= std::min((int)nb - 1, j + E.smooth); q++) { s += E.T[q]; n++; }
-            E.S[j] = (E.loF > 0 && E.fcs[j] < E.loF) ? E.T[j] : s / n;
+            E.S[j] = (loF > 0 && E.fcs[j] < loF) ? E.T[j] : s / n;
         }
         // least squares, then two correction passes on the true filter response
         for (int k = 0; k < NEQ; k++) { E.g[k] = 0; for (size_t j = 0; j < nb; j++) E.g[k] += E.M[k][j] * E.S[j]; }
@@ -890,7 +954,7 @@ struct Engine {
         }
         int steps = E.period / 32;
         for (int k = 0; k < NEQ; k++) {
-            double cutk = (E.loF > 0 && E.eqf[k] < E.loF) ? E.loCut : E.cut;  // the 44 Hz shelf and 62 Hz filter: deeper cut
+            double cutk = (loF > 0 && E.eqf[k] < loF) ? E.loCut : E.cut;  // the 44 Hz shelf and 62 Hz filter: deeper cut
             double gk = std::max(-cutk - 3, std::min((k <= 1 ? std::min(E.boost, E.lowcap) : E.boost) + 3, E.g[k]));
             if (k >= 3 && k <= 7) gk = std::max(-E.midcap, std::min(E.midcap, gk));
             if (c->eqFresh) { c->eqApplied[k] = gk; c->eqInc[k] = 0; }
@@ -1053,10 +1117,17 @@ void advanced_get_info(const AdvancedChain *chain, AdvancedInfo *info) {
 int advanced_tune(AdvancedChain *chain, const char *key, double v) {
     Engine *e = chain->e;
     std::string k(key);
-    if (k == "recipe") { e->recipe = (int)v; if (v == 2) { e->eq.loF = 0; e->eq.loCut = 9; } else { e->eq.loF = 100; e->eq.loCut = 15; } }
+    if (k == "recipe") {
+        e->recipe = (int)v;
+        if (v == 2) { e->eq.loF = 0; e->eq.loCut = 9; } else { e->eq.loF = 100; e->eq.loCut = 15; }
+        e->eq.loUp = v <= 3;
+        e->floorHz = v == 4 ? 45 : 35;
+    }
     else if (k == "limiter") e->lim.enabled = v != 0;
     else if (k == "floor2") e->floor2 = (int)v;
     else if (k == "floorhz") e->floorHz = v;
+    else if (k == "floor2hz") e->floor2Hz = v;
+    else if (k == "floorendhz") e->floorEndHz = v;
     else if (k == "floorout") e->floorOut = v;
     else if (k == "fold2") e->fold2 = (int)v;
     else if (k == "airmin") e->airMin = v;
