@@ -19,7 +19,7 @@ if(MSVC)
   add_compile_options(/utf-8 /permissive- /EHsc /W3)
 endif()
 if(WIN32)
-  add_compile_definitions(UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _USE_MATH_DEFINES)
+  add_compile_definitions(UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _USE_MATH_DEFINES _WIN32_WINNT=0x0A00)
 endif()
 
 include(FetchContent)
@@ -101,6 +101,7 @@ if(WIN32)
     tool/tonegen.cpp
     tool/diag.cpp
     tool/probe.cpp)
+  target_include_directories(PitchShiftTool PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(PitchShiftTool PRIVATE ps_win)
 
   # Put everything in one folder (build/out/Release) so it's easy to find and pack.
