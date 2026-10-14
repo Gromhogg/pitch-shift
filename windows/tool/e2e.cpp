@@ -645,7 +645,8 @@ int e2e_crash(const Args& args) {
     auto a = start_player(L"--freq 440 --amp 0.25 --seconds 900", r);
     wait_session(a->pid());
     auto h = start_host(a->pid());
-    r.check("host_quieted_app", wait_volumes(a->pid(), kQuietLevel, 15), volumes_of(a->pid()), "the app was made quiet");
+    const bool quieted = wait_volumes(a->pid(), kQuietLevel, 15);
+    r.check("host_quieted_app", quieted, volumes_of(a->pid()), "the app was made quiet");
     h->kill();
     const auto t0 = std::chrono::steady_clock::now();
     const bool back = wait_volumes(a->pid(), 1.0f, 10);
@@ -654,7 +655,8 @@ int e2e_crash(const Args& args) {
 
     say("2. the quiet app quits, then Pitch Shift ends suddenly");
     auto h2 = start_host(a->pid());
-    r.check("host_quieted_again", wait_volumes(a->pid(), kQuietLevel, 15), volumes_of(a->pid()), "");
+    const bool quieted_again = wait_volumes(a->pid(), kQuietLevel, 15);
+    r.check("host_quieted_again", quieted_again, volumes_of(a->pid()), "");
     a->kill();
     sleep_s(1.0);
     h2->kill();
