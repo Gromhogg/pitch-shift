@@ -5,6 +5,11 @@
 //   --test-voice [--mic NAME] [--tone 440 | --file F] [--steps 3] [--cartoon] [--seconds S] [--out F.caf]
 //                                              sends a tone or file through the voice chain and records Pitch Shift Mic
 //   --test-button [--volume 0.03]              presses Test with a quiet tone as the voice (record 5 s, play back)
+//   --test ... --advanced [--record-out F.wav] [--steps-at "3:8,6:-5"]
+//                                              "What you hear" with Advanced processing on (--watch prints the delay;
+//                                              --record-out saves what it played; --steps-at changes the amount live)
+//   --render-file IN OUT [--steps 5] [--advanced] [--steps-at "4:8,8:-5"]
+//                                              shifts a sound file with the app's own code (normal or advanced)
 import AppKit
 import AVFoundation
 import CoreAudio
@@ -70,11 +75,46 @@ if args.contains("--list") {
     exit(0)
 }
 
+if let input = arg("--render-file") {
+    let i = args.firstIndex(of: "--render-file")!
+    guard i + 2 < args.count else { print("usage: --render-file IN OUT [--steps N] [--advanced]"); exit(1) }
+    // "4:8,8:-5" = at 4 s go to +8, at 8 s go to -5
+    let changes: [(Double, Float)] = (arg("--steps-at") ?? "").split(separator: ",").compactMap { item in
+        let parts = item.split(separator: ":")
+        guard parts.count == 2, let t = Double(parts[0]), let n = Float(parts[1]) else { return nil }
+        return (t, n)
+    }
+    let started = Date()
+    do {
+        try renderFile(input: input, output: args[i + 2], halfSteps: arg("--steps").flatMap(Float.init) ?? 2,
+                       advanced: args.contains("--advanced"), changes: changes)
+        print(String(format: "wrote %@ (%.1f s)", args[i + 2], Date().timeIntervalSince(started)))
+        exit(0)
+    } catch {
+        print("render failed: \((error as? Problem)?.message ?? "\(error)")")
+        exit(1)
+    }
+}
+
 if args.contains("--test") {
     let source: HearSource = args.contains("--all") ? .all : HearSource(saved: arg("--app") ?? "com.apple.Music")
-    let shifter = HearShifter(halfSteps: arg("--steps").flatMap(Float.init) ?? 2, source: source)
+    let shifter = HearShifter(halfSteps: arg("--steps").flatMap(Float.init) ?? 2, source: source, advanced: args.contains("--advanced"))
     shifter.testPID = arg("--pid").flatMap { pid_t($0) }
     let seconds = arg("--seconds").flatMap(Double.init) ?? 3
+    // --record-out F (Advanced processing only): saves what it played. --steps-at "2:8,4:-5": change the amount live.
+    let recordPath = arg("--record-out")
+    if recordPath != nil { shifter.testRecordSeconds = seconds + 1 }
+    for item in (arg("--steps-at") ?? "").split(separator: ",") {
+        let parts = item.split(separator: ":")
+        guard parts.count == 2, let t = Double(parts[0]), let n = Float(parts[1]) else { continue }
+        DispatchQueue.main.asyncAfter(deadline: .now() + t) { shifter.halfSteps = n }
+    }
+    func finish() {
+        print("test: \(shifter.report)")
+        if let recordPath { shifter.saveTestRecording(to: recordPath); print("wrote \(recordPath)") }
+        shifter.stop()
+        exit(0)
+    }
     onQuitSignals { shifter.stop(); exit(0) }
     shifter.start()
     if args.contains("--watch") {  // print the delay every half second
@@ -82,18 +122,10 @@ if args.contains("--test") {
         Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
             print(String(format: "%5.1fs  ", Date().timeIntervalSince(started)) + shifter.timing)
         }
-        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
-            print("test: \(shifter.report)")
-            shifter.stop()
-            exit(0)
-        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { finish() }
         RunLoop.main.run()
     }
-    DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
-        print("test: \(shifter.report)")
-        shifter.stop()
-        exit(0)
-    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { finish() }
     dispatchMain()
 }
 

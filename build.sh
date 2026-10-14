@@ -14,8 +14,16 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/Contents/PlugIns"
 ./driver/build.sh
 ditto build/PitchShiftMic.driver "$app/Contents/PlugIns/PitchShiftMic.driver"
 
+# The C and C++ parts: the sound ring and the Advanced processing engine (Sources/Advanced).
+rm -rf build/obj
+mkdir -p build/obj
+clang -O2 -c Sources/AudioRing.c -o build/obj/AudioRing.o
+for f in Sources/Advanced/*.cpp; do
+  clang++ -O2 -std=c++17 -I/opt/homebrew/include -c "$f" -o "build/obj/${f:t:r}.o"
+done
+
 # Rubber Band (brew install rubberband) is built into the app, so the app works on its own.
-swiftc -O -swift-version 5 Sources/*.swift -o "$app/Contents/MacOS/PitchShift" \
+swiftc -O -swift-version 5 Sources/*.swift build/obj/*.o -o "$app/Contents/MacOS/PitchShift" \
   -import-objc-header Sources/Bridging.h -I/opt/homebrew/include \
   -Xlinker /opt/homebrew/lib/librubberband.a -Xlinker /opt/homebrew/opt/libsamplerate/lib/libsamplerate.a \
   -lc++ -framework Accelerate

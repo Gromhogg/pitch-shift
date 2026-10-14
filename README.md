@@ -43,6 +43,7 @@ More help: [windows/README.md](windows/README.md).
 
 - Pick an app, or **All sound**.
 - Click the big number to type an exact amount, like `2.5` or `-1.25`. 12 is one octave. Or use **−**, **0** and **+**.
+- Turn on **Advanced processing** for music at bigger amounts: going up, the bass stays deep; going down, the top stays bright. A new amount takes a moment longer to kick in.
 
 **Your voice**
 
@@ -78,6 +79,7 @@ brew install rubberband
 ## How it works
 
 - **What you hear:** a macOS audio tap grabs the app's sound and mutes the original. [Rubber Band](https://breakfastquay.com/rubberband/) changes the pitch, and the result plays on your current speakers or headphones. It never changes your Mac's sound settings.
+- **Advanced processing:** going up, the bass is shifted an octave less so it stays bass; going down, the song's very top is kept; and a slow tone control keeps the song's overall balance like the original's. Details: [notes/advanced-processing-research.md](notes/advanced-processing-research.md).
 - **Your voice:** your mic goes through Rubber Band's low-delay live shifter into "Pitch Shift Mic", a virtual mic built from [BlackHole](https://github.com/ExistentialAudio/BlackHole). It only runs while an app is listening to Pitch Shift Mic.
 
 ## Credits and license

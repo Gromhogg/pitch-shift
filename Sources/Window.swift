@@ -754,7 +754,7 @@ final class ShiftCard: NSView {
 }
 
 enum Keys {
-    static let hearOn = "hearOn", hearSource = "hearSource", halfSteps = "halfSteps"
+    static let hearOn = "hearOn", hearSource = "hearSource", halfSteps = "halfSteps", hearAdvanced = "hearAdvanced"
     static let voiceOn = "voiceOn", voiceSteps = "voiceSteps", voiceNatural = "voiceNatural", voiceMic = "voiceMic"
 }
 
@@ -762,7 +762,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     let defaults = UserDefaults.standard
     lazy var hear = HearShifter(
         halfSteps: defaults.object(forKey: Keys.halfSteps) as? Float ?? 2,
-        source: HearSource(saved: defaults.string(forKey: Keys.hearSource) ?? defaults.string(forKey: "source")))
+        source: HearSource(saved: defaults.string(forKey: Keys.hearSource) ?? defaults.string(forKey: "source")),
+        advanced: defaults.bool(forKey: Keys.hearAdvanced))
     lazy var voice = VoiceShifter(
         halfSteps: defaults.object(forKey: Keys.voiceSteps) as? Float ?? 3,
         natural: defaults.object(forKey: Keys.voiceNatural) as? Bool ?? true,
@@ -772,6 +773,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     var window: NSWindow!
     var hearCard: ShiftCard!
     var voiceCard: ShiftCard!
+    let advancedSwitch = GradientSwitch()
     let style = NSSegmentedControl(labels: ["Natural", "Cartoon"], trackingMode: .selectOne, target: nil, action: nil)
     let testButton = NSButton(title: "Test", target: nil, action: nil)
     let dot = StatusDot()
@@ -876,6 +878,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             self?.defaults.set(value, forKey: Keys.halfSteps)
             self?.refresh()
         }
+        // Advanced processing (music): keeps the song balanced at big shifts.
+        advancedSwitch.onChange = { [weak self] on in
+            self?.hear.advanced = on
+            self?.defaults.set(on, forKey: Keys.hearAdvanced)
+        }
+        hearCard.addRow(ShiftCard.switchRow("Advanced processing", advancedSwitch))
 
         style.target = self
         style.action = #selector(stylePicked)
@@ -928,7 +936,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         background.addSubview(voiceCard)
 
         // Tab goes through one card, then the other.
-        let order = hearCard.keyViews + voiceCard.keyViews + [style, testButton, installButton]
+        let order = hearCard.keyViews + [advancedSwitch] + voiceCard.keyViews + [style, testButton, installButton]
         background.nextKeyView = order[0]
         for (view, next) in zip(order, order.dropFirst() + [order[0]]) { view.nextKeyView = next }
 
@@ -1301,6 +1309,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let voiceOn = preview.map { $0.contains("voice-on") } ?? voice.isOn
         let waiting = preview.map { $0.contains("waiting") } ?? (hear.state == .waiting)
         hearCard.show(on: hearOn, value: hear.halfSteps, active: hearOn, waiting: waiting)
+        advancedSwitch.isOn = hear.advanced
         switch hear.state {
         case .playing(let speakers): hearCard.amount.toolTip = "Playing to \(speakers)"
         case .problem(let message): hearCard.amount.toolTip = message
