@@ -755,6 +755,7 @@ final class ShiftCard: NSView {
 
 enum Keys {
     static let hearOn = "hearOn", hearSource = "hearSource", halfSteps = "halfSteps", hearAdvanced = "hearAdvanced"
+    static let hideAdvancedAlert = "hideAdvancedAlert"  // "Don't show again" was ticked
     static let voiceOn = "voiceOn", voiceSteps = "voiceSteps", voiceNatural = "voiceNatural", voiceMic = "voiceMic"
 }
 
@@ -878,11 +879,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             self?.defaults.set(value, forKey: Keys.halfSteps)
             self?.refresh()
         }
-        // Advanced processing (music): keeps the song balanced at big shifts.
-        advancedSwitch.onChange = { [weak self] on in
-            self?.hear.advanced = on
-            self?.defaults.set(on, forKey: Keys.hearAdvanced)
-        }
+        // Advanced processing (music): keeps the song balanced at big shifts. Turning it on asks first.
+        advancedSwitch.onChange = { [weak self] on in self?.advancedPicked(on) }
         hearCard.addRow(ShiftCard.switchRow("Advanced processing", advancedSwitch))
 
         style.target = self
@@ -1185,6 +1183,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     @objc func testClicked() { test.click() }
 
+    // MARK: Advanced processing
+
+    private var advancedAlert: NSAlert?
+
+    // Turning it on shows an alert first (it adds delay), unless "Don't show again" was ticked.
+    func advancedPicked(_ on: Bool) {
+        if on && !defaults.bool(forKey: Keys.hideAdvancedAlert) {
+            askAdvanced()
+            return
+        }
+        hear.advanced = on
+        defaults.set(on, forKey: Keys.hearAdvanced)
+    }
+
+    // A sheet on the window: Turn On, or Cancel (the switch goes back off and nothing is saved).
+    func askAdvanced() {
+        guard advancedAlert == nil else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Advanced processing may cause significant audio delay"
+        alert.informativeText = "Sound may lag behind video. It's made for music."
+        alert.addButton(withTitle: "Turn On").bezelColor = Theme.purple
+        alert.addButton(withTitle: "Cancel")
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = "Don't show again"
+        advancedAlert = alert
+        alert.beginSheetModal(for: window) { [weak self] answer in
+            guard let self else { return }
+            advancedAlert = nil
+            if answer == .alertFirstButtonReturn && preview == nil {  // pictures change nothing
+                if alert.suppressionButton?.state == .on { defaults.set(true, forKey: Keys.hideAdvancedAlert) }
+                hear.advanced = true
+                defaults.set(true, forKey: Keys.hearAdvanced)
+            }
+            refresh()  // shows the switch as it really is (off after Cancel)
+        }
+    }
+
     // MARK: Switches
 
     func setHear(_ on: Bool) {
@@ -1248,7 +1284,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     // MARK: Showing state
 
     // For screenshots (--preview hear-on,voice-on,waiting,typing,recording,playing,listening,hover,menu,roll,
-    // resize,no-driver,light [--size 800x400]): shows a state, no sound.
+    // resize,no-driver,advanced-alert,light [--size 800x400]): shows a state, no sound.
     func showPreview() {
         guard let preview else { return }
         if preview.contains("light") { window.appearance = NSAppearance(named: .aqua) }
@@ -1271,6 +1307,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
         if preview.contains("menu") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.hearCard.picker.performClick(nil) }
+        }
+        if preview.contains("advanced-alert") {  // the alert shown when Advanced processing is turned on
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.advancedSwitch.isOn = true
+                self.askAdvanced()
+            }
         }
         if preview.contains("resize") {  // grows the window tall, so the cards move one above the other
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
@@ -1309,7 +1351,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let voiceOn = preview.map { $0.contains("voice-on") } ?? voice.isOn
         let waiting = preview.map { $0.contains("waiting") } ?? (hear.state == .waiting)
         hearCard.show(on: hearOn, value: hear.halfSteps, active: hearOn, waiting: waiting)
-        advancedSwitch.isOn = hear.advanced
+        if advancedAlert == nil { advancedSwitch.isOn = hear.advanced }  // stays on while the alert asks
         switch hear.state {
         case .playing(let speakers): hearCard.amount.toolTip = "Playing to \(speakers)"
         case .problem(let message): hearCard.amount.toolTip = message

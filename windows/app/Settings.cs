@@ -19,6 +19,7 @@ public sealed class Settings
     public List<HearApp> HearApps { get; set; } = new();
     public double HearSteps { get; set; } = 2;
     public bool HearAdvanced { get; set; }      // "Advanced processing" (made for music)
+    public bool HideAdvancedAlert { get; set; } // "Don't show again" was ticked on its alert
 
     public bool VoiceOn { get; set; }
     public double VoiceSteps { get; set; } = 3;

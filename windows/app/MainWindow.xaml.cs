@@ -28,6 +28,7 @@ public partial class MainWindow : Window
     bool updatingMics;
     bool restartNeeded;  // only for pictures (--preview restart); live, the engine says (cable.restart_needed)
     bool settingUp;
+    bool askingAdvanced;  // the "Advanced processing" alert is open
     bool dirty;
     DateTime dirtySince, lastSlowCheck;
     VoiceAction action;
@@ -66,6 +67,8 @@ public partial class MainWindow : Window
         // Checked/Unchecked (not Click), so screen readers and the UI checks can switch it too.
         AdvancedSwitch.Checked += (_, _) => AdvancedPicked(true);
         AdvancedSwitch.Unchecked += (_, _) => AdvancedPicked(false);
+        AdvancedAlertTurnOn.Click += (_, _) => CloseAdvancedAlert(turnOn: true);
+        AdvancedAlertCancel.Click += (_, _) => CloseAdvancedAlert(turnOn: false);
 
         VoiceCard.Toggled += on =>
         {
@@ -138,6 +141,7 @@ public partial class MainWindow : Window
             if (preview.Has("typing")) HearCard.Amount.BeginEditing("2.5");
             if (preview.Has("hover")) HearCard.Amount.Hover(true);
             if (preview.Has("menu")) OpenHearMenu();
+            if (preview.Has("advanced-alert")) AdvancedSwitch.IsChecked = true;  // as if clicked: shows the alert
             if (screenshotPath is not null) await TakeScreenshotAndQuit();
             return;
         }
@@ -221,7 +225,8 @@ public partial class MainWindow : Window
 
         var waiting = s.HearOn && st.MusicState == "waiting";
         HearCard.Show(on: s.HearOn, value: s.HearSteps, active: s.HearOn, waiting: waiting);
-        if (AdvancedSwitch.IsChecked != s.HearAdvanced) AdvancedSwitch.IsChecked = s.HearAdvanced;
+        var advancedOn = s.HearAdvanced || askingAdvanced;  // stays on while the alert asks
+        if (AdvancedSwitch.IsChecked != advancedOn) AdvancedSwitch.IsChecked = advancedOn;
         HearCard.Amount.Hint = st.MusicState == "error" ? st.MusicError
             : waiting ? WaitingTip()
             : s.HearOn && st.MusicState == "running" && st.MusicSpeaker.Length > 0 ? "Playing to " + st.MusicSpeaker
@@ -383,12 +388,63 @@ public partial class MainWindow : Window
     }
 
     // "Advanced processing" (made for music). Switching makes a new player in the engine.
+    // Turning it on shows an alert first (it adds delay), unless "Don't show again" was ticked.
     void AdvancedPicked(bool on)
     {
+        if (askingAdvanced)
+        {
+            if (!on) CloseAdvancedAlert(turnOn: false);  // switched off another way (a screen reader) while asking
+            return;
+        }
         if (settings.HearAdvanced == on) return;  // shown from the settings, not a click
+        if (on && !settings.HideAdvancedAlert)
+        {
+            ShowAdvancedAlert();
+            return;
+        }
+        SetAdvanced(on);
+    }
+
+    void SetAdvanced(bool on)
+    {
         settings.HearAdvanced = on;
         if (preview is null) Engine.HearAdvanced(on);
         Changed();
+    }
+
+    // The alert over the window. Enter = Turn On, Esc = Cancel.
+    void ShowAdvancedAlert()
+    {
+        askingAdvanced = true;
+        AdvancedAlertHide.IsChecked = false;
+        AdvancedAlertTurnOn.IsDefault = true;
+        AdvancedAlertCancel.IsCancel = true;
+        AdvancedAlert.BeginAnimation(OpacityProperty, null);
+        AdvancedAlert.Opacity = 0;
+        AdvancedAlert.Visibility = Visibility.Visible;
+        Motion.To(AdvancedAlert, OpacityProperty, 1, 0.15);
+        Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() => AdvancedAlertTurnOn.Focus()));
+    }
+
+    // Turn On: takes effect (and remembers "Don't show again"). Cancel: the switch goes back off, nothing saved.
+    void CloseAdvancedAlert(bool turnOn)
+    {
+        if (!askingAdvanced) return;
+        askingAdvanced = false;
+        var hadFocus = AdvancedAlert.IsKeyboardFocusWithin;
+        AdvancedAlertTurnOn.IsDefault = false;
+        AdvancedAlertCancel.IsCancel = false;
+        AdvancedAlert.Visibility = Visibility.Collapsed;
+        if (turnOn)
+        {
+            if (AdvancedAlertHide.IsChecked == true) settings.HideAdvancedAlert = true;
+            SetAdvanced(true);
+        }
+        else
+        {
+            Refresh();
+        }
+        if (hadFocus) AdvancedSwitch.Focus();
     }
 
     void HearSourceChanged()

@@ -21,6 +21,7 @@ public sealed class SettingsTests : IDisposable
         Assert.Empty(s.HearApps);
         Assert.Equal(2, s.HearSteps);
         Assert.False(s.HearAdvanced);
+        Assert.False(s.HideAdvancedAlert);  // the alert shows until "Don't show again" is ticked
         Assert.False(s.VoiceOn);
         Assert.Equal(3, s.VoiceSteps);
         Assert.True(s.VoiceNatural);
@@ -37,6 +38,7 @@ public sealed class SettingsTests : IDisposable
             HearAll = false,
             HearSteps = -1.25,
             HearAdvanced = true,
+            HideAdvancedAlert = true,
             VoiceOn = true,
             VoiceSteps = 7.5,
             VoiceNatural = false,
@@ -53,6 +55,7 @@ public sealed class SettingsTests : IDisposable
         Assert.False(back.HearAll);
         Assert.Equal(-1.25, back.HearSteps);
         Assert.True(back.HearAdvanced);
+        Assert.True(back.HideAdvancedAlert);
         Assert.True(back.VoiceOn);
         Assert.Equal(7.5, back.VoiceSteps);
         Assert.False(back.VoiceNatural);

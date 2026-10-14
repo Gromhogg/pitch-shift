@@ -21,7 +21,7 @@ func arg(_ name: String) -> String? {
 }
 // --preview STATES [--size 800x400]: show the window in a state for screenshots, without touching any sound
 // (states: hear-on, voice-on, waiting, typing, recording, playing, listening, hover, menu, roll, resize, no-driver,
-// light).
+// advanced-alert, light).
 let preview = arg("--preview")
 
 var signalSources: [DispatchSourceSignal] = []
