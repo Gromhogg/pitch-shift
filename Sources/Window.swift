@@ -309,6 +309,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var footer: NSStackView!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Keep the colorful icon in the Dock (macOS's dark icon style would otherwise turn it grey).
+        if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"), let icon = NSImage(contentsOf: url) {
+            NSApp.applicationIconImage = icon
+        }
         buildMenu()
         buildWindow()
         hear.onChange = { [weak self] in self?.refresh() }
