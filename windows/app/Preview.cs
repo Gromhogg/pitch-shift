@@ -3,8 +3,8 @@ using System.IO;
 namespace PitchShift;
 
 // For pictures of the window (used by the GitHub checks): shows a made-up state and makes no sound.
-//   PitchShift.exe --preview hear-on,voice-on,cartoon --screenshot shot.png [--theme dark] [--scale 2]
-// States: hear-on, voice-on, all, two-apps, waiting, cartoon, typing, recording, playing, in-use,
+//   PitchShift.exe --preview hear-on,voice-on,cartoon --screenshot shot.png [--theme dark] [--scale 2] [--size 900x450]
+// States: hear-on, voice-on, all, two-apps, waiting, cartoon, typing, hover, recording, playing, listening (in-use),
 //         repair, restart, allow-mic, no-mic, menu.
 sealed class Preview
 {
@@ -51,7 +51,7 @@ sealed class Preview
         MusicState = Has("hear-on") ? (Has("waiting") ? "waiting" : "running") : "off",
         VoiceState = Has("allow-mic") ? "mic_denied" : Has("voice-on") ? "running" : "off",
         CablePresent = !(Has("repair") || Has("restart")),
-        InUse = Has("in-use"),
+        InUse = Has("in-use") || Has("listening"),
         TestState = Has("recording") ? "recording" : Has("playing") ? "playing" : "idle",
         TestSecondsLeft = 3,
     };

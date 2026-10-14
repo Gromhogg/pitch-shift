@@ -24,15 +24,32 @@ $states = [ordered]@{
     'allow-mic' = 'hear-on,voice-on,allow-mic'
     'no-mic'    = 'hear-on,no-mic'
     'menu'      = 'hear-on,voice-on,menu'
+    'hover'     = 'hear-on,voice-on,hover'
+    'listening' = 'hear-on,voice-on,listening,recording,waiting'
+}
+# Window sizes (inside the frame), like the Mac pictures: wide, largest, tall (cards stacked), narrow, wide and short.
+$sizes = [ordered]@{
+    'wide'       = '900x452'
+    'largest'    = '1000x640'
+    'tall'       = '600x640'
+    'narrow'     = '306x640'
+    'wide-short' = '1000x352'
 }
 $failed = 0
+function Take([string]$File, [string[]]$Arguments) {
+    $p = Start-Process -FilePath $Exe -ArgumentList ($Arguments + @('--scale', "$Scale", '--screenshot', "`"$File`"")) -PassThru
+    if (-not $p.WaitForExit(60000)) { $p.Kill(); Write-Host "Timed out: $File"; return $false }
+    if ((Test-Path $File) -and $p.ExitCode -eq 0) { Write-Host "Saved $File"; return $true }
+    Write-Host "No picture: $File, exit $($p.ExitCode)"
+    return $false
+}
 foreach ($theme in 'light', 'dark') {
     foreach ($name in $states.Keys) {
-        $file = Join-Path $Out "$name-$theme.png"
-        $arguments = @('--preview', "`"$($states[$name])`"", '--theme', $theme, '--scale', "$Scale", '--screenshot', "`"$file`"")
-        $p = Start-Process -FilePath $Exe -ArgumentList $arguments -PassThru
-        if (-not $p.WaitForExit(60000)) { $p.Kill(); Write-Host "Timed out: $name ($theme)"; $failed++; continue }
-        if ((Test-Path $file) -and $p.ExitCode -eq 0) { Write-Host "Saved $file" } else { Write-Host "No picture: $name ($theme), exit $($p.ExitCode)"; $failed++ }
+        if (-not (Take (Join-Path $Out "$name-$theme.png") @('--preview', "`"$($states[$name])`"", '--theme', $theme))) { $failed++ }
+    }
+    foreach ($name in $sizes.Keys) {
+        $file = Join-Path $Out "size-$name-$theme.png"
+        if (-not (Take $file @('--preview', 'hear-on,voice-on', '--theme', $theme, '--size', $sizes[$name]))) { $failed++ }
     }
 }
 $log = Join-Path $env:LOCALAPPDATA 'Pitch Shift\app-log.txt'

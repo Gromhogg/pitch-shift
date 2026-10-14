@@ -5,80 +5,80 @@
         Title="Pitch Shift (beta)"
         Icon="AppIcon.ico"
         SizeToContent="WidthAndHeight"
-        ResizeMode="CanMinimize"
+        ResizeMode="CanResize"
         WindowStartupLocation="CenterScreen"
         Background="{DynamicResource PsWindowBack}"
         UseLayoutRounding="True"
         TextOptions.TextFormattingMode="Display">
-    <Grid x:Name="Root" Background="{DynamicResource PsWindowBack}">
-        <StackPanel Orientation="Horizontal" Margin="20">
+    <!-- The cards are placed by code (MainWindow.Arrange): side by side, or one above the other in a tall,
+         narrow window, and everything grows with the window. -->
+    <Canvas x:Name="Root" Background="{DynamicResource PsWindowBack}" ClipToBounds="True">
 
-            <!-- What you hear -->
-            <local:ShiftCard x:Name="HearCard" Key="Hear" Title="What you hear">
-                <StackPanel>
-                    <Button x:Name="HearPicker" AutomationProperties.AutomationId="HearPicker"
-                            AutomationProperties.Name="Apps" Height="32" Padding="10,0,8,0"
-                            HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
-                        <DockPanel LastChildFill="True">
-                            <TextBlock DockPanel.Dock="Right" Text="&#xE70D;" FontFamily="{StaticResource PsIcons}"
-                                       FontSize="10" VerticalAlignment="Center" Margin="8,0,0,0" Opacity="0.8" />
-                            <Grid DockPanel.Dock="Left" Width="16" Height="16" Margin="0,0,8,0" VerticalAlignment="Center">
-                                <Image x:Name="HearPickerIcon" Width="16" Height="16" />
-                                <TextBlock x:Name="HearPickerGlyph" Text="&#xE767;" FontFamily="{StaticResource PsIcons}"
-                                           FontSize="14" VerticalAlignment="Center" HorizontalAlignment="Center" />
-                            </Grid>
-                            <TextBlock x:Name="HearPickerText" Text="All sound" TextTrimming="CharacterEllipsis"
-                                       VerticalAlignment="Center" />
-                        </DockPanel>
-                    </Button>
-                    <!-- Room here for a future "Advanced processing" switch. -->
-                </StackPanel>
-            </local:ShiftCard>
-
-            <!-- Your voice -->
-            <local:ShiftCard x:Name="VoiceCard" Key="Voice" Title="Your voice" Margin="16,0,0,0">
-                <StackPanel>
-                    <ComboBox x:Name="MicPicker" AutomationProperties.AutomationId="MicPicker"
-                              AutomationProperties.Name="Microphone" Height="32" HorizontalAlignment="Stretch">
-                        <ComboBox.ItemTemplate>
-                            <DataTemplate>
-                                <StackPanel Orientation="Horizontal">
-                                    <TextBlock Text="&#xE720;" FontFamily="{StaticResource PsIcons}" FontSize="14"
-                                               VerticalAlignment="Center" Margin="0,0,8,0" />
-                                    <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" MaxWidth="180"
-                                               VerticalAlignment="Center" />
-                                </StackPanel>
-                            </DataTemplate>
-                        </ComboBox.ItemTemplate>
-                    </ComboBox>
-
-                    <DockPanel Margin="0,12,0,0" LastChildFill="True">
-                        <Button x:Name="TestButton" DockPanel.Dock="Right" Width="76" Height="30" Margin="8,0,0,0"
-                                Style="{StaticResource PsTestButton}" AutomationProperties.AutomationId="TestButton"
-                                AutomationProperties.Name="Test" Content="Test" />
-                        <Border x:Name="StyleBox" Background="{DynamicResource PsSegmentBack}" CornerRadius="6" Padding="2" Height="30">
-                            <UniformGrid Columns="2">
-                                <RadioButton x:Name="NaturalButton" GroupName="VoiceStyle" Style="{StaticResource PsSegment}"
-                                             AutomationProperties.AutomationId="StyleNatural" Content="Natural" />
-                                <RadioButton x:Name="CartoonButton" GroupName="VoiceStyle" Style="{StaticResource PsSegment}"
-                                             AutomationProperties.AutomationId="StyleCartoon" Content="Cartoon" />
-                            </UniformGrid>
-                        </Border>
+        <!-- What you hear -->
+        <local:ShiftCard x:Name="HearCard" Key="Hear" Title="What you hear">
+            <StackPanel>
+                <Button x:Name="HearPicker" AutomationProperties.AutomationId="HearPicker"
+                        AutomationProperties.Name="Apps" Padding="10,0,8,0"
+                        HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch">
+                    <DockPanel LastChildFill="True">
+                        <TextBlock x:Name="HearPickerChevron" DockPanel.Dock="Right" Text="&#xE70D;" FontFamily="{StaticResource PsIcons}"
+                                   FontSize="10" VerticalAlignment="Center" Margin="8,0,0,0" Opacity="0.8" />
+                        <Grid x:Name="HearPickerIconBox" DockPanel.Dock="Left" Width="16" Height="16" Margin="0,0,8,0" VerticalAlignment="Center">
+                            <Image x:Name="HearPickerIcon" Width="16" Height="16" />
+                            <TextBlock x:Name="HearPickerGlyph" Text="&#xE767;" FontFamily="{StaticResource PsIcons}"
+                                       FontSize="14" VerticalAlignment="Center" HorizontalAlignment="Center" />
+                        </Grid>
+                        <TextBlock x:Name="HearPickerText" Text="All sound" TextTrimming="CharacterEllipsis"
+                                   VerticalAlignment="Center" />
                     </DockPanel>
+                </Button>
+                <!-- Room below for a future "Advanced processing" switch row. -->
+            </StackPanel>
+        </local:ShiftCard>
 
-                    <Grid Margin="0,12,0,0" MinHeight="28">
-                        <StackPanel x:Name="MicStatus" Orientation="Horizontal" VerticalAlignment="Center"
-                                    AutomationProperties.AutomationId="MicStatus">
-                            <Ellipse x:Name="MicDot" Width="8" Height="8" Fill="{DynamicResource PsDotOff}"
-                                     VerticalAlignment="Center" Margin="2,1,6,0" />
-                            <TextBlock Text="Pitch Shift Mic" FontSize="12" Foreground="{DynamicResource PsTextSecondary}"
-                                       VerticalAlignment="Center" />
-                        </StackPanel>
-                        <Button x:Name="ActionButton" AutomationProperties.AutomationId="ActionButton"
-                                HorizontalAlignment="Left" Height="28" Padding="10,0" Visibility="Collapsed" />
+        <!-- Your voice -->
+        <local:ShiftCard x:Name="VoiceCard" Key="Voice" Title="Your voice">
+            <StackPanel>
+                <ComboBox x:Name="MicPicker" AutomationProperties.AutomationId="MicPicker"
+                          AutomationProperties.Name="Microphone" HorizontalAlignment="Stretch">
+                    <ComboBox.ItemTemplate>
+                        <DataTemplate>
+                            <DockPanel LastChildFill="True">
+                                <TextBlock Text="&#xE720;" FontFamily="{StaticResource PsIcons}" FontSize="14"
+                                           VerticalAlignment="Center" Margin="0,0,8,0" />
+                                <TextBlock Text="{Binding Name}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                            </DockPanel>
+                        </DataTemplate>
+                    </ComboBox.ItemTemplate>
+                </ComboBox>
+
+                <DockPanel x:Name="StyleRow" LastChildFill="True">
+                    <Grid x:Name="TestBox" DockPanel.Dock="Right">
+                        <Button x:Name="TestButton" Style="{StaticResource PsTestButton}" AutomationProperties.AutomationId="TestButton"
+                                AutomationProperties.Name="Test" Content="Test" ToolTip="Record 5 seconds, then play it back" />
                     </Grid>
-                </StackPanel>
-            </local:ShiftCard>
-        </StackPanel>
-    </Grid>
+                    <Border x:Name="StyleBox" Background="{DynamicResource PsSegmentBack}" CornerRadius="6" Padding="2">
+                        <UniformGrid Columns="2">
+                            <RadioButton x:Name="NaturalButton" GroupName="VoiceStyle" Style="{StaticResource PsSegment}"
+                                         AutomationProperties.AutomationId="StyleNatural" Content="Natural" />
+                            <RadioButton x:Name="CartoonButton" GroupName="VoiceStyle" Style="{StaticResource PsSegment}"
+                                         AutomationProperties.AutomationId="StyleCartoon" Content="Cartoon" />
+                        </UniformGrid>
+                    </Border>
+                </DockPanel>
+
+                <Grid x:Name="Footer">
+                    <StackPanel x:Name="MicStatus" Orientation="Horizontal" VerticalAlignment="Center" Background="Transparent"
+                                AutomationProperties.AutomationId="MicStatus"
+                                ToolTip="Choose Pitch Shift Mic as the microphone in Discord, Zoom or any app">
+                        <local:StatusDot x:Name="MicDot" VerticalAlignment="Center" Margin="2,1,6,0" />
+                        <TextBlock x:Name="MicStatusText" Text="Pitch Shift Mic" Foreground="{DynamicResource PsTextSecondary}"
+                                   VerticalAlignment="Center" />
+                    </StackPanel>
+                    <Button x:Name="ActionButton" AutomationProperties.AutomationId="ActionButton"
+                            HorizontalAlignment="Left" Padding="10,0" Visibility="Collapsed" />
+                </Grid>
+            </StackPanel>
+        </local:ShiftCard>
+    </Canvas>
 </Window>

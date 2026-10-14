@@ -32,9 +32,11 @@ public partial class MainWindow : Window
     bool dirty;
     DateTime dirtySince, lastSlowCheck;
     VoiceAction action;
+    string testPhase = "idle";
     ContextMenu? hearMenu;
 
-    internal MainWindow(Settings settings, string? settingsPath, Preview? preview, string? screenshotPath, double screenshotScale)
+    internal MainWindow(Settings settings, string? settingsPath, Preview? preview, string? screenshotPath, double screenshotScale,
+        Size? askedSize = null)
     {
         this.settings = settings;
         this.settingsPath = settingsPath;
@@ -42,6 +44,12 @@ public partial class MainWindow : Window
         this.screenshotPath = screenshotPath;
         this.screenshotScale = screenshotScale;
         InitializeComponent();
+
+        // Sizes: each card's rows grow with the window (see MainWindow.Layout.cs).
+        HearCard.Scaled += ScaleHearRows;
+        VoiceCard.Scaled += ScaleVoiceRows;
+        ScaleHearRows(HearCard.Scale);
+        ScaleVoiceRows(VoiceCard.Scale);
 
         HearCard.Toggled += on =>
         {
@@ -89,7 +97,11 @@ public partial class MainWindow : Window
             settings.WindowTop = Math.Round(Top);
             SaveSoon();
         };
-        SourceInitialized += (_, _) => Theme.DarkTitleBar(this);
+        SourceInitialized += (_, _) =>
+        {
+            Theme.DarkTitleBar(this);
+            HookResizing();
+        };
         ContentRendered += (_, _) => Started();
         timer.Tick += (_, _) => Tick();
 
@@ -100,6 +112,13 @@ public partial class MainWindow : Window
         }
         RefreshMics(force: true);
         Refresh();
+
+        // The first size: given (pictures), remembered, or the smallest.
+        MeasureCards();
+        var start = StartSize(askedSize);
+        Root.Width = start.Width;
+        Root.Height = start.Height;
+        ArrangeCards(start);
     }
 
     // ---------- Starting ----------
@@ -111,9 +130,11 @@ public partial class MainWindow : Window
         if (started) return;
         started = true;
         timer.Start();
+        if (screenshotPath is null) BecomeResizable();
         if (preview is not null)
         {
             if (preview.Has("typing")) HearCard.Amount.BeginEditing("2.5");
+            if (preview.Has("hover")) HearCard.Amount.Hover(true);
             if (preview.Has("menu")) OpenHearMenu();
             if (screenshotPath is not null) await TakeScreenshotAndQuit();
             return;
@@ -210,8 +231,9 @@ public partial class MainWindow : Window
         var s = settings;
         var st = status;
 
-        HearCard.Show(on: s.HearOn, value: s.HearSteps, active: s.HearOn, waiting: s.HearOn && st.MusicState == "waiting");
-        HearCard.Amount.Hint = st.MusicState == "error" ? st.MusicError : "";
+        var waiting = s.HearOn && st.MusicState == "waiting";
+        HearCard.Show(on: s.HearOn, value: s.HearSteps, active: s.HearOn, waiting: waiting);
+        HearCard.Amount.Hint = st.MusicState == "error" ? st.MusicError : waiting ? WaitingTip() : "";
         ShowHearTitle();
 
         var cable = st.CablePresent ?? true;
@@ -226,37 +248,45 @@ public partial class MainWindow : Window
         StyleBox.IsEnabled = s.VoiceOn && canWork;
         StyleBox.Opacity = StyleBox.IsEnabled ? 1 : 0.45;
 
-        // Test button.
-        TestButton.Content = PickerText.TestTitle(st.TestState, st.TestSecondsLeft);
-        AutomationProperties.SetName(TestButton, (string)TestButton.Content);
-        switch (st.TestState)
+        // Test button: purple "Test", red "● 3" while recording, "■ Stop" while playing back. Fades between them.
+        var title = PickerText.TestTitle(st.TestState, st.TestSecondsLeft);
+        if (st.TestState != testPhase)
         {
-            case "recording":
-                TestButton.SetResourceReference(BackgroundProperty, "PsSegmentBack");
-                TestButton.Foreground = Theme.Red;
-                TestButton.IsEnabled = true;
-                break;
-            case "playing":
-                TestButton.SetResourceReference(BackgroundProperty, "PsSegmentBack");
-                TestButton.SetResourceReference(ForegroundProperty, "PsText");
-                TestButton.IsEnabled = true;
-                break;
-            default:
-                TestButton.ClearValue(BackgroundProperty);
-                TestButton.ClearValue(ForegroundProperty);
-                TestButton.IsEnabled = s.VoiceOn && canWork;
-                break;
+            Motion.Crossfade(TestButton, 0.2);
+            testPhase = st.TestState;
         }
+        TestButton.Content = title;
+        AutomationProperties.SetName(TestButton, st.TestState switch
+        {
+            "recording" => $"Recording, {Math.Max(1, st.TestSecondsLeft)} seconds left. Stop",
+            "playing" => "Stop playing",
+            _ => "Test",
+        });
+        if (st.TestState == "recording") TestButton.Background = Theme.Red;
+        else TestButton.ClearValue(BackgroundProperty);
+        TestButton.IsEnabled = st.TestState != "idle" || (s.VoiceOn && canWork);
 
-        // "● Pitch Shift Mic" (green while a call app uses it), or the one button that's needed.
-        action = PickerText.Action(st, restartNeeded);
-        ActionButton.Visibility = action == VoiceAction.None ? Visibility.Collapsed : Visibility.Visible;
-        ActionButton.Content = PickerText.ActionTitle(action);
+        // "● Pitch Shift Mic" (green and pulsing while a call app listens), or the one button that's needed.
+        var nextAction = PickerText.Action(st, restartNeeded);
+        ActionButton.Content = PickerText.ActionTitle(nextAction);
         ActionButton.IsEnabled = !settingUp;
-        MicStatus.Visibility = action == VoiceAction.None ? Visibility.Visible : Visibility.Hidden;
-        if (s.VoiceOn && st.InUse) MicDot.Fill = Theme.Green;
-        else MicDot.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, "PsDotOff");
-        AutomationProperties.SetName(MicStatus, s.VoiceOn && st.InUse ? "Pitch Shift Mic in use" : "Pitch Shift Mic");
+        if (nextAction != action)
+        {
+            action = nextAction;
+            ActionButton.Visibility = action == VoiceAction.None ? Visibility.Collapsed : Visibility.Visible;
+            MicStatus.Visibility = action == VoiceAction.None ? Visibility.Visible : Visibility.Collapsed;
+            RowsChanged();
+        }
+        var live = s.VoiceOn && canWork && st.InUse;
+        MicDot.IsLive = live;
+        MicStatus.ToolTip = live ? "An app is using Pitch Shift Mic" : "Choose Pitch Shift Mic as the microphone in Discord, Zoom or any app";
+        AutomationProperties.SetName(MicStatus, live ? "Pitch Shift Mic, in use" : "Pitch Shift Mic, not in use");
+    }
+
+    string WaitingTip()
+    {
+        var names = settings.HearApps.Select(a => a.Name).ToList();
+        return settings.HearAll || names.Count == 0 ? "Waiting for sound" : "Waiting for sound from " + string.Join(", ", names);
     }
 
     // ---------- What you hear: the app picker ----------
@@ -281,10 +311,10 @@ public partial class MainWindow : Window
         if (HearCard.Amount.IsEditing) HearCard.Amount.Finish(apply: true);
         var sources = preview?.Sources() ?? EngineJson.Sources(Engine.SourcesJson());
         var running = new HashSet<string>(status.MusicApps.Where(a => a.Running).Select(a => a.Exe), StringComparer.OrdinalIgnoreCase);
-        var entries = sources.Select(s => (s.Exe, s.Name, Running: true)).ToList();
+        var entries = sources.Select(s => (s.Exe, s.Name, Running: true, s.Playing)).ToList();
         foreach (var app in settings.HearApps)
             if (!entries.Any(e => string.Equals(e.Exe, app.Exe, StringComparison.OrdinalIgnoreCase)))
-                entries.Add((app.Exe, app.Name, preview is not null || running.Contains(app.Exe)));
+                entries.Add((app.Exe, app.Name, preview is not null || running.Contains(app.Exe), false));
         entries.Sort((a, b) => string.Compare(a.Name, b.Name, StringComparison.CurrentCultureIgnoreCase));
 
         var menu = new ContextMenu
@@ -306,11 +336,11 @@ public partial class MainWindow : Window
         };
         menu.Items.Add(all);
         if (entries.Count > 0) menu.Items.Add(new Separator());
-        foreach (var (exe, name, isRunning) in entries)
+        foreach (var (exe, name, isRunning, playing) in entries)
         {
-            var item = MenuEntry(name, AppIcons.For(exe), glyph: null, ticked: settings.IsTicked(exe), dim: !isRunning);
+            var item = MenuEntry(name, AppIcons.For(exe), glyph: null, ticked: settings.IsTicked(exe), dim: !isRunning, playing: playing);
             item.StaysOpenOnClick = true;  // tick several in a row
-            item.ToolTip = exe;
+            item.ToolTip = playing ? "Playing now" : null;
             item.Click += (_, _) =>
             {
                 settings.ToggleApp(exe, name);
@@ -325,7 +355,8 @@ public partial class MainWindow : Window
         menu.IsOpen = true;
     }
 
-    static MenuItem MenuEntry(string name, ImageSource? icon, string? glyph, bool ticked, bool dim)
+    // One line in the app menu: icon, name, and a small green dot when the app is playing sound right now.
+    static MenuItem MenuEntry(string name, ImageSource? icon, string? glyph, bool ticked, bool dim, bool playing = false)
     {
         var row = new StackPanel { Orientation = Orientation.Horizontal };
         FrameworkElement picture = icon is not null
@@ -344,8 +375,18 @@ public partial class MainWindow : Window
         picture.Opacity = dim ? 0.4 : 1;
         row.Children.Add(picture);
         row.Children.Add(new TextBlock { Text = name, VerticalAlignment = VerticalAlignment.Center, Opacity = dim ? 0.55 : 1 });
+        if (playing)
+            row.Children.Add(new System.Windows.Shapes.Ellipse
+            {
+                Width = 6,
+                Height = 6,
+                Fill = Theme.Green,
+                Margin = new Thickness(7, 1, 0, 0),
+                VerticalAlignment = VerticalAlignment.Center,
+            });
         var item = new MenuItem { Header = row, IsCheckable = true, IsChecked = ticked };
         AutomationProperties.SetName(item, name);
+        if (playing) AutomationProperties.SetHelpText(item, "Playing now");
         return item;
     }
 

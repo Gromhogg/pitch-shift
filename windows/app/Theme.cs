@@ -16,12 +16,13 @@ static class Theme
     public static readonly Brush PurpleBrush = Frozen(new SolidColorBrush(Purple));
     public static readonly Brush MidBrush = Frozen(new SolidColorBrush(Mid));
     public static readonly Brush Gradient = Frozen(new LinearGradientBrush(Purple, Pink, new Point(0, 0.5), new Point(1, 0.5)));
-    public static readonly Brush Red = Frozen(new SolidColorBrush(Color.FromRgb(232, 60, 60)));
+    public static readonly Brush Red = Frozen(new SolidColorBrush(Color.FromRgb(235, 72, 68)));
     public static readonly Brush Green = Frozen(new SolidColorBrush(Color.FromRgb(52, 199, 89)));
 
     // null = follow Windows; true/false = forced dark/light (for screenshots).
     public static bool? Forced { get; set; }
     public static bool IsDark { get; private set; }
+    public static event Action? Changed;  // light/dark switched
 
     static T Frozen<T>(T brush) where T : Freezable
     {
@@ -61,7 +62,10 @@ static class Theme
         Set("PsSegmentBack", Color.FromRgb(234, 234, 234), Color.FromRgb(58, 58, 58));
         Set("PsSegmentHover", Color.FromRgb(222, 222, 222), Color.FromRgb(70, 70, 70));
         Set("PsDotOff", Color.FromRgb(180, 180, 180), Color.FromRgb(110, 110, 110));
+        // The soft shape behind the big number: the text color at 7%.
+        Set("PsPill", Color.FromArgb(18, 27, 27, 27), Color.FromArgb(18, 255, 255, 255));
         foreach (Window w in app.Windows) DarkTitleBar(w);
+        Changed?.Invoke();
     }
 
     // Makes the title bar match (dark title bar in dark mode).

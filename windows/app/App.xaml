@@ -24,60 +24,7 @@
         </LinearGradientBrush>
 
         <FontFamily x:Key="PsIcons">Segoe Fluent Icons, Segoe MDL2 Assets</FontFamily>
-
-        <!-- On/off switch: gradient track when on, grey when off, white knob. -->
-        <Style x:Key="PsSwitch" TargetType="ToggleButton">
-            <Setter Property="Width" Value="40" />
-            <Setter Property="Height" Value="22" />
-            <Setter Property="Cursor" Value="Hand" />
-            <Setter Property="Template">
-                <Setter.Value>
-                    <ControlTemplate TargetType="ToggleButton">
-                        <Grid x:Name="Root" Background="Transparent">
-                            <Border x:Name="Track" CornerRadius="11" Background="{DynamicResource PsTrackOff}" />
-                            <Border x:Name="Fill" CornerRadius="11" Background="{StaticResource PsGradient}" Opacity="0" />
-                            <Ellipse x:Name="Knob" Width="16" Height="16" Fill="White" HorizontalAlignment="Left" Margin="3,0,0,0">
-                                <Ellipse.RenderTransform>
-                                    <TranslateTransform x:Name="Slide" X="0" />
-                                </Ellipse.RenderTransform>
-                                <Ellipse.Effect>
-                                    <DropShadowEffect BlurRadius="3" ShadowDepth="1" Direction="270" Opacity="0.3" />
-                                </Ellipse.Effect>
-                            </Ellipse>
-                            <Border x:Name="Focus" CornerRadius="13" Margin="-2" BorderThickness="2" BorderBrush="{DynamicResource PsText}" Visibility="Collapsed" />
-                        </Grid>
-                        <ControlTemplate.Triggers>
-                            <Trigger Property="IsChecked" Value="True">
-                                <Trigger.EnterActions>
-                                    <BeginStoryboard>
-                                        <Storyboard>
-                                            <DoubleAnimation Storyboard.TargetName="Slide" Storyboard.TargetProperty="X" To="18" Duration="0:0:0.15" />
-                                            <DoubleAnimation Storyboard.TargetName="Fill" Storyboard.TargetProperty="Opacity" To="1" Duration="0:0:0.15" />
-                                        </Storyboard>
-                                    </BeginStoryboard>
-                                </Trigger.EnterActions>
-                                <Trigger.ExitActions>
-                                    <BeginStoryboard>
-                                        <Storyboard>
-                                            <DoubleAnimation Storyboard.TargetName="Slide" Storyboard.TargetProperty="X" To="0" Duration="0:0:0.15" />
-                                            <DoubleAnimation Storyboard.TargetName="Fill" Storyboard.TargetProperty="Opacity" To="0" Duration="0:0:0.15" />
-                                        </Storyboard>
-                                    </BeginStoryboard>
-                                </Trigger.ExitActions>
-                            </Trigger>
-                            <Trigger Property="IsKeyboardFocused" Value="True">
-                                <Setter TargetName="Focus" Property="Visibility" Value="Visible" />
-                            </Trigger>
-                            <Trigger Property="IsEnabled" Value="False">
-                                <Setter TargetName="Root" Property="Opacity" Value="0.4" />
-                                <Setter Property="Cursor" Value="Arrow" />
-                            </Trigger>
-                        </ControlTemplate.Triggers>
-                    </ControlTemplate>
-                </Setter.Value>
-            </Setter>
-            <Setter Property="FocusVisualStyle" Value="{x:Null}" />
-        </Style>
+        <SolidColorBrush x:Key="PsPill" Color="#121B1B1B" />
 
         <!-- Natural | Cartoon: the chosen half is filled with the middle color. -->
         <Style x:Key="PsSegment" TargetType="RadioButton">
@@ -108,7 +55,7 @@
             </Setter>
         </Style>
 
-        <!-- The Test button: filled purple; plain while recording or playing. -->
+        <!-- The Test button: filled purple; red while recording. -->
         <Style x:Key="PsTestButton" TargetType="Button">
             <Setter Property="Background" Value="{StaticResource PsPurple}" />
             <Setter Property="Foreground" Value="White" />
@@ -121,7 +68,7 @@
                             <Border x:Name="Back" CornerRadius="5" Background="{TemplateBinding Background}" />
                             <Border x:Name="Shine" CornerRadius="5" Background="White" Opacity="0" />
                             <Border x:Name="Focus" CornerRadius="6" Margin="-2" BorderThickness="2" BorderBrush="{DynamicResource PsText}" Visibility="Collapsed" />
-                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="8,5" />
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="6,0" />
                         </Grid>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">

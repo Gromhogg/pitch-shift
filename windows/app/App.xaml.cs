@@ -10,6 +10,7 @@ namespace PitchShift;
 //   --diag [--out file]             write a diagnostics report (Desktop by default)
 //   --preview states --screenshot f picture of a made-up state, no sound (see Preview.cs)
 //   --theme light|dark              force light or dark colors
+//   --size WxH                      start with this window size (inside the frame)
 //   --shot file                     ask the running Pitch Shift for a picture of its window
 public partial class App : Application
 {
@@ -51,7 +52,11 @@ public partial class App : Application
         var scale = double.TryParse(args.Get("--scale"), System.Globalization.NumberStyles.Float,
             System.Globalization.CultureInfo.InvariantCulture, out var s) && s is > 0 and <= 4 ? s : 1;
         var settings = preview?.Settings() ?? Settings.Load(Settings.DefaultPath);
-        window = new MainWindow(settings, preview is null ? Settings.DefaultPath : null, preview, args.Get("--screenshot"), scale);
+        Size? size = null;
+        var sizeText = args.Get("--size")?.Split('x', 'X');
+        if (sizeText is { Length: 2 } && double.TryParse(sizeText[0], out var sw) && double.TryParse(sizeText[1], out var sh))
+            size = new Size(sw, sh);
+        window = new MainWindow(settings, preview is null ? Settings.DefaultPath : null, preview, args.Get("--screenshot"), scale, size);
         if (preview is null)
         {
             Tray = new Tray(ShowWindow, Quit);

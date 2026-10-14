@@ -164,7 +164,7 @@ sealed class Smoke(string appExe, string toolExe, string outDir, string sourceNa
             Find(window, "StyleCartoon")?.Patterns.SelectionItem.Pattern.Select();
             Check("Cartoon reaches the engine", WaitFor(() => Status()?["voice"]?["natural"]?.GetValue<bool>() == false ? "" : null, TimeSpan.FromSeconds(3)) is not null);
             Find(window, "TestButton")?.AsButton().Invoke();
-            var recording = WaitFor(() => Find(window, "TestButton")?.Name is string n && n.StartsWith("●") ? n : null, TimeSpan.FromSeconds(3));
+            var recording = WaitFor(() => Find(window, "TestButton")?.Name is string n && n.StartsWith("Recording") ? n : null, TimeSpan.FromSeconds(3));
             Check("Test shows the red countdown", recording is not null, Find(window, "TestButton")?.Name);
             Shot(window, "voice-test");
             Find(window, "TestButton")?.AsButton().Invoke();
@@ -174,6 +174,33 @@ sealed class Smoke(string appExe, string toolExe, string outDir, string sourceNa
             Check("voice switch off", WaitFor(() => Status()?["voice"]?["state"]?.GetValue<string>() == "off" ? "" : null, TimeSpan.FromSeconds(5)) is not null);
             var micAfter = WaitFor(() => DefaultMic() == micBefore ? micBefore : null, TimeSpan.FromSeconds(6));
             Check("the real default mic is given back", micAfter is not null || micBefore is null, $"{DefaultMic()} (before: {micBefore})");
+        }
+
+        // ---------- Resizing: bigger window, bigger everything; tall and narrow: cards one above the other ----------
+        var transform = window.Patterns.Transform.PatternOrDefault;
+        Check("window can be resized", transform?.CanResize.ValueOrDefault == true);
+        if (transform?.CanResize.ValueOrDefault == true)
+        {
+            var start = window.BoundingRectangle;
+            var smallNumber = Find(window, "HearAmount")?.BoundingRectangle.Height ?? 0;
+            transform.Resize(1000, 560);
+            Thread.Sleep(1000);
+            Shot(window, "resized-big");
+            var hear = Find(window, "HearSwitch")?.BoundingRectangle ?? default;
+            var voice = Find(window, "VoiceSwitch")?.BoundingRectangle ?? default;
+            var bigNumber = Find(window, "HearAmount")?.BoundingRectangle.Height ?? 0;
+            Check("big window: cards side by side", voice.Left > hear.Right && Math.Abs(voice.Top - hear.Top) < 5, $"{hear} / {voice}");
+            Check("big window: the number grows", bigNumber > smallNumber * 1.2, $"{smallNumber} -> {bigNumber}");
+            transform.Resize(380, 1000);
+            Thread.Sleep(1000);
+            Shot(window, "resized-tall");
+            hear = Find(window, "HearSwitch")?.BoundingRectangle ?? default;
+            voice = Find(window, "VoiceSwitch")?.BoundingRectangle ?? default;
+            Check("tall narrow window: cards one above the other", voice.Top > hear.Bottom + 50, $"{hear} / {voice}");
+            var size = window.BoundingRectangle;
+            Check("window stops at its largest size", size.Height < 760, $"{size.Width}x{size.Height}");
+            transform.Resize(start.Width, start.Height);
+            Thread.Sleep(800);
         }
 
         // ---------- Its own picture through the running copy ----------
