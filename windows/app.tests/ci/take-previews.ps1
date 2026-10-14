@@ -29,6 +29,8 @@ $states = [ordered]@{
     # "Advanced processing" switch on (the pictures above show it off), with the card on and off.
     'advanced'          = 'hear-on,voice-on,cartoon,advanced'
     'advanced-hear-off' = 'voice-on,advanced'
+    # The alert shown when "Advanced processing" is turned on (it may add delay).
+    'advanced-alert'    = 'hear-on,voice-on,cartoon,advanced-alert'
 }
 # Window sizes (inside the frame), like the Mac pictures: wide, largest, tall (cards stacked), narrow, wide and short.
 $sizes = [ordered]@{
@@ -56,6 +58,8 @@ foreach ($theme in 'light', 'dark') {
     }
     # The biggest window with "Advanced processing" on (its row grows with everything else).
     if (-not (Take (Join-Path $Out "size-largest-advanced-$theme.png") @('--preview', 'hear-on,voice-on,advanced', '--theme', $theme, '--size', $sizes['largest']))) { $failed++ }
+    # The alert in the narrowest window (it has to fit).
+    if (-not (Take (Join-Path $Out "size-narrow-advanced-alert-$theme.png") @('--preview', 'hear-on,voice-on,advanced-alert', '--theme', $theme, '--size', $sizes['narrow']))) { $failed++ }
 }
 $log = Join-Path $env:LOCALAPPDATA 'Pitch Shift\app-log.txt'
 if (Test-Path $log) { Write-Host '--- app log ---'; Get-Content $log | Write-Host }

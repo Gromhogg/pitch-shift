@@ -157,7 +157,29 @@ sealed class Smoke(string appExe, string toolExe, string outDir, string sourceNa
         Check("Advanced processing switch is there", advanced?.Name == "Advanced processing", advanced?.Name);
         Check("Advanced processing starts off", advanced?.AsToggleButton().ToggleState == ToggleState.Off, advanced?.AsToggleButton().ToggleState);
         Shot(window, "advanced-off");
+        // Turning it on shows an alert first (it may add delay). Cancel: stays off, nothing saved (even a ticked box).
         Toggle(window, "AdvancedSwitch");
+        Check("turning Advanced processing on shows the alert", WaitAlert(window, true));
+        Check("the alert's title", Find(window, "AdvancedAlertTitle")?.Name == "Advanced processing may cause significant audio delay",
+            Find(window, "AdvancedAlertTitle")?.Name);
+        Thread.Sleep(500);
+        Check("nothing changes before an answer", Status()?["music"]?["advanced"]?.GetValue<bool>() == false, Status()?["music"]?["advanced"]);
+        Shot(window, "advanced-alert");
+        Find(window, "AdvancedAlertHide")?.Patterns.Toggle.Pattern.Toggle();
+        Find(window, "AdvancedAlertCancel")?.AsButton().Invoke();
+        Check("Cancel closes the alert", WaitAlert(window, false));
+        Check("Cancel puts the switch back off",
+            WaitFor(() => Find(window, "AdvancedSwitch")?.AsToggleButton().ToggleState == ToggleState.Off ? "" : null, TimeSpan.FromSeconds(3)) is not null,
+            Find(window, "AdvancedSwitch")?.AsToggleButton().ToggleState);
+        Thread.Sleep(500);
+        Check("Cancel leaves the engine as it was", Status()?["music"]?["advanced"]?.GetValue<bool>() == false, Status()?["music"]?["advanced"]);
+        // On again: the alert comes back. Tick "Don't show again", then Turn On.
+        Toggle(window, "AdvancedSwitch");
+        Check("the alert shows again after Cancel", WaitAlert(window, true));
+        Find(window, "AdvancedAlertHide")?.Patterns.Toggle.Pattern.Toggle();
+        Check("\"Don't show again\" ticked", Find(window, "AdvancedAlertHide")?.Patterns.Toggle.Pattern.ToggleState.Value == ToggleState.On);
+        Find(window, "AdvancedAlertTurnOn")?.AsButton().Invoke();
+        Check("Turn On closes the alert", WaitAlert(window, false));
         Check("Advanced processing on reaches the engine",
             WaitFor(() => Status()?["music"]?["advanced"]?.GetValue<bool>() == true ? "" : null, TimeSpan.FromSeconds(5)) is not null,
             Status()?["music"]?["advanced"]);
@@ -168,8 +190,11 @@ sealed class Smoke(string appExe, string toolExe, string outDir, string sourceNa
         Check("Advanced processing off reaches the engine",
             WaitFor(() => Status()?["music"]?["advanced"]?.GetValue<bool>() == false && Status()?["music"]?["advanced_engine"] is null ? "" : null, TimeSpan.FromSeconds(10)) is not null,
             Status()?["music"]?.ToJsonString());
-        // On again: it should be saved and come back after a restart (checked below).
+        Check("turning it off shows no alert", !AlertShown(window));
+        // On again, with no alert this time ("Don't show again"). It should be saved and come back after a restart (checked below).
         Toggle(window, "AdvancedSwitch");
+        Thread.Sleep(500);
+        Check("\"Don't show again\" is remembered: no alert", !AlertShown(window));
         Check("Advanced processing on again",
             WaitFor(() => Status()?["music"]?["advanced"]?.GetValue<bool>() == true ? "" : null, TimeSpan.FromSeconds(5)) is not null,
             Status()?["music"]?["advanced"]);
@@ -257,6 +282,7 @@ sealed class Smoke(string appExe, string toolExe, string outDir, string sourceNa
         Check("settings saved: amount", saved?["hearSteps"]?.GetValue<double>() == -1.25, saved?["hearSteps"]);
         Check("settings saved: ticked app", saved?["hearApps"]?.AsArray().Count == 1 && saved?["hearAll"]?.GetValue<bool>() == false, saved?["hearApps"]?.ToJsonString());
         Check("settings saved: Advanced processing", saved?["hearAdvanced"]?.GetValue<bool>() == true, saved?["hearAdvanced"]);
+        Check("settings saved: \"Don't show again\"", saved?["hideAdvancedAlert"]?.GetValue<bool>() == true, saved?["hideAdvancedAlert"]);
         if (hasMic) Check("settings saved: Cartoon", saved?["voiceNatural"]?.GetValue<bool>() == false, saved?["voiceNatural"]);
 
         // ---------- Quit puts everything back ----------
@@ -283,6 +309,7 @@ sealed class Smoke(string appExe, string toolExe, string outDir, string sourceNa
             Check("Advanced processing given to the engine at start",
                 WaitFor(() => Status()?["music"]?["advanced"]?.GetValue<bool>() == true ? "" : null, TimeSpan.FromSeconds(5)) is not null,
                 Status()?["music"]?["advanced"]);
+            Check("no alert when Advanced processing comes back on at start", !AlertShown(window2));
             Shot(window2, "dark");
         }
         Process.Start(appExe, "--quit").WaitForExit(30000);
@@ -370,6 +397,12 @@ sealed class Smoke(string appExe, string toolExe, string outDir, string sourceNa
             Thread.Sleep(200);
         }
     }
+
+    // The "Advanced processing" alert: on screen or not.
+    static bool AlertShown(Window window) => Find(window, "AdvancedAlertTurnOn") is { IsOffscreen: false };
+
+    static bool WaitAlert(Window window, bool shown) =>
+        WaitFor(() => AlertShown(window) == shown ? "" : null, TimeSpan.FromSeconds(3)) is not null;
 
     static bool WaitName(AutomationElement root, string id, string name, int ms = 3000) =>
         WaitFor(() => Find(root, id)?.Name == name ? "" : null, TimeSpan.FromMilliseconds(ms)) is not null;
