@@ -33,7 +33,8 @@ enum Mics {
     static func resolve(_ savedUID: String?) -> AudioDeviceID? {
         let choices = list()
         if let savedUID, choices.contains(where: { $0.uid == savedUID }), let id = device(uid: savedUID) { return id }
-        let fallback = defaultInput()
+        // While Pitch Shift Mic is the Mac's default mic, the real one is the mic that was default before.
+        let fallback = DefaultMic.realMic ?? defaultInput()
         if choices.contains(where: { $0.uid == deviceUID(fallback) }) { return fallback }
         return allDevices().first { transportType($0) == kAudioDeviceTransportTypeBuiltIn && streamCount($0, kAudioDevicePropertyScopeInput) > 0 }
     }

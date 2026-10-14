@@ -32,6 +32,17 @@ func fourCC(_ value: UInt32) -> String {
     String(bytes: [24, 16, 8, 0].map { UInt8((value >> $0) & 0xFF) }, encoding: .ascii) ?? "\(value)"
 }
 
+// The watchdog: a second copy of the app that gives the real mic back if the app ends without doing it.
+if let pid = arg("--watchdog").flatMap({ pid_t($0) }) { DefaultMic.watch(pid) }
+
+// Makes Pitch Shift Mic the default mic and then waits, so a test can force-quit it and check the watchdog.
+if args.contains("--test-default-mic") {
+    DefaultMic.takeOver()
+    print("default mic now: \(deviceName(defaultInput()))")
+    DispatchQueue.main.asyncAfter(deadline: .now() + 30) { exit(0) }
+    dispatchMain()
+}
+
 if args.contains("--list") {
     let out = defaultOutput(), inp = defaultInput()
     print("Devices:")
@@ -58,7 +69,7 @@ if args.contains("--list") {
 }
 
 if args.contains("--test") {
-    let source: HearSource = args.contains("--all") ? .all : .app(arg("--app") ?? "com.apple.Music")
+    let source: HearSource = args.contains("--all") ? .all : HearSource(saved: arg("--app") ?? "com.apple.Music")
     let shifter = HearShifter(halfSteps: arg("--steps").flatMap(Float.init) ?? 2, source: source)
     shifter.testPID = arg("--pid").flatMap { pid_t($0) }
     let seconds = arg("--seconds").flatMap(Double.init) ?? 3
@@ -190,6 +201,7 @@ app.delegate = delegate
 onQuitSignals {
     delegate.hear.stop()
     delegate.voice.stop()
+    DefaultMic.giveBack()
     exit(0)
 }
 app.run()

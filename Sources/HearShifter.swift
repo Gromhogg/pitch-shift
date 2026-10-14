@@ -202,19 +202,24 @@ func outputLatency(_ device: AudioDeviceID) -> Double {
 
 enum HearSource: Equatable {
     case all
-    case app(String)  // bundle ID
+    case apps([String])  // bundle IDs; can be several, or none
 
     init(saved: String?) {
         switch saved {
-        case nil, "", "music": self = .app("com.apple.Music")  // "music" was the setting in version 1
+        case nil, "music": self = .apps(["com.apple.Music"])  // "music" was the setting in version 1
         case "all": self = .all
-        case let bundleID?: self = .app(bundleID)
+        case let list?: self = .apps(list.split(separator: ",").map(String.init))
         }
     }
 
     var saved: String {
-        if case .app(let bundleID) = self { return bundleID }
+        if case .apps(let bundleIDs) = self { return bundleIDs.joined(separator: ",") }
         return "all"
+    }
+
+    var bundleIDs: [String] {
+        if case .apps(let bundleIDs) = self { return bundleIDs }
+        return []
     }
 }
 
@@ -339,8 +344,8 @@ final class HearShifter {
                 guard let me = audioProcess(for: getpid()) else { setState(.waiting); return }
                 processes = [me]
                 everythingElse = true
-            case .app(let bundleID):
-                processes = (Apps.scan().first { $0.bundleID == bundleID }?.processes ?? []).sorted()
+            case .apps(let bundleIDs):
+                processes = Apps.scan().filter { bundleIDs.contains($0.bundleID) }.flatMap(\.processes).sorted()
                 everythingElse = false
             }
         }

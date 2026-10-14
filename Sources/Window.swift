@@ -320,7 +320,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Show the window first: the first time, macOS asks for permission to grab sound and waits for an answer.
         DispatchQueue.main.async { [self] in
             if defaults.object(forKey: Keys.hearOn) as? Bool ?? true { hear.start() }
-            if defaults.bool(forKey: Keys.voiceOn) && AVCaptureDevice.authorizationStatus(for: .audio) == .authorized { voice.start() }
+            if defaults.bool(forKey: Keys.voiceOn) && AVCaptureDevice.authorizationStatus(for: .audio) == .authorized {
+                voice.start()
+                DefaultMic.takeOver()
+            } else {
+                DefaultMic.giveBack()  // in case the app didn't close cleanly last time
+            }
             refresh()
         }
     }
@@ -336,6 +341,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         hear.stop()
         voice.stop()
+        DefaultMic.giveBack()
     }
 
     func showWindow() {
@@ -382,6 +388,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func buildWindow() {
         hearCard = ShiftCard(title: "What you hear", extraRows: [])
+        hearCard.picker.pullsDown = true  // a menu of apps to tick, not a single choice
         hearCard.picker.menu?.delegate = self
         hearCard.picker.target = self
         hearCard.picker.action = #selector(hearSourcePicked)
@@ -464,30 +471,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return small
     }
 
+    // The app picker: tick any number of apps, or All sound. The button shows what's chosen.
     func rebuildHearMenu() {
         let picker = hearCard.picker
         picker.removeAllItems()
         let menu = picker.menu!
-        let all = menu.addItem(withTitle: "All sound", action: nil, keyEquivalent: "")
-        all.image = NSImage(systemSymbolName: "speaker.wave.2.fill", accessibilityDescription: nil)
-        all.representedObject = "all"
-        menu.addItem(.separator())
+        let chosen = hear.source.bundleIDs
         var apps = Apps.scan().map { (bundleID: $0.bundleID, name: $0.name, icon: $0.icon, running: true) }
-        if case .app(let saved) = hear.source, !apps.contains(where: { $0.bundleID == saved }) {
+        for saved in chosen where !apps.contains(where: { $0.bundleID == saved }) {
             let info = Apps.info(for: saved)
             apps.append((saved, info.name, info.icon, false))
-            apps.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
         }
+        apps.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+        let speaker = NSImage(systemSymbolName: "speaker.wave.2.fill", accessibilityDescription: nil)
+
+        // In a pull-down menu the first item is what the button shows.
+        let picked = apps.filter { chosen.contains($0.bundleID) }
+        let title = hear.source == .all ? "All sound" : picked.isEmpty ? "Choose apps" : picked.map(\.name).joined(separator: ", ")
+        let titleItem = menu.addItem(withTitle: title, action: nil, keyEquivalent: "")
+        titleItem.image = hear.source == .all ? speaker : icon(picked.first?.icon)
+
+        let all = menu.addItem(withTitle: "All sound", action: nil, keyEquivalent: "")
+        all.image = speaker
+        all.representedObject = "all"
+        all.state = hear.source == .all ? .on : .off
+        menu.addItem(.separator())
         for app in apps {
             let item = menu.addItem(withTitle: app.name, action: nil, keyEquivalent: "")
             item.image = icon(app.icon, dimmed: !app.running)
             item.representedObject = app.bundleID
+            item.state = chosen.contains(app.bundleID) ? .on : .off
             if !app.running {
                 item.attributedTitle = NSAttributedString(string: app.name, attributes: [.foregroundColor: NSColor.secondaryLabelColor, .font: NSFont.menuFont(ofSize: 0)])
             }
         }
-        let selected = hear.source.saved
-        picker.selectItem(at: menu.items.firstIndex { ($0.representedObject as? String) == selected } ?? 0)
     }
 
     func rebuildMicMenu() {
@@ -508,10 +525,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         picker.selectItem(at: mics.firstIndex { $0.uid == current } ?? 0)
     }
 
+    // Clicking "All sound" picks everything; clicking an app ticks or unticks it.
     @objc func hearSourcePicked() {
-        guard let saved = hearCard.picker.selectedItem?.representedObject as? String else { return }
-        hear.source = HearSource(saved: saved)
-        defaults.set(saved, forKey: Keys.hearSource)
+        guard let clicked = hearCard.picker.selectedItem?.representedObject as? String else { return }
+        var source = HearSource.all
+        if clicked != "all" {
+            var bundleIDs = hear.source.bundleIDs
+            if let i = bundleIDs.firstIndex(of: clicked) { bundleIDs.remove(at: i) } else { bundleIDs.append(clicked) }
+            source = .apps(bundleIDs)
+        }
+        hear.source = source
+        defaults.set(source.saved, forKey: Keys.hearSource)
+        rebuildHearMenu()
         refresh()
     }
 
@@ -540,6 +565,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func setVoice(_ on: Bool) {
         guard on else {
             voice.stop()
+            DefaultMic.giveBack()
             defaults.set(false, forKey: Keys.voiceOn)
             refresh()
             return
@@ -547,6 +573,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
             voice.start()
+            DefaultMic.takeOver()
             defaults.set(true, forKey: Keys.voiceOn)
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .audio) { granted in
@@ -577,7 +604,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             hear.stop()
             voice.stop()
             if hearOn { hear.start() }
-            if voiceOn { voice.start() }
+            if voiceOn {
+                voice.start()
+                DefaultMic.takeOver()
+            }
             rebuildMicMenu()
             refresh()
         }

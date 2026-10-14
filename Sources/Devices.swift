@@ -56,6 +56,12 @@ func setNominalRate(_ id: AudioDeviceID, _ rate: Double) -> Bool {
     return AudioObjectSetPropertyData(id, &addr, 0, nil, UInt32(MemoryLayout<Float64>.size), &value) == noErr
 }
 
+func setDefaultInput(_ id: AudioDeviceID) {
+    var addr = address(kAudioHardwarePropertyDefaultInputDevice)
+    var id = id
+    AudioObjectSetPropertyData(system, &addr, 0, nil, UInt32(MemoryLayout<AudioDeviceID>.size), &id)
+}
+
 func setDefaultOutput(_ id: AudioDeviceID) {
     var addr = address(kAudioHardwarePropertyDefaultOutputDevice)
     var id = id
