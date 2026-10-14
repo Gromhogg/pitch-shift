@@ -1,11 +1,11 @@
 # Pitch Shift for Windows (beta): build and test on GitHub's Windows computers (x64 and ARM64).
-# There's no Windows PC to test on, so these checks do the listening: recordings (WAV) and
-# window pictures are uploaded as "artifacts" on each run.
+# There's no Windows PC to test on, so these checks do the listening: recordings (WAV)
+# are uploaded as "artifacts" on each run. (The window app's checks are in windows-app.yml.)
 name: Windows
 
 on:
   push:
-    branches: [v2-windows]
+    branches: [v2, v2-windows]
     paths:
       - 'windows/**'
       - '.github/workflows/windows.yml'
@@ -59,36 +59,16 @@ jobs:
       - name: Rubber Band check (440 Hz shifted +2 should be 493.9 Hz)
         run: build/out/Release/PitchShiftTool.exe selftest
 
-      - uses: actions/setup-dotnet@v6
-        with:
-          dotnet-version: 10.0.x
-
-      - name: Build the window app
+      - name: Collect the tool and engine
         run: |
-          dotnet publish windows/app/PitchShift.csproj -c Release -r ${{ matrix.rid }} `
-            -p:EngineDir="${{ github.workspace }}\build\out\Release" -o dist
-          Copy-Item build/out/Release/PitchShiftTool.exe dist/
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item build/out/Release/*.exe, build/out/Release/*.dll dist/ -ErrorAction SilentlyContinue
           Get-ChildItem dist | Format-Table Name, Length
-
-      - name: Window pictures
-        continue-on-error: true
-        run: |
-          New-Item -ItemType Directory -Force shots | Out-Null
-          $p = Start-Process -FilePath dist/PitchShift.exe -ArgumentList '--screenshot', "$PWD\shots\window-${{ matrix.arch }}.png" -PassThru
-          if (-not $p.WaitForExit(60000)) { $p.Kill(); throw 'The window app did not finish its picture in time.' }
-          ./windows/ci/screenshot.ps1 -Exe dist/PitchShift.exe -Out "$PWD\shots\desktop-${{ matrix.arch }}.png"
 
       - uses: actions/upload-artifact@v7
         with:
           name: pitchshift-${{ matrix.arch }}
           path: dist/
-
-      - uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: screenshots-${{ matrix.arch }}
-          path: shots/
-          if-no-files-found: ignore
 
   probe:
     name: probe (${{ matrix.arch }})

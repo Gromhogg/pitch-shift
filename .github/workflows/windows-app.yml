@@ -6,7 +6,7 @@ name: Windows app
 
 on:
   push:
-    branches: [v2-windows-app]
+    branches: [v2, v2-windows-app]
     paths:
       - 'windows/**'
       - 'install.ps1'

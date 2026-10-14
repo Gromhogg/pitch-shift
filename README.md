@@ -22,7 +22,20 @@ Run either one again any time to update. Needs a Mac with Apple silicon (M1 or n
 
 ## Install on Windows (beta)
 
-Coming soon.
+**Beta:** tested on GitHub's Windows computers, not yet on many real PCs. Needs Windows 11 (x64 or ARM).
+
+Open **PowerShell** (click Start, type `PowerShell`, press Enter), paste this line, and press Enter:
+
+```
+irm https://raw.githubusercontent.com/Gromhogg/pitch-shift/main/install.ps1 | iex
+```
+
+- Click **Yes** when Windows asks to allow changes.
+- If a **VB-Audio** window opens, click **Install Driver**. This adds **Pitch Shift Mic**.
+
+Or download **[PitchShift-Setup.exe](https://github.com/Gromhogg/pitch-shift/releases/latest/download/PitchShift-Setup.exe)** and open it. If Windows says **"Windows protected your PC"**, click **More info**, then **Run anyway**.
+
+More help: [windows/README.md](windows/README.md).
 
 ## How to use it
 
