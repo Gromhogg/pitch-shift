@@ -28,11 +28,11 @@ bool is_quiet(const std::vector<float>& levels, float quiet_level) {
     return true;
 }
 
-// Exactly our quiet level on every channel: nobody else sets that (the volume mixer can't).
+// Exactly our quiet level on every channel (or the nudge level): nobody else sets that (the volume mixer can't).
 bool exactly_ours(const std::vector<float>& levels) {
     if (levels.empty()) return false;
     for (float v : levels)
-        if (v != kQuietLevel) return false;
+        if (v != kQuietLevel && v != kNudgeLevel) return false;
     return true;
 }
 
@@ -268,6 +268,24 @@ std::string QuietKeeper::last_failure() const {
     return last_failure_;
 }
 
+void QuietKeeper::nudge() {
+    std::lock_guard<std::mutex> lock(lock_);
+    for (const auto& [id, at] : quieted_at_) {
+        auto it = ours_.find(id);
+        if (it == ours_.end() || nudged_.count(id)) continue;
+        auto volume = it->second.channel_volume();
+        if (volume && SUCCEEDED(set_all_channels(volume.Get(), kNudgeLevel))) {
+            nudged_.insert(id);
+            ++nudges_;
+        }
+    }
+}
+
+int QuietKeeper::nudges() const {
+    std::lock_guard<std::mutex> lock(lock_);
+    return nudges_;
+}
+
 void QuietKeeper::update(const std::vector<Session>& sessions, const std::function<bool(const Session&)>& wanted) {
     std::lock_guard<std::mutex> lock(lock_);
     std::set<std::wstring> alive;
@@ -284,11 +302,15 @@ void QuietKeeper::update(const std::vector<Session>& sessions, const std::functi
                 const HRESULT hr = quiet_session(s, kQuietLevel, path_);
                 if (SUCCEEDED(hr)) {
                     ours_[s.instance_id] = s;
+                    if (!is_ours) quieted_at_[s.instance_id] = std::chrono::steady_clock::now();
+                    nudged_.erase(s.instance_id);
                 } else {
                     ++failures_;
                     last_failure_ = "could not quiet " + utf8(file_name_of(s.exe)) + " (pid " + std::to_string(s.pid) +
                                     "): " + hr_text(hr);
                 }
+            } else if (nudged_.erase(s.instance_id)) {
+                set_all_channels(volume.Get(), kQuietLevel);  // back to exactly our level after a nudge
             }
             continue;
         }
@@ -312,8 +334,11 @@ void QuietKeeper::update(const std::vector<Session>& sessions, const std::functi
             continue;
         }
         gone_[it->first] = now;
+        nudged_.erase(it->first);
         it = ours_.erase(it);
     }
+    for (auto it = quieted_at_.begin(); it != quieted_at_.end();)
+        it = now - it->second > std::chrono::seconds(10) || !ours_.count(it->first) ? quieted_at_.erase(it) : std::next(it);
     for (auto it = gone_.begin(); it != gone_.end();) {
         if (now - it->second < std::chrono::seconds(3)) {
             ++it;
@@ -342,6 +367,8 @@ void QuietKeeper::restore_everything() {
     }
     ours_.clear();
     gone_.clear();
+    quieted_at_.clear();
+    nudged_.clear();
     try {
         restore_all(path_);
     } catch (const std::exception&) {

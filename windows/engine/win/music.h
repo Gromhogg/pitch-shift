@@ -91,6 +91,8 @@ private:
     std::atomic<bool> quit_{false};
     QuietKeeper keeper_;
     std::map<DWORD, std::chrono::steady_clock::time_point> retry_after_;
+    uint64_t guarded_seen_ = 0;  // the booster's count at the last look (it steps in when sound wasn't quieted)
+    std::chrono::steady_clock::time_point nudged_at_{};
 
     // The sound chain. mix_lock_ guards streams_ and everything mix() uses.
     std::mutex mix_lock_;
@@ -121,6 +123,7 @@ private:
     nlohmann::json apps_ = nlohmann::json::array();
     int quieted_ = 0;
     int quiet_failures_ = 0;   // apps that could not be made quiet (see QuietKeeper::failures)
+    int quiet_nudges_ = 0;     // quiet volumes written again because loud sound still arrived (QuietKeeper::nudge)
     std::string quiet_error_;  // why, the last time
     std::atomic<uint64_t> clipped_{0}, gaps_{0};
     // How often the speaker stream ran empty (the playing thread came back too late): players already closed, the

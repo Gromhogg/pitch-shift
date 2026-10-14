@@ -77,6 +77,7 @@ jobs:
       # Advanced processing without sound devices: a made-up song shifted with the same code as live, to compare
       # with the Mac app's --render-file on the same file (download the render artifact).
       - name: Advanced processing, offline (a made-up song at +8, -5 and +15)
+        if: ${{ !(inputs.repeat > 0) }}
         run: |
           $tool = 'build/out/Release/PitchShiftTool.exe'
           New-Item -ItemType Directory -Force render-out | Out-Null
@@ -92,6 +93,7 @@ jobs:
           if ($LASTEXITCODE) { throw 'render with changes failed' }
 
       - uses: actions/upload-artifact@v7
+        if: ${{ !(inputs.repeat > 0) }}
         with:
           name: render-${{ matrix.arch }}
           path: render-out/

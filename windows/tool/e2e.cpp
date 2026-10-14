@@ -325,6 +325,7 @@ int e2e_music(const Args& args) {
         r.info("counts_after_" + after, json{{"dropouts", st["dropouts"]}, {"skips", st["skips"]},
                                              {"output_starved", st["output_starved"]}, {"guarded", st["guarded"]},
                                              {"quiet_failures", st["quiet_failures"]},
+                                             {"quiet_nudges", st["quiet_nudges"]},
                                              {"slowest_tick_ms", round3(st["slowest_tick_ms"].get<double>())}});
     };
 
@@ -380,6 +381,7 @@ int e2e_music(const Args& args) {
                                          {"apps", st["apps"]},
                                          {"quieted", st["quieted"]},
                                          {"quiet_failures", st["quiet_failures"]},
+                                         {"quiet_nudges", st["quiet_nudges"]},
                                          {"quiet_error", st["quiet_error"]},
                                          {"slowest_tick_ms", round3(st["slowest_tick_ms"].get<double>())},
                                          {"guarded", st["guarded"]}});

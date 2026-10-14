@@ -16,12 +16,14 @@
 #include <map>
 #include <mutex>
 #include <nlohmann/json.hpp>
+#include <set>
 #include <string>
 #include <vector>
 
 namespace ps {
 
 constexpr float kQuietLevel = 0.001f;  // -60 dB; the captured sound is boosted by 1000 to match
+constexpr float kNudgeLevel = 0.000999f;  // written for a moment to make Windows apply the quiet volume (see nudge)
 
 struct QuietEntry {
     std::wstring exe;             // program path; new sessions of the same program are fixed too
@@ -80,6 +82,13 @@ public:
     int failures() const;
     std::string last_failure() const;
 
+    // Call when sound that wasn't quieted still arrives. Windows sometimes misses a volume change made just as an
+    // app starts playing: the session then says 0.001, but the app plays on at full volume. So the sessions quieted
+    // in the last few seconds get a slightly different quiet volume, which Windows does apply, and the next update()
+    // writes the exact one back.
+    void nudge();
+    int nudges() const;  // how often a session was nudged
+
 private:
     void sync_sign_in_entry();
 
@@ -89,6 +98,9 @@ private:
     std::map<std::wstring, std::chrono::steady_clock::time_point> gone_;  // quieted, then the app quit
     int failures_ = 0;
     std::string last_failure_;
+    std::map<std::wstring, std::chrono::steady_clock::time_point> quieted_at_;  // when we quieted each session
+    std::set<std::wstring> nudged_;  // at kNudgeLevel now; back to kQuietLevel on the next update()
+    int nudges_ = 0;
 };
 
 }  // namespace ps

@@ -197,6 +197,16 @@ void MusicPath::tick() {
         return false;
     });
 
+    // Sound that wasn't quieted still arrives (the booster had to step in since the last look): Windows may have missed
+    // the quiet volume of an app that had only just started. Write it again (at most twice a second).
+    const uint64_t guarded = booster_.guarded();
+    const auto nudge_now = std::chrono::steady_clock::now();
+    if (guarded != guarded_seen_ && nudge_now - nudged_at_ > std::chrono::milliseconds(500)) {
+        keeper_.nudge();
+        nudged_at_ = nudge_now;
+    }
+    guarded_seen_ = guarded;
+
     // How many sound sessions of each ticked app this look found (each was quieted above, or should have been).
     for (auto& app : apps) {
         const DWORD root = app["pid"].get<DWORD>();
@@ -278,6 +288,7 @@ void MusicPath::tick() {
     apps_ = apps;
     quieted_ = keeper_.quieted();
     quiet_failures_ = keeper_.failures();
+    quiet_nudges_ = keeper_.nudges();
     quiet_error_ = keeper_.last_failure();
     output_ms_ = output_ms;
 }
@@ -531,6 +542,7 @@ nlohmann::json MusicPath::status() const {
             {"player_rebuilds", player_rebuilds_.load()},
             {"quieted", quieted_},
             {"quiet_failures", quiet_failures_},
+            {"quiet_nudges", quiet_nudges_},
             {"quiet_error", quiet_error_},
             {"slowest_tick_ms", slowest_tick_ms_.load()},
             {"dropouts", cushion_.dropouts()},
