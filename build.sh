@@ -31,6 +31,11 @@ echo "Built $app"
 [[ "$1" == "--no-install" ]] && exit 0
 
 # Install here: the app in /Applications, a shortcut on the Desktop (replacing an old real copy there).
+if [[ -e "/Applications/Pitch Shift.app" && ! -w "/Applications/Pitch Shift.app/Contents" ]]; then
+  echo "Pitch Shift in Applications was put there by the installer package. Replace it with:"
+  echo "  packaging/make-pkg.sh 0.0.0-dev && sudo installer -pkg build/PitchShift.pkg -target /"
+  exit 1
+fi
 pkill -x PitchShift && sleep 1 || true
 rm -rf "/Applications/Pitch Shift.app"
 ditto "$app" "/Applications/Pitch Shift.app"

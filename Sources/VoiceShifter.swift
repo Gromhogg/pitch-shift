@@ -477,7 +477,7 @@ final class VoiceTest {
     var onChange: () -> Void = {}
     private let voice: VoiceShifter
     private var recorder: Recorder?
-    private var timer: Timer?
+    private var countdown: DispatchWorkItem?
     private var engine: AVAudioEngine?
     private let seconds = 5
 
@@ -506,17 +506,21 @@ final class VoiceTest {
             NSSound.beep()
             return
         }
-        setPhase(.recording(seconds))
-        var left = seconds
-        timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            left -= 1
-            if left <= 0 { self?.finishRecording() } else { self?.setPhase(.recording(left)) }
-        }
+        tick(seconds)
+    }
+
+    // Counts down once a second while recording.
+    private func tick(_ left: Int) {
+        guard left > 0 else { finishRecording(); return }
+        setPhase(.recording(left))
+        let work = DispatchWorkItem { [weak self] in self?.tick(left - 1) }
+        countdown = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
     }
 
     private func finishRecording() {
-        timer?.invalidate()
-        timer = nil
+        countdown?.cancel()
+        countdown = nil
         guard let recorder else { return }
         let samples = recorder.finish()
         let rate = recorder.sampleRate

@@ -4,6 +4,7 @@
 //   --test [--pid N | --app BUNDLE_ID | --all] [--steps 2.5] [--seconds S]     "What you hear" for a few seconds
 //   --test-voice [--mic NAME] [--tone 440 | --file F] [--steps 3] [--cartoon] [--seconds S] [--out F.caf]
 //                                              sends a tone or file through the voice chain and records Pitch Shift Mic
+//   --test-button [--volume 0.03]              presses Test with a quiet tone as the voice (record 5 s, play back)
 import AppKit
 import AVFoundation
 import CoreAudio
@@ -143,6 +144,28 @@ if args.contains("--test-voice") {
         }
         exit(0)
     }
+    dispatchMain()
+}
+
+// Presses the Test button with a quiet tone as the "voice": records 5 s from Pitch Shift Mic, then plays it back.
+if args.contains("--test-button") {
+    let voice = VoiceShifter(halfSteps: 3, natural: true, micUID: nil)
+    let rate = voice.currentMic.map(nominalRate) ?? 48000
+    let volume = arg("--volume").flatMap(Double.init) ?? 0.03
+    var phase = 0.0
+    voice.testSource = { buffer, frames in
+        for i in 0..<frames { buffer[i] = Float(volume * sin(phase)); phase += 2 * .pi * 440 / rate }
+    }
+    let test = VoiceTest(voice: voice)
+    let started = Date()
+    test.onChange = {
+        let silent = voice.params.withLock { $0.silent }
+        print(String(format: "%.1fs: %@ (voice %@, sending silence: %@)", Date().timeIntervalSince(started), "\(test.phase)", "\(voice.state)", "\(silent)"))
+        if test.phase == .idle { voice.stop(); exit(0) }
+    }
+    voice.start()
+    test.click()
+    DispatchQueue.main.asyncAfter(deadline: .now() + 15) { print("timed out"); exit(1) }
     dispatchMain()
 }
 
