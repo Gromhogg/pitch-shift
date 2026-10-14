@@ -51,6 +51,8 @@ struct VoiceParams {
 // sound callback, so both run on the mic's clock (Core Audio corrects the tiny clock difference).
 final class VoiceChain {
     let micName: String
+    let micUID: String
+    let devices: [AudioDeviceID]  // the mic and both sides of Pitch Shift Mic, as Core Audio numbered them
     let sampleRate: Double
     let blockSize: Int
     let startDelay: Int
@@ -73,6 +75,8 @@ final class VoiceChain {
 
     init(mic: AudioDeviceID, feed: AudioDeviceID, params: OSAllocatedUnfairLock<VoiceParams>) throws {
         micName = deviceName(mic)
+        micUID = deviceUID(mic)
+        devices = [mic, Mics.virtualMic ?? 0, feed]
         let rate = nominalRate(mic)
         guard rate > 0 else { throw Problem(message: "Can't use \(micName).") }
         sampleRate = rate
@@ -98,7 +102,6 @@ final class VoiceChain {
         ring.initialize(repeating: 0, count: ringSize)
         ringCount = blockSize  // start one block "ahead" so the output never runs dry
 
-        let micUID = deviceUID(mic)
         let settings: [String: Any] = [
             kAudioAggregateDeviceNameKey: "Pitch Shift Voice",
             kAudioAggregateDeviceUIDKey: UUID().uuidString,
@@ -371,9 +374,19 @@ final class VoiceShifter {
 
     private func rebuild() {
         guard running else { return }
+        if let chain, !needsNewChain(chain) { return }
         closeChain()
         watchVirtualMic()
         update()
+    }
+
+    // Making or closing our own private combined device also counts as "devices changed", so without this check
+    // the chain restarted itself every few seconds (a short gap in the voice each time). Only start over when the
+    // mic, Pitch Shift Mic, or a sample rate really changed.
+    private func needsNewChain(_ chain: VoiceChain) -> Bool {
+        guard let mic = currentMic, let virtualMic = Mics.virtualMic, let feed = Mics.virtualFeed,
+              [mic, virtualMic, feed] == chain.devices, deviceUID(mic) == chain.micUID else { return true }
+        return nominalRate(mic) != chain.sampleRate || nominalRate(feed) != chain.sampleRate
     }
 
     // Run the chain only when it's on, everything needed is there, and someone is listening (or Test is running).
