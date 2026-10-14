@@ -21,6 +21,24 @@ double to_db(double amplitude);
 // The amplitude of a tone at exactly `hz` (a best-fit sine).
 double tone_amplitude(const float* samples, size_t count, double rate, double hz);
 
+// The amplitude of a faint tone at exactly `hz` next to much louder tones. tone_amplitude() cuts the sound off
+// sharply at both ends, which spills a little of every other tone onto `hz`: a loud tone 54 Hz away shows up at
+// up to 1 / (pi x 54 Hz x seconds) of its level (-51 dB in 2 s). This uses a smooth (Hann) window instead, which
+// keeps that spill more than 120 dB down, so a tone 60 dB below a loud one reads 60 dB below it.
+double faint_tone_amplitude(const float* samples, size_t count, double rate, double hz);
+
+// The level of a steady tone at `hz`, measured in short pieces (Hann window each, so other tones don't leak in).
+// `level_db` is the middle value of the pieces: a one-off hiccup (a few ms of sound lost on the way, or the tone's
+// timing jumping once) only changes a piece or two. One best-fit sine over the whole recording drops by up to a few
+// dB after such a jump, because the parts before and after it no longer line up.
+struct SteadyLevel {
+    double level_db = -200;   // middle value of the pieces
+    double lowest_db = -200;  // the quietest piece
+    double highest_db = -200; // the loudest piece
+    size_t pieces = 0;
+};
+SteadyLevel steady_level(const float* samples, size_t count, double rate, double hz, double piece_seconds = 0.1);
+
 // Finds the tone near `expected_hz` (within about -20% / +25%) and measures it.
 ToneMeasure measure_tone(const float* samples, size_t count, double rate, double expected_hz);
 

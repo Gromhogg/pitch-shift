@@ -18,9 +18,18 @@ on:
       - '.github/workflows/windows.yml'
       - 'install.ps1'
   workflow_dispatch:
+    inputs:
+      repeat:
+        description: >-
+          Run only "What you hear" (e2e-music) this many times on each processor type, to see if its checks are
+          steady. The run always ends green; the pass counts and logs are in the repeat-* artifacts.
+          0 = the normal checks.
+        type: number
+        default: 0
 
 concurrency:
-  group: windows-${{ github.ref }}
+  # Repeat runs get their own group, so several can run side by side (each on fresh runners).
+  group: windows-${{ github.ref }}-${{ inputs.repeat > 0 && github.run_id || 'checks' }}
   cancel-in-progress: true
 
 permissions:
@@ -97,6 +106,7 @@ jobs:
   probe:
     name: probe (${{ matrix.arch }})
     needs: build
+    if: ${{ !(inputs.repeat > 0) }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -142,6 +152,7 @@ jobs:
   audio-e2e:
     name: audio e2e (${{ matrix.arch }})
     needs: build
+    if: ${{ !(inputs.repeat > 0) }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -191,9 +202,44 @@ jobs:
           name: e2e-${{ matrix.arch }}
           path: e2e-out/
 
+  # Manual runs only (Run workflow, with "repeat" above 0): e2e-music many times in one job; always ends green.
+  audio-e2e-repeat:
+    name: audio e2e x${{ inputs.repeat }} (${{ matrix.arch }})
+    needs: build
+    if: ${{ inputs.repeat > 0 }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2025
+          - arch: arm64
+            runner: windows-11-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: pitchshift-${{ matrix.arch }}
+          path: dist
+
+      - name: Get sound ready (VB-CABLE, microphone access)
+        run: ./windows/ci/prepare-audio.ps1 -Tool dist/PitchShiftTool.exe
+
+      - name: What you hear (music path), ${{ inputs.repeat }} times
+        run: ./windows/ci/repeat-e2e.ps1 -Tool dist/PitchShiftTool.exe -Times ${{ inputs.repeat }} -Out repeat-out -Arch ${{ matrix.arch }}
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: repeat-${{ matrix.arch }}
+          path: repeat-out/
+
   mic-setup:
     name: mic setup (${{ matrix.arch }})
     needs: build
+    if: ${{ !(inputs.repeat > 0) }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false

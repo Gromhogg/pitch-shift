@@ -100,6 +100,8 @@ public:
         sleep_s(seconds);
         return rec_.take();
     }
+    // Packets Windows marked "something was lost before this" on the way to this recording.
+    uint64_t gaps() const { return cap_->stats().gaps; }
 
 private:
     Recorder rec_;
@@ -112,13 +114,44 @@ double level_at(const std::vector<float>& mono, double hz) {
     return to_db(tone_amplitude(mono.data(), mono.size(), kRate, hz));
 }
 
+// The level of a steady tone (the middle of its 100 ms pieces; see steady_level).
+double steady_db(const std::vector<float>& mono, double hz) {
+    return steady_level(mono.data(), mono.size(), kRate, hz).level_db;
+}
+
+// The level of a faint tone next to a loud one (the quieted original next to the shifted copy).
+double faint_db(const std::vector<float>& mono, double hz) {
+    return to_db(faint_tone_amplitude(mono.data(), mono.size(), kRate, hz));
+}
+
+int64_t now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+        .count();
+}
+
+// How often a test player's own sound ran empty between two times (from its tonegen --log file).
+int player_hiccups(const fs::path& log, int64_t from_ms, int64_t to_ms) {
+    std::ifstream f(log);
+    int64_t t = 0, n = 0;
+    int count = 0;
+    while (f >> t >> n)
+        if (t >= from_ms && t <= to_ms) ++count;
+    return count;
+}
+
+int64_t count_of(const json& status, const char* key) {
+    return status.contains(key) && status[key].is_number() ? status[key].get<int64_t>() : 0;
+}
+
 // Test players are started so they don't count as our own processes (like a real music app).
-std::unique_ptr<ChildProcess> start_player(const std::wstring& args, Report& report) {
+// With `log`, the player writes down each time its own sound ran empty (tonegen --log).
+std::unique_ptr<ChildProcess> start_player(const std::wstring& args, Report& report, const fs::path& log = {}) {
+    const std::wstring all = L"tonegen " + args + (log.empty() ? L"" : L" --log \"" + fs::absolute(log).wstring() + L"\"");
     try {
-        return start_detached(self_path(), L"tonegen " + args, parent_pid_of(GetCurrentProcessId()));
+        return start_detached(self_path(), all, parent_pid_of(GetCurrentProcessId()));
     } catch (const std::exception& e) {
         report.note(std::string("could not start the player outside our own processes: ") + e.what());
-        return start_process(self_path(), L"tonegen " + args);
+        return start_process(self_path(), all);
     }
 }
 
@@ -202,28 +235,62 @@ int e2e_music(const Args& args) {
     MusicPath music((r.out() / L"restore.json").wstring(), L"");
     const double target = 440.0 * std::pow(2.0, 2.0 / 12);
 
+    // Listens for `seconds` and saves the recording (music_<name>.wav). Also writes down how steady the tone at `hz`
+    // was and what went wrong while it was recorded, if anything: the engine's own counters, packets lost on the way
+    // to the recording, and the test players' own hiccups (their logs are in `player_logs`).
+    std::vector<fs::path> player_logs;
+    auto hear = [&](const std::string& name, double seconds, double hz) {
+        const json before = music.status();
+        const uint64_t ear_gaps = ear.gaps();
+        const int64_t from = now_ms();
+        const auto rec = ear.listen(seconds);
+        const int64_t to = now_ms();
+        const json after = music.status();
+        const auto left = left_of(rec);
+        const auto steady = steady_level(left.data(), left.size(), kRate, hz);
+        const auto one_fit = measure_tone(left.data(), left.size(), kRate, hz);
+        json engine = json::object();
+        for (const char* key : {"dropouts", "skips", "gaps", "output_starved"})
+            engine[key] = count_of(after, key) - count_of(before, key);
+        int hiccups = 0;
+        for (const auto& log : player_logs) hiccups += player_hiccups(log, from - 300, to + 200);
+        r.info(name + "_window", json{{"steady_db", round3(steady.level_db)},
+                                      {"lowest_piece_db", round3(steady.lowest_db - steady.level_db)},
+                                      {"one_fit_db", round3(one_fit.level_db)},
+                                      {"engine", engine},
+                                      {"recording_gaps", ear.gaps() - ear_gaps},
+                                      {"player_hiccups", hiccups}});
+        r.wav("music_" + name, rec, 2);
+        return left;
+    };
+    // The engine's counters so far (to see when something happened outside the listening windows).
+    auto counts = [&](const std::string& after) {
+        const json st = music.status();
+        r.info("counts_after_" + after, json{{"dropouts", st["dropouts"]}, {"skips", st["skips"]},
+                                             {"output_starved", st["output_starved"]}, {"guarded", st["guarded"]}});
+    };
+
     // ---- A. One app, +2.
     say("A. one app, +2 half-steps");
-    auto a = start_player(L"--freq 440 --amp 0.25 --seconds 900", r);
+    player_logs = {r.out() / "player_A.txt"};
+    auto a = start_player(L"--freq 440 --amp 0.25 --seconds 900", r, player_logs[0]);
     if (!wait_session(a->pid())) r.note("player A's sound never showed up");
     sleep_s(1.0);
-    const auto base_left = left_of(ear.listen(2.0));
-    const auto base = measure_tone(base_left.data(), base_left.size(), kRate, 440.0);
-    r.info("baseline_level_db", base.level_db, "the player's tone at the cable before shifting");
+    const double base = steady_db(hear("baseline", 2.0, 440.0), 440.0);
+    r.info("baseline_level_db", base, "the player's tone at the cable before shifting");
     music.set_semitones(2);
     music.start_pid(a->pid());
     const bool started = wait_music_state(music, "running", 10);
     r.check("app_running", started, music.status()["state"], "the path starts");
     sleep_s(2.0);  // let Rubber Band and the cushion settle
     {
-        const auto rec = ear.listen(3.0);
-        const auto left = left_of(rec);
+        const auto left = hear("app_plus2", 3.0, target);
         const auto m = measure_tone(left.data(), left.size(), kRate, target);
-        const double original = level_at(left, 440.0);
+        const double level = steady_db(left, target);
         r.check("app_pitch_hz", std::fabs(m.frequency - target) < 0.5, m.frequency, "440 Hz +2 = 493.9 Hz");
-        r.check("app_level_change_db", std::fabs(m.level_db - base.level_db) <= 1.0, m.level_db - base.level_db,
+        r.check("app_level_change_db", std::fabs(level - base) <= 1.0, level - base,
                 "shifted tone is as loud as the original (within 1 dB)");
-        r.check("app_original_down_db", m.level_db - original >= 50, m.level_db - original,
+        r.check("app_original_down_db", level - faint_db(left, 440.0) >= 50, level - faint_db(left, 440.0),
                 "the original is at least 50 dB quieter than the shifted tone");
         r.check("app_quieted", all_equal(volumes_of(a->pid()), kQuietLevel), volumes_of(a->pid()),
                 "the player's hidden volume is 0.001");
@@ -231,20 +298,21 @@ int e2e_music(const Args& args) {
         const std::string speaker = music.status().value("speaker", "");
         r.check("status_speaker", speaker.find("CABLE") != std::string::npos, speaker,
                 "the status names the speakers it plays to (here the cable)");
-        r.wav("music_app_plus2", rec, 2);
     }
+    counts("A");
 
     // ---- B. 0 half-steps skips Rubber Band.
     say("B. 0 half-steps");
     music.set_semitones(0);
     sleep_s(1.5);
     {
-        const auto left = left_of(ear.listen(2.0));
+        const auto left = hear("zero", 2.0, 440.0);
         const auto m = measure_tone(left.data(), left.size(), kRate, 440.0);
+        const double level = steady_db(left, 440.0);
         r.check("zero_pitch_hz", std::fabs(m.frequency - 440.0) < 0.5, m.frequency, "at 0 the pitch is unchanged");
-        r.check("zero_level_change_db", std::fabs(m.level_db - base.level_db) <= 0.5, m.level_db - base.level_db,
-                "at 0 the level is unchanged");
+        r.check("zero_level_change_db", std::fabs(level - base) <= 0.5, level - base, "at 0 the level is unchanged");
     }
+    counts("B");
 
     // ---- C. Off puts the volume back.
     say("C. switch off");
@@ -253,16 +321,16 @@ int e2e_music(const Args& args) {
     r.check("stop_restores_volume", wait_volumes(a->pid(), 1.0f, 3), volumes_of(a->pid()),
             "switching off puts the player's volume back");
     {
-        const auto left = left_of(ear.listen(1.5));
-        const auto m = measure_tone(left.data(), left.size(), kRate, 440.0);
-        r.check("stop_level_change_db", std::fabs(m.level_db - base.level_db) <= 0.3, m.level_db - base.level_db,
+        const double level = steady_db(hear("stop", 1.5, 440.0), 440.0);
+        r.check("stop_level_change_db", std::fabs(level - base) <= 0.3, level - base,
                 "the original plays normally again");
     }
     a->kill();
 
     // ---- D. An app whose sound comes from a child process (like a browser).
     say("D. sound from a child process");
-    auto p = start_player(L"--freq 440 --amp 0.25 --seconds 900 --spawn-child", r);
+    player_logs = {r.out() / "player_D.txt"};
+    auto p = start_player(L"--freq 440 --amp 0.25 --seconds 900 --spawn-child", r, player_logs[0]);
     DWORD child = 0;
     for (int i = 0; i < 100 && !child; ++i) {
         sleep_s(0.1);
@@ -275,16 +343,13 @@ int e2e_music(const Args& args) {
     wait_music_state(music, "running", 10);
     sleep_s(2.0);
     {
-        const auto rec = ear.listen(3.0);
-        const auto left = left_of(rec);
+        const auto left = hear("child_plus2", 3.0, target);
         const auto m = measure_tone(left.data(), left.size(), kRate, target);
-        const double original = level_at(left, 440.0);
+        const double level = steady_db(left, target);
         r.check("child_pitch_hz", std::fabs(m.frequency - target) < 0.5, m.frequency, "the child's sound is shifted");
-        r.check("child_level_change_db", std::fabs(m.level_db - base.level_db) <= 1.0, m.level_db - base.level_db,
-                "same level");
-        r.check("child_original_down_db", m.level_db - original >= 50, m.level_db - original,
+        r.check("child_level_change_db", std::fabs(level - base) <= 1.0, level - base, "same level");
+        r.check("child_original_down_db", level - faint_db(left, 440.0) >= 50, level - faint_db(left, 440.0),
                 "the child's original is 50+ dB quieter");
-        r.wav("music_child_plus2", rec, 2);
     }
     music.stop();
     wait_music_state(music, "off", 5);
@@ -297,38 +362,42 @@ int e2e_music(const Args& args) {
         }
     }
     p->kill();
+    counts("D");
 
     // ---- E. All sound, two players.
     say("E. all sound, two players");
-    auto t1 = start_player(L"--freq 440 --amp 0.25 --seconds 900", r);
-    auto t2 = start_player(L"--freq 660 --amp 0.25 --seconds 900", r);
+    player_logs = {r.out() / "player_E1.txt", r.out() / "player_E2.txt"};
+    auto t1 = start_player(L"--freq 440 --amp 0.25 --seconds 900", r, player_logs[0]);
+    auto t2 = start_player(L"--freq 660 --amp 0.25 --seconds 900", r, player_logs[1]);
     wait_session(t1->pid());
     wait_session(t2->pid());
+    const double target2 = 660.0 * std::pow(2.0, 2.0 / 12);
+    // Two shifted tones and the two quiet originals, measured the same way for "All sound" and for two ticked apps.
+    auto check_two = [&](const std::string& prefix, const std::vector<float>& left, const std::string& what1,
+                         const std::string& what2) {
+        const auto m1 = measure_tone(left.data(), left.size(), kRate, target);
+        const auto m2 = measure_tone(left.data(), left.size(), kRate, target2);
+        const double l1 = steady_db(left, target), l2 = steady_db(left, target2);
+        const double o1 = faint_db(left, 440.0), o2 = faint_db(left, 660.0);
+        r.check(prefix + "pitch1_hz", std::fabs(m1.frequency - target) < 0.5, m1.frequency, what1 + "440 -> 493.9 Hz");
+        r.check(prefix + "pitch2_hz", std::fabs(m2.frequency - target2) < 0.5, m2.frequency, what2 + "660 -> 740.0 Hz");
+        r.check(prefix + "level1_change_db", std::fabs(l1 - base) <= 1.0, l1 - base, "");
+        r.check(prefix + "level2_change_db", std::fabs(l2 - base) <= 1.0, l2 - base, "");
+        r.check(prefix + "original1_down_db", l1 - o1 >= 45, l1 - o1,
+                "45+ dB here: with two tones, Rubber Band's own faint by-products (about -60 dB) sit at that pitch too");
+        r.check(prefix + "original2_down_db", l2 - o2 >= 45, l2 - o2,
+                "45+ dB here: with two tones, Rubber Band's own faint by-products (about -60 dB) sit at that pitch too");
+    };
     music.set_semitones(2);
     music.start_all();
     wait_music_state(music, "running", 10);
     sleep_s(2.5);
-    {
-        const auto rec = ear.listen(3.0);
-        const auto left = left_of(rec);
-        const double target2 = 660.0 * std::pow(2.0, 2.0 / 12);
-        const auto m1 = measure_tone(left.data(), left.size(), kRate, target);
-        const auto m2 = measure_tone(left.data(), left.size(), kRate, target2);
-        const double o1 = level_at(left, 440.0), o2 = level_at(left, 660.0);
-        r.check("all_pitch1_hz", std::fabs(m1.frequency - target) < 0.5, m1.frequency, "440 -> 493.9 Hz");
-        r.check("all_pitch2_hz", std::fabs(m2.frequency - target2) < 0.5, m2.frequency, "660 -> 740.0 Hz");
-        r.check("all_level1_change_db", std::fabs(m1.level_db - base.level_db) <= 1.0, m1.level_db - base.level_db, "");
-        r.check("all_level2_change_db", std::fabs(m2.level_db - base.level_db) <= 1.0, m2.level_db - base.level_db, "");
-        r.check("all_original1_down_db", m1.level_db - o1 >= 45, m1.level_db - o1,
-                "45+ dB here: with two tones, Rubber Band's own faint by-products (about -60 dB) sit at that pitch too");
-        r.check("all_original2_down_db", m2.level_db - o2 >= 45, m2.level_db - o2,
-                "45+ dB here: with two tones, Rubber Band's own faint by-products (about -60 dB) sit at that pitch too");
-        r.wav("music_all_plus2", rec, 2);
-    }
+    check_two("all_", hear("all_plus2", 3.0, target), "", "");
     music.stop();
     wait_music_state(music, "off", 5);
     r.check("all_restored", wait_volumes(t1->pid(), 1.0f, 3) && wait_volumes(t2->pid(), 1.0f, 3),
             json::array({volumes_of(t1->pid()), volumes_of(t2->pid())}), "both players come back");
+    counts("E");
 
     // ---- E2. Two ticked apps (each recorded on its own, then mixed).
     say("E2. two ticked apps");
@@ -336,29 +405,14 @@ int e2e_music(const Args& args) {
     music.start_pids({t1->pid(), t2->pid()});
     wait_music_state(music, "running", 10);
     sleep_s(2.5);
-    {
-        const auto rec = ear.listen(3.0);
-        const auto left = left_of(rec);
-        const double target2 = 660.0 * std::pow(2.0, 2.0 / 12);
-        const auto m1 = measure_tone(left.data(), left.size(), kRate, target);
-        const auto m2 = measure_tone(left.data(), left.size(), kRate, target2);
-        const double o1 = level_at(left, 440.0), o2 = level_at(left, 660.0);
-        r.check("two_apps_pitch1_hz", std::fabs(m1.frequency - target) < 0.5, m1.frequency, "first app 440 -> 493.9 Hz");
-        r.check("two_apps_pitch2_hz", std::fabs(m2.frequency - target2) < 0.5, m2.frequency, "second app 660 -> 740.0 Hz");
-        r.check("two_apps_level1_change_db", std::fabs(m1.level_db - base.level_db) <= 1.0, m1.level_db - base.level_db, "");
-        r.check("two_apps_level2_change_db", std::fabs(m2.level_db - base.level_db) <= 1.0, m2.level_db - base.level_db, "");
-        r.check("two_apps_original1_down_db", m1.level_db - o1 >= 45, m1.level_db - o1,
-                "45+ dB here: with two tones, Rubber Band's own faint by-products (about -60 dB) sit at that pitch too");
-        r.check("two_apps_original2_down_db", m2.level_db - o2 >= 45, m2.level_db - o2,
-                "45+ dB here: with two tones, Rubber Band's own faint by-products (about -60 dB) sit at that pitch too");
-        r.wav("music_two_apps_plus2", rec, 2);
-    }
+    check_two("two_apps_", hear("two_apps_plus2", 3.0, target), "first app ", "second app ");
     music.stop();
     wait_music_state(music, "off", 5);
     r.check("two_apps_restored", wait_volumes(t1->pid(), 1.0f, 3) && wait_volumes(t2->pid(), 1.0f, 3),
             json::array({volumes_of(t1->pid()), volumes_of(t2->pid())}), "both apps come back");
     t1->kill();
     t2->kill();
+    counts("E2");
 
     // ---- H. A ticked app that isn't open yet joins when it starts (and again after a restart).
     say("H. ticked app opens later");
@@ -377,9 +431,13 @@ int e2e_music(const Args& args) {
                                        waiting["apps"][0]["running"] == false,
                 waiting["state"], "a ticked app that isn't open is listed and waited for");
         for (int round = 0; round < 2; ++round) {
+            const std::string name = round == 0 ? "later_app_joins" : "later_app_rejoins_after_restart";
+            player_logs = {r.out() / ("player_" + name + ".txt")};
             std::unique_ptr<ChildProcess> player;
             try {
-                player = start_detached(fake.wstring(), L"tonegen --freq 440 --amp 0.25 --seconds 900",
+                player = start_detached(fake.wstring(),
+                                        L"tonegen --freq 440 --amp 0.25 --seconds 900 --log \"" +
+                                            fs::absolute(player_logs[0]).wstring() + L"\"",
                                         parent_pid_of(GetCurrentProcessId()));
             } catch (const std::exception& e) {
                 r.note(e.what());
@@ -388,17 +446,20 @@ int e2e_music(const Args& args) {
             wait_session(player->pid());
             wait_music_state(music, "running", 10);
             sleep_s(2.5);
-            const auto left = left_of(ear.listen(2.0));
+            const auto left = hear(name, 2.0, target);
             const auto m = measure_tone(left.data(), left.size(), kRate, target);
-            const std::string name = round == 0 ? "later_app_joins" : "later_app_rejoins_after_restart";
-            r.check(name, std::fabs(m.frequency - target) < 0.5 && m.level_db - level_at(left, 440.0) >= 50,
-                    m.frequency, "it is shifted as soon as it opens");
+            const double down = steady_db(left, target) - faint_db(left, 440.0);
+            r.check(name, std::fabs(m.frequency - target) < 0.5 && down >= 50,
+                    json{{"hz", round3(m.frequency)}, {"original_down_db", round3(down)}},
+                    "it is shifted as soon as it opens (493.9 Hz, the original 50+ dB quieter)");
             player->kill();
             sleep_s(1.0);
         }
         music.stop();
         wait_music_state(music, "off", 5);
     }
+    player_logs.clear();
+    counts("H");
 
     // ---- F. Total delay, measured with short beeps shifted up an octave.
     say("F. total delay");

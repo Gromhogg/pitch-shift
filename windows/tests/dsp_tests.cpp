@@ -46,6 +46,35 @@ TEST_CASE("a very quiet tone boosted 1000 times comes back exactly") {
     CHECK(boosted.thdn_db < -100);
 }
 
+TEST_CASE("a faint tone next to a loud one reads at its real level") {
+    // Like the checks: the shifted tone (493.9 Hz) loud, the quieted original (440 Hz) 60 dB below it.
+    const double rate = 48000;
+    for (double seconds : {1.995, 2.0, 2.003, 2.01, 3.0}) {
+        auto x = make_tone(440.0 * std::pow(2.0, 2.0 / 12), 0.25, rate, 1, seconds);
+        const auto faint = make_tone(440.0, 0.25 * 0.001, rate, 1, seconds);
+        for (size_t i = 0; i < x.size(); ++i) x[i] += faint[i];
+        CHECK(to_db(faint_tone_amplitude(x.data(), x.size(), rate, 440.0)) ==
+              doctest::Approx(to_db(0.25) - 60.0).epsilon(0.003));
+    }
+    // A cut-off window lets the loud tone alone spill onto 440 Hz: in 1.995 s it reads only 51 dB below it.
+    auto x = make_tone(440.0 * std::pow(2.0, 2.0 / 12), 0.25, rate, 1, 1.995);
+    CHECK(to_db(tone_amplitude(x.data(), x.size(), rate, 440.0)) > to_db(0.25) - 52.0);
+    CHECK(to_db(faint_tone_amplitude(x.data(), x.size(), rate, 440.0)) < to_db(0.25) - 100.0);
+}
+
+TEST_CASE("a steady level is not thrown off by one hiccup") {
+    const double rate = 48000;
+    auto x = make_tone(440.0, 0.25, rate, 1, 2.0);
+    // 24 ms lost near the middle: the rest of the tone comes a little early (its timing jumps half a wave).
+    x.erase(x.begin() + 50000, x.begin() + 50000 + 1145);
+    const auto m = measure_tone(x.data(), x.size(), rate, 440.0);
+    CHECK(m.level_db < to_db(0.25) - 1.0);  // one best-fit sine over all of it drops
+    const auto s = steady_level(x.data(), x.size(), rate, 440.0);
+    CHECK(s.level_db == doctest::Approx(to_db(0.25)).epsilon(0.002));
+    CHECK(s.lowest_db < s.level_db - 1.0);  // the hiccup still shows in its piece
+    CHECK(s.pieces == 19);
+}
+
 TEST_CASE("noise shows up in the cleanliness number") {
     auto tone = make_tone(440.0, 0.5, 48000, 1, 1.0);
     std::mt19937 rng(1);

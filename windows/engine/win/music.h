@@ -121,6 +121,9 @@ private:
     nlohmann::json apps_ = nlohmann::json::array();
     int quieted_ = 0;
     std::atomic<uint64_t> clipped_{0}, gaps_{0};
+    // How often the speaker stream ran empty (the playing thread came back too late): players already closed, the
+    // current one (as of the last look), and the total at the last reset_counts().
+    std::atomic<uint64_t> starved_gone_{0}, starved_now_{0}, starved_reset_{0};
     double output_ms_ = 0;
     uint64_t current_gaps_ = 0;
     std::wstring speaker_;

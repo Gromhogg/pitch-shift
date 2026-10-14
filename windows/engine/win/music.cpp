@@ -256,6 +256,7 @@ void MusicPath::tick() {
         std::lock_guard<std::mutex> lock(mix_lock_);
         running = !streams_.empty();
         if (renderer_) output_ms = renderer_->latency_ms() + renderer_->buffer_ms();
+        starved_now_ = renderer_ ? renderer_->starved() : 0;
     }
     std::lock_guard<std::mutex> lock(status_lock_);
     current_gaps_ = live_gaps;
@@ -350,6 +351,10 @@ void MusicPath::add_stream(DWORD root, bool include_tree) {
                 player_changed_locked();
             }
         }
+        if (player) {
+            starved_gone_ += player->starved();
+            starved_now_ = 0;
+        }
         throw;
     }
     std::lock_guard<std::mutex> lock(mix_lock_);
@@ -377,6 +382,10 @@ void MusicPath::remove_stream(DWORD root) {
             advanced = std::move(advanced_shifter_);
             player_changed_locked();
         }
+    }
+    if (player) {
+        starved_gone_ += player->starved();
+        starved_now_ = 0;
     }
     player.reset();
 }
@@ -469,6 +478,7 @@ void MusicPath::reset_counts() {
     cushion_.reset_counts();
     clipped_ = 0;
     gaps_ = 0;
+    starved_reset_ = starved_gone_ + starved_now_;
     std::lock_guard<std::mutex> lock(status_lock_);
     current_gaps_ = 0;
 }
@@ -481,6 +491,7 @@ nlohmann::json MusicPath::status() const {
         mode = mode_ == Mode::off ? "off" : mode_ == Mode::all ? "all" : mode_ == Mode::pids ? "pids" : "apps";
     }
     const double queued_ms = cushion_.queued_frames() * 1000.0 / kRate;
+    const uint64_t starved = starved_gone_ + starved_now_;
     const bool adv = adv_on_;
     // The shifting (Rubber Band about 115 ms, or the Advanced engine's fixed delay) + the cushion + Windows' output buffer.
     const double shifter_ms = adv ? adv_latency_ms_.load() : 115.0;
@@ -509,6 +520,7 @@ nlohmann::json MusicPath::status() const {
             {"gaps", current_gaps_},
             {"guarded", booster_.guarded()},
             {"clipped", clipped_.load()},
+            {"output_starved", starved - std::min(starved_reset_.load(), starved)},
             {"queued_ms", queued_ms},
             {"output_ms", output_ms_},
             {"delay_estimate_ms", state_ == "running" ? shifter_ms + queued_ms + output_ms_ : 0}};

@@ -104,6 +104,28 @@ double tone_amplitude(const float* samples, size_t count, double rate, double hz
     return fit_sine(samples, count, rate, hz).amplitude();
 }
 
+double faint_tone_amplitude(const float* samples, size_t count, double rate, double hz) {
+    if (count < 16) return 0;
+    // The Hann window adds up to count/2, so a sine of amplitude A gives |sum| = A * count/4.
+    return 4.0 * std::sqrt(windowed_power(samples, count, rate, hz)) / double(count);
+}
+
+SteadyLevel steady_level(const float* samples, size_t count, double rate, double hz, double piece_seconds) {
+    SteadyLevel s;
+    const size_t piece = size_t(rate * piece_seconds);
+    if (piece < 16) return s;
+    std::vector<double> levels;
+    for (size_t at = 0; at + piece <= count; at += piece)
+        levels.push_back(to_db(faint_tone_amplitude(samples + at, piece, rate, hz)));
+    if (levels.empty()) return s;
+    std::sort(levels.begin(), levels.end());
+    s.pieces = levels.size();
+    s.lowest_db = levels.front();
+    s.highest_db = levels.back();
+    s.level_db = levels[levels.size() / 2];
+    return s;
+}
+
 ToneMeasure measure_tone(const float* x, size_t n, double rate, double expected_hz) {
     ToneMeasure m;
     m.frames = n;

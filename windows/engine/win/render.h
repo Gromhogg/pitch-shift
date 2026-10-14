@@ -28,6 +28,8 @@ public:
     void stop();
     HRESULT error() const { return error_; }
     uint64_t frames() const { return frames_; }
+    // How often the buffer had run empty by the time this stream came to fill it (each time a short gap was heard).
+    uint64_t starved() const { return starved_; }
     double buffer_ms() const { return buffer_frames_ * 1000.0 / kRate; }
     double latency_ms() const;  // what Windows says the stream adds
 
@@ -44,7 +46,7 @@ private:
     Source source_;
     std::thread thread_;
     std::atomic<bool> stop_{false};
-    std::atomic<uint64_t> frames_{0};
+    std::atomic<uint64_t> frames_{0}, starved_{0};
     std::atomic<HRESULT> error_{S_OK};
 };
 

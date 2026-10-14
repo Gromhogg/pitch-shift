@@ -99,6 +99,7 @@ void Renderer::run() {
             error_ = hr;  // for example, the speakers were unplugged
             break;
         }
+        if (padding == 0) ++starved_;  // everything was played before we came back: Windows filled in silence
         fill(buffer_frames_ - padding);
         if (FAILED(error_.load())) break;
     }

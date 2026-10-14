@@ -10,7 +10,7 @@
 // Information:
 //   diag                                     sound devices, app sessions, restore list (JSON)
 // Checks (used on GitHub):
-//   tonegen [--freq 440] [--amp 0.25] [--seconds 600] [--device "name"] [--pulse] [--spawn-child]
+//   tonegen [--freq 440] [--amp 0.25] [--seconds 600] [--device "name"] [--pulse] [--spawn-child] [--log file]
 //   record --device "name" --seconds 5 --out file.wav [--channels 1]
 //   probe [--out folder]                     how app volume affects app recording
 //   e2e-music | e2e-advanced | e2e-voice | e2e-crash [--out folder]
