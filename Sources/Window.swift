@@ -161,9 +161,10 @@ final class GradientSwitch: NSView {
     }
 }
 
-// The voice style: a slider from Natural (left, 0) to Cartoon (right, 1). The track fills with the icon's
-// purple-to-pink colors up to a round white knob (like GradientSwitch's), with small "Natural" and "Cartoon" labels
-// at the ends. Click or drag to set it; once clicked, the arrow keys move it in steps of 0.1.
+// The voice style: a slider from Natural (left, 0) to Cartoon (right, 1). The track shows the icon's purple-to-pink
+// colors from end to end, with a round white knob (like GradientSwitch's) and small "Natural" and "Cartoon" labels
+// under its ends. Click or drag to set it; with "Keyboard navigation" on, the arrow keys move it in steps of 0.1.
+// Nothing moves on its own, so it's the same with Reduce Motion.
 final class GradientSlider: NSView {
     var onChange: (Float) -> Void = { _ in }
     var isEnabled = true {
@@ -181,20 +182,14 @@ final class GradientSlider: NSView {
             needsDisplay = true
         }
     }
-    var labelsBelow = true { didSet { invalidateIntrinsicContentSize(); needsDisplay = true } }
     // Sizes for the window's scale (1 = smallest window).
-    var scale: CGFloat = 1 {
-        didSet {
-            guard oldValue != scale else { return }
-            invalidateIntrinsicContentSize()
-            noteFocusRingMaskChanged()
-            needsDisplay = true
-        }
-    }
+    var scale: CGFloat = 1 { didSet { if oldValue != scale { resized() } } }
+    // The height of the button beside it (Test): the track runs through the middle of that height, so they line up.
+    var rowHeight: CGFloat = 24 { didSet { if oldValue != rowHeight { resized() } } }
     private var grab: CGFloat?  // where on the knob the mouse took hold (so the knob doesn't jump)
 
     init() {
-        super.init(frame: NSRect(x: 0, y: 0, width: 150, height: 24))
+        super.init(frame: NSRect(x: 0, y: 0, width: 150, height: 40))
         setAccessibilityElement(true)
         setAccessibilityRole(.slider)
         setAccessibilityLabel("Voice style")
@@ -211,78 +206,69 @@ final class GradientSlider: NSView {
         value <= 0 ? "Natural" : value >= 1 ? "Cartoon" : "\(Int((value * 100).rounded())) percent Cartoon"
     }
 
-    private var knobSize: CGFloat { (16 * scale).rounded() }
-    private var trackHeight: CGFloat { (5 * scale).rounded() }
-    private var labelFont: NSFont { .systemFont(ofSize: 11 + (scale - 1) * 2.5) }
-    private let labels = ("Natural", "Cartoon")
-    private var labelAttributes: [NSAttributedString.Key: Any] {
-        [.font: labelFont, .foregroundColor: NSColor.secondaryLabelColor.withAlphaComponent(isEnabled ? 1 : 0.5)]
+    private func resized() {
+        invalidateIntrinsicContentSize()
+        noteFocusRingMaskChanged()
+        needsDisplay = true
     }
-    private func labelWidth(_ text: String) -> CGFloat { (text as NSString).size(withAttributes: [.font: labelFont]).width.rounded(.up) }
+
+    // The knob and track follow the switches' sizes (bigger once the window is 1.3 times bigger).
+    private var large: Bool { Theme.controlSize(scale) == .large }
+    private var knobSize: CGFloat { large ? 20 : 16 }
+    private var trackHeight: CGFloat { large ? 7 : 6 }
+    private var labelFont: NSFont { .systemFont(ofSize: 11 + (scale - 1) * 2.5) }
+    private var labelHeight: CGFloat { (labelFont.ascender - labelFont.descender).rounded(.up) }
+    private var middle: CGFloat { (bounds.maxY - rowHeight / 2).rounded() }  // the track's middle
 
     override var intrinsicContentSize: NSSize {
-        let row = (24 * scale).rounded()
-        return NSSize(width: NSView.noIntrinsicMetric, height: labelsBelow ? knobSize + 2 + labelFont.boundingRectForFont.height.rounded(.up) : row)
+        NSSize(width: NSView.noIntrinsicMetric, height: (rowHeight / 2).rounded() + knobSize / 2 + 1 + labelHeight)
     }
 
-    // The line the knob moves along (its middle), and the knob's place on it.
+    // The line the knob moves along, and the knob's place on it.
     private var track: NSRect {
-        let gap = (6 * scale).rounded()
-        let left = labelsBelow ? 0 : labelWidth(labels.0) + gap
-        let right = labelsBelow ? 0 : labelWidth(labels.1) + gap
-        let mid = labelsBelow ? bounds.maxY - knobSize / 2 - 1 : bounds.midY
-        return NSRect(x: bounds.minX + left, y: (mid - trackHeight / 2).rounded(), width: max(knobSize, bounds.width - left - right), height: trackHeight)
+        NSRect(x: bounds.minX, y: middle - trackHeight / 2, width: bounds.width, height: trackHeight)
     }
 
     private var knob: NSRect {
-        let t = track
-        let x = t.minX + CGFloat(value) * (t.width - knobSize)
-        return NSRect(x: x, y: t.midY - knobSize / 2, width: knobSize, height: knobSize)
+        let x = bounds.minX + CGFloat(value) * max(0, bounds.width - knobSize)
+        return NSRect(x: x.rounded(), y: middle - knobSize / 2, width: knobSize, height: knobSize)
     }
 
-    override var isFlipped: Bool { false }
-
     override func draw(_ dirtyRect: NSRect) {
-        let alpha: CGFloat = isEnabled ? 1 : 0.4
         let t = track
         let shape = NSBezierPath(roundedRect: t, xRadius: t.height / 2, yRadius: t.height / 2)
-        NSColor.quaternaryLabelColor.withAlphaComponent(0.25 * alpha + 0.1).setFill()
+        NSColor.quaternaryLabelColor.withAlphaComponent(0.35).setFill()
         shape.fill()
-        // The colored part: the whole purple-to-pink run, shown from the left end up to the knob.
-        let k = knob
         NSGraphicsContext.saveGraphicsState()
-        NSBezierPath(rect: NSRect(x: t.minX, y: t.minY - 1, width: k.midX - t.minX, height: t.height + 2)).addClip()
-        NSGraphicsContext.current?.cgContext.setAlpha(alpha)
+        NSGraphicsContext.current?.cgContext.setAlpha(isEnabled ? 1 : 0.35)
         Theme.gradient.draw(in: shape, angle: 0)
         NSGraphicsContext.restoreGraphicsState()
 
-        // Labels at the ends.
-        let attributes = labelAttributes
-        let lineHeight = labelFont.boundingRectForFont.height
-        for (text, alignLeft) in [(labels.0, true), (labels.1, false)] {
-            let width = labelWidth(text)
-            let x = alignLeft ? bounds.minX : bounds.maxX - width
-            let y = labelsBelow ? bounds.minY : (bounds.midY - lineHeight / 2).rounded()
-            (text as NSString).draw(at: NSPoint(x: x, y: y + (labelsBelow ? 0 : 0)), withAttributes: attributes)
+        // "Natural" under the left end, "Cartoon" under the right end.
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: labelFont, .foregroundColor: isEnabled ? NSColor.secondaryLabelColor : NSColor.tertiaryLabelColor]
+        let top = middle - knobSize / 2 - 1  // just under the knob
+        for (text, left) in [("Natural", true), ("Cartoon", false)] {
+            let width = (text as NSString).size(withAttributes: attributes).width
+            (text as NSString).draw(at: NSPoint(x: left ? bounds.minX : bounds.maxX - width, y: top - labelHeight), withAttributes: attributes)
         }
 
         // The knob, with a soft shadow.
         NSGraphicsContext.saveGraphicsState()
         let shadow = NSShadow()
-        shadow.shadowColor = NSColor.black.withAlphaComponent(0.3)
+        shadow.shadowColor = NSColor.black.withAlphaComponent(isEnabled ? 0.3 : 0.15)
         shadow.shadowBlurRadius = 2
         shadow.shadowOffset = NSSize(width: 0, height: -1)
         shadow.set()
         NSColor.white.withAlphaComponent(isEnabled ? 1 : 0.7).setFill()
-        NSBezierPath(ovalIn: k).fill()
+        NSBezierPath(ovalIn: knob).fill()
         NSGraphicsContext.restoreGraphicsState()
     }
 
-    // Clicking it lets the arrow keys move it. The focus ring shows only with "Keyboard navigation" on.
-    override var acceptsFirstResponder: Bool { isEnabled }
-    override var focusRingMaskBounds: NSRect { NSApp.isFullKeyboardAccessEnabled ? track.insetBy(dx: -2, dy: -(knobSize - trackHeight) / 2 - 2) : .zero }
+    // Reachable with Tab when "Keyboard navigation" is on in the Mac's settings (like the switches).
+    override var acceptsFirstResponder: Bool { isEnabled && NSApp.isFullKeyboardAccessEnabled }
+    override var focusRingMaskBounds: NSRect { track.insetBy(dx: 0, dy: -(knobSize - trackHeight) / 2) }
     override func drawFocusRingMask() {
-        guard NSApp.isFullKeyboardAccessEnabled else { return }
         let ring = focusRingMaskBounds
         NSBezierPath(roundedRect: ring, xRadius: ring.height / 2, yRadius: ring.height / 2).fill()
     }
@@ -298,7 +284,7 @@ final class GradientSlider: NSView {
 
     override func mouseDown(with event: NSEvent) {
         guard isEnabled else { return }
-        window?.makeFirstResponder(self)  // also finishes typing in a number
+        window?.makeFirstResponder(acceptsFirstResponder ? self : nil)  // also stops typing in a number
         let point = convert(event.locationInWindow, from: nil)
         let k = knob
         grab = k.insetBy(dx: -2, dy: -4).contains(point) ? point.x - k.midX : 0
@@ -313,9 +299,8 @@ final class GradientSlider: NSView {
     override func mouseUp(with event: NSEvent) { grab = nil }
 
     private func follow(_ point: NSPoint) {
-        let t = track
-        let travel = max(1, t.width - knobSize)
-        set(Float((point.x - (grab ?? 0) - t.minX - knobSize / 2) / travel))
+        let travel = max(1, bounds.width - knobSize)
+        set(Float((point.x - (grab ?? 0) - bounds.minX - knobSize / 2) / travel))
     }
 
     override func accessibilityPerformIncrement() -> Bool {
@@ -951,12 +936,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         micUID: defaults.string(forKey: Keys.voiceMic))
     lazy var test = VoiceTest(voice: voice)
 
-    // The saved voice style. Version 2.0 had a Natural/Cartoon switch instead: Natural becomes 0, Cartoon 1.
-    // Moving the slider removes the old setting, so if it's there it's the newest choice.
+    // The saved voice style. Version 2.0 had a Natural/Cartoon switch instead: the first launch of this version turns
+    // it into the slider's setting (Natural 0, Cartoon 1) and removes it; from then on only voiceCartoon is used.
     static func savedCartoon(_ defaults: UserDefaults) -> Float {
-        if let natural = defaults.object(forKey: Keys.voiceNatural) as? Bool { return natural ? 0 : 1 }
-        if let value = (defaults.object(forKey: Keys.voiceCartoon) as? NSNumber)?.floatValue, value.isFinite { return max(0, min(1, value)) }
-        return 0
+        if let natural = defaults.object(forKey: Keys.voiceNatural) as? Bool {
+            let value: Float = natural ? 0 : 1
+            if preview == nil {  // pictures change nothing
+                defaults.set(value, forKey: Keys.voiceCartoon)
+                defaults.removeObject(forKey: Keys.voiceNatural)
+            }
+            return value
+        }
+        guard let value = (defaults.object(forKey: Keys.voiceCartoon) as? NSNumber)?.floatValue, value.isFinite else { return 0 }
+        return max(0, min(1, value))
     }
 
     var window: NSWindow!
@@ -1012,6 +1004,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     func showWindow() {
+        if preview != nil {
+            // Pictures: the window stays out of sight under the desktop picture (screencapture -l still sees it), so
+            // it never covers what's on screen, can't be clicked, and never switches apps.
+            window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow)) - 1)
+            window.orderBack(nil)
+            window.makeFirstResponder(nil)
+            return
+        }
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(nil)
         NSApp.activate(ignoringOtherApps: true)
@@ -1081,11 +1081,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         testWidth.isActive = true
         let styleRow = CardRow(views: [style, testButton])
         styleRow.distribution = .fill
+        styleRow.alignment = .top  // the slider's track lines up with the middle of Test; its labels hang below
         styleRow.onScale = { [unowned self, unowned styleRow] scale in
-            style.scale = scale
             testButton.useSize(Theme.controlSize(scale))
             testWidth.constant = (72 * scale).rounded()
-            styleRow.spacing = (8 * scale).rounded()
+            style.scale = scale
+            style.rowHeight = testButton.intrinsicContentSize.height
+            styleRow.spacing = (10 * scale).rounded()
         }
 
         micName.textColor = .secondaryLabelColor
@@ -1363,7 +1365,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         voice.cartoon = value
         guard preview == nil else { return }  // pictures change nothing
         defaults.set(value, forKey: Keys.voiceCartoon)
-        defaults.removeObject(forKey: Keys.voiceNatural)  // the slider's value is the newest choice now
     }
 
     @objc func testClicked() { test.click() }
@@ -1474,7 +1475,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         guard let preview else { return }
         if preview.contains("light") { window.appearance = NSAppearance(named: .aqua) }
         if let cartoonArg { voice.cartoon = cartoonArg }  // where the style slider is (--cartoon-amount 0.5)
-        style.labelsBelow = !preview.contains("labels-beside")
         refresh()
         if preview.contains("typing") {
             window.makeFirstResponder(hearCard.amount)

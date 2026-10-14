@@ -4,11 +4,11 @@
 //   --test [--pid N | --app BUNDLE_ID | --all] [--steps 2.5] [--seconds S]     "What you hear" for a few seconds
 //   --test-voice [--mic NAME] [--tone 440 | --file F] [--steps 3] [--cartoon | --cartoon-amount 0.5] [--seconds S]
 //                [--out F.caf]                 sends a tone or file through the voice chain and records Pitch Shift Mic
-//                                              (voice style: 0 = Natural, the default; 1 = Cartoon, same as --cartoon)
+//                                              (voice style from 0 = Natural, the default, to 1 = Cartoon; --cartoon = 1)
 //   --render-voice IN OUT [--steps 3] [--cartoon | --cartoon-amount 0.5] [--cartoon-at "1:1,2:0"]
 //                                              shifts a sound file with the voice's own settings (offline, no devices;
-//                                              --cartoon-at moves the style part way through)
-//   --test-button [--volume 0.03]              presses Test with a quiet tone as the voice (record 5 s, play back)
+//                                              --cartoon-at "1:1,2:0" moves the style to 1 at 1 s and back to 0 at 2 s)
+//   --test-button [--mic NAME] [--volume 0.03] presses Test with a quiet tone as the voice (record 5 s, play back)
 //   --test ... --advanced [--record-out F.wav] [--steps-at "3:8,6:-5"]
 //                                              "What you hear" with Advanced processing on (--watch prints the delay;
 //                                              --record-out saves what it played; --steps-at changes the amount live)
@@ -23,9 +23,10 @@ func arg(_ name: String) -> String? {
     guard let i = args.firstIndex(of: name), i + 1 < args.count else { return nil }
     return args[i + 1]
 }
-// --preview STATES [--size 800x400]: show the window in a state for screenshots, without touching any sound
-// (states: hear-on, voice-on, waiting, typing, recording, playing, listening, hover, menu, roll, resize, no-driver,
-// advanced-alert, light).
+// --preview STATES [--size 800x400] [--cartoon-amount 0.5]: show the window in a state for screenshots, without
+// touching any sound or settings, and without switching apps (states: hear-on, voice-on, waiting, typing, recording,
+// playing, listening, hover, menu, roll, resize, no-driver, advanced-alert, light; --cartoon-amount sets the voice
+// style slider).
 let preview = arg("--preview")
 
 var signalSources: [DispatchSourceSignal] = []
@@ -244,7 +245,8 @@ if args.contains("--test-voice") {
 
 // Presses the Test button with a quiet tone as the "voice": records 5 s from Pitch Shift Mic, then plays it back.
 if args.contains("--test-button") {
-    let voice = VoiceShifter(halfSteps: 3, cartoon: 0, micUID: nil)
+    let micUID = arg("--mic").flatMap { name in Mics.list().first { $0.name == name }?.uid }  // e.g. not a Bluetooth headset's
+    let voice = VoiceShifter(halfSteps: 3, cartoon: 0, micUID: micUID)
     let rate = voice.currentMic.map(nominalRate) ?? 48000
     let volume = arg("--volume").flatMap(Double.init) ?? 0.03
     var phase = 0.0
@@ -265,7 +267,7 @@ if args.contains("--test-button") {
 }
 
 let app = NSApplication.shared
-app.setActivationPolicy(.regular)
+app.setActivationPolicy(preview == nil ? .regular : .accessory)  // pictures: no Dock icon, no switching apps
 let delegate = AppDelegate()
 app.delegate = delegate
 onQuitSignals {

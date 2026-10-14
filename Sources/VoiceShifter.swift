@@ -47,18 +47,20 @@ struct VoiceParams {
     var silent: Bool    // during Test playback, so the replay isn't sent into a live call
 }
 
-// Rubber Band settings for the voice (the Windows version uses the same ones).
+// Rubber Band settings for the voice (the Windows version uses the same ones, with a Natural/Cartoon switch).
 // Not the "live shifter" (rubberband_live_*): it only keeps the voice's shape (formants) up to about 10 kHz and
 // moves everything above that up like Cartoon, which put a loud hiss on every word in Natural ("buzzy", like a Z).
 // This keeps formants over the whole range, with about the same delay.
-// Formants are always "preserved"; the style slider then sets how far they move (see voiceFormantScale).
+// Formants are always "preserved": Rubber Band only uses a formant scale (below) with that option on. The style
+// slider then sets how far they move (see voiceFormantScale).
 let voiceShifterOptions = Int32(RubberBandOptionProcessRealTime.rawValue | RubberBandOptionEngineFiner.rawValue
     | RubberBandOptionWindowShort.rawValue | RubberBandOptionPitchHighConsistency.rawValue | RubberBandOptionFormantPreserved.rawValue)
 
 // How far the voice's shape (formants) moves for a style from 0 (Natural) to 1 (Cartoon). The formants end up
-// moved by pitch^cartoon: not at all for Natural, as much as the pitch for Cartoon. Rubber Band counts this from
-// the already shifted sound, so it gets pitch^(cartoon - 1). At 0 it gets 0, meaning "keep the formants" (exactly
-// the old Natural); at 1 it gets 1, meaning "leave them where the pitch puts them" (exactly the old Cartoon).
+// moved by pitch^cartoon: not at all for Natural, as much as the pitch for Cartoon. Rubber Band counts the formant
+// scale on top of the pitch change (checked in its source, R3Stretcher::adjustFormant), so it gets
+// pitch^(cartoon - 1). At 0 it gets 0, its own "keep the formants" value (exactly the old Natural); at 1 it gets 1,
+// which leaves the sound as the pitch change makes it (exactly the old Cartoon).
 func voiceFormantScale(halfSteps: Float, cartoon: Float) -> Double {
     cartoon <= 0 ? 0 : pow(2, Double(halfSteps) / 12 * Double(min(cartoon, 1) - 1))
 }
@@ -76,11 +78,11 @@ final class VoiceStretcher {
         guard let made = rubberband_new(UInt32(rate), 1, voiceShifterOptions, 1, pow(2, Double(halfSteps) / 12)) else { return nil }
         state = made
         self.halfSteps = halfSteps
-        self.cartoon = cartoon
-        cartoonNow = cartoon
+        self.cartoon = max(0, min(1, cartoon))
+        cartoonNow = self.cartoon
         glideStep = Float(1 / (0.15 * rate))  // all the way from Natural to Cartoon in 0.15 s
         rubberband_set_max_process_size(state, 4096)
-        rubberband_set_formant_scale(state, voiceFormantScale(halfSteps: halfSteps, cartoon: cartoon))
+        rubberband_set_formant_scale(state, voiceFormantScale(halfSteps: halfSteps, cartoon: self.cartoon))
     }
 
     deinit { rubberband_delete(state) }
@@ -733,7 +735,7 @@ func renderVoiceFile(input: String, output: String, halfSteps: Float, cartoon: F
         throw Problem(message: "Could not write \(output).")
     }
     buffer.frameLength = AVAudioFrameCount(result.count)
-    result.withUnsafeBufferPointer { memcpy(buffer.floatChannelData![0], $0.baseAddress!, result.count * MemoryLayout<Float>.size) }
+    _ = result.withUnsafeBufferPointer { memcpy(buffer.floatChannelData![0], $0.baseAddress!, result.count * MemoryLayout<Float>.size) }
     let out = try AVAudioFile(forWriting: URL(fileURLWithPath: output), settings: format.settings)
     try out.write(from: buffer)
 }
