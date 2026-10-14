@@ -395,14 +395,32 @@ int e2e_music(const Args& args) {
         wait_music_state(music, "off", 5);
     };
 
-    // --only-later N: just H, N times. Each time it first waits 4 s, so the engine has put back the volume Windows
-    // remembered for the last FakePlayer (it quit while quiet) and the next one starts loud, as the first one in a
-    // full run does. --no-nudge turns off the engine's second write of the quiet volume (MusicPath::set_nudging).
+    // --only-later N: just H, N times, each time right after two other players were shifted and quit (as E2 does in
+    // a full run; by then the engine has also put back the volume Windows remembered for the last FakePlayer, so the
+    // next one starts loud, as the first one in a full run does). --no-nudge turns off the engine's second write of
+    // the quiet volume (MusicPath::set_nudging).
     const int only_later = int(args.number(L"--only-later", 0));
     if (only_later > 0) {
         save_recordings = false;
         music.set_nudging(!args.has(L"--no-nudge"));
-        for (int i = 1; i <= only_later; ++i) later_apps("_" + std::to_string(i), 4.0);
+        for (int i = 1; i <= only_later; ++i) {
+            auto t1 = start_player(L"--freq 440 --amp 0.25 --seconds 900", r);
+            auto t2 = start_player(L"--freq 660 --amp 0.25 --seconds 900", r);
+            wait_session(t1->pid());
+            wait_session(t2->pid());
+            music.set_semitones(2);
+            music.start_pids({t1->pid(), t2->pid()});
+            wait_music_state(music, "running", 10);
+            sleep_s(2.0);
+            music.stop();
+            wait_music_state(music, "off", 5);
+            wait_volumes(t1->pid(), 1.0f, 3);
+            wait_volumes(t2->pid(), 1.0f, 3);
+            r.info("other_players_" + std::to_string(i), json::array({t1->pid(), t2->pid()}));
+            t1->kill();
+            t2->kill();
+            later_apps("_" + std::to_string(i), 1.0);
+        }
         restore_all((r.out() / L"restore.json").wstring());
         return r.finish("e2e_music.json");
     }
