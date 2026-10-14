@@ -27,7 +27,7 @@ on:
         type: number
         default: 0
       music_args:
-        description: 'More e2e-music options for repeat runs (for example --only-later 40)'
+        description: 'More e2e-music options for repeat runs (for example --only-later 30 --no-nudge)'
         type: string
         default: ''
 

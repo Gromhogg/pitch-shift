@@ -170,8 +170,9 @@ Run the **Windows** workflow by hand with **repeat** above 0 (Actions → Window
 on each processor type and always ends green (a failed run would send an email each time). The `repeat-x64` and
 `repeat-arm64` artifacts hold `summary.md` (passes, and which checks failed how often), every run's log and report,
 and the recordings of runs with a failed check or a hiccup. `music_args` passes more options, for example
-`--only-later 40` (only the "ticked app opens later" check, 40 times). Normal pushes still run every check once and
-fail on any failed check.
+`--only-later 30` (only the "ticked app opens later" check, 30 times, each right after two other players were
+shifted and quit, as in a full run) and `--no-nudge` (see below). Normal pushes still run every check once and fail on
+any failed check.
 
 How `e2e-music` measures (in `tool/e2e.cpp`), and why:
 - GitHub's runners now and then lose about 10 ms of sound on the way to the cable: the whole cable goes silent, also
@@ -185,10 +186,19 @@ How `e2e-music` measures (in `tool/e2e.cpp`), and why:
   down" checks were really measuring that spill. Measured properly, the original is 60 dB down, as set.
 - The long runs' "no gaps" check lists pieces where the whole cable went silent on their own
   (`long_run_cable_silences`); a gap of Pitch Shift's own would still leave the quiet original playing.
+- Closing a player while it is being shifted lets the cushion run dry once, which counts as a dropout (the sound
+  simply ended). The beep section resets the counts first, so its status is about the beeps.
 - Each listening window is saved (`music_<name>.wav`) with notes in the report (`<name>_window`): the steady level,
   the quietest piece, the engine's dropouts / skips / lost packets / speaker stream running empty
   (`output_starved`), packets lost on the way to the recording, the test player's own hiccups (`tonegen --log`), and
   where the cable went silent.
+
+Found this way (a real bug, fixed in the engine): on ARM64, a ticked app that opened later sometimes played on at
+full volume next to the shifted copy. Its session said 0.001, but Windows had not applied it (the volume was set just
+as the app started playing; in about 2 of 5 such starts). The booster notices loud sound that wasn't quieted, so the
+engine now writes a slightly different quiet volume (0.000999) to the sessions it quieted in the last 10 s, which
+Windows does apply, and the exact one again on the next look (`QuietKeeper::nudge`, status `quiet_nudges`). With
+`--only-later 30 --no-nudge` the bug shows up on ARM64; without `--no-nudge` it doesn't.
 
 ## The window app
 
