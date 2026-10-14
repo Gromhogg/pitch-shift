@@ -370,7 +370,16 @@ int Probe::run() {
     say("7. speaker volume -6 dB");
     if (cable_volume_) {
         cable_volume_changed_ = true;
-        cable_volume_->SetMasterVolumeLevel(cable_volume_before_ - 6.0f, &kPitchShiftEventContext);
+        float lo = 0, hi = 0, step = 0, now = 0;
+        DWORD hardware = 0;
+        cable_volume_->GetVolumeRange(&lo, &hi, &step);
+        cable_volume_->QueryHardwareSupport(&hardware);
+        const HRESULT hr = cable_volume_->SetMasterVolumeLevel(cable_volume_before_ - 6.0f, &kPitchShiftEventContext);
+        cable_volume_->GetMasterVolumeLevel(&now);
+        info("speaker_volume_details",
+             {{"set_result", hr_text(hr)}, {"before_db", cable_volume_before_}, {"now_db", now}, {"range_db", {lo, hi}},
+              {"driver_handles_volume", (hardware & ENDPOINT_HARDWARE_SUPPORT_VOLUME) != 0}},
+             "the cable's own volume control");
         const auto quieter = measure("speaker volume -6 dB");
         info("speaker_volume_recording_db", quieter.app.level_db - base.app.level_db,
              "0 = grabbed sound is taken before the speaker volume (good: no double volume)");
@@ -457,6 +466,45 @@ int Probe::run() {
             const auto m = measure("restarted after restore");
             check("restored_persists_after_app_restart", std::fabs(m.app.level_db - base.app.level_db) < 0.2,
                   m.app.level_db - base.app.level_db, "the app starts at full volume next time");
+        }
+    }
+
+    // ---- 12. Quiet, the app quits, and we put the volume back on its closed session before it starts
+    // again (what Pitch Shift would do when it sees a quieted app close). Does the next run start at full?
+    say("12. restore after the app quit");
+    {
+        session = session_now(tone_->pid());
+        if (session) {
+            const Session old = *session;
+            quiet_session(old, kQuiet, restore_file_);
+            sleep_s(0.5);
+            tone_->kill();
+            sleep_s(1.0);
+            AudioSessionState state = AudioSessionStateActive;
+            old.control->GetState(&state);
+            info("closed_session_state", state == AudioSessionStateExpired    ? "expired"
+                                         : state == AudioSessionStateInactive ? "inactive"
+                                                                              : "active",
+                 "state of the quieted session after its app quit");
+            const HRESULT hr = set_all_channels(old.channel_volume().Get(), 1.0f);
+            info("restore_closed_session_result", hr_text(hr), "setting volume on the closed session");
+            info("restore_closed_session_read_back", channel_volumes(old.channel_volume().Get()),
+                 "what the closed session reports afterwards");
+            _wsystem((L"reg query \"HKCU\\Software\\Microsoft\\Internet Explorer\\LowRegistry\\Audio\\PolicyConfig\\"
+                      L"PropertyStore\" /s > \"" +
+                      (out_ / L"registry_after_quit.txt").wstring() + L"\" 2>&1")
+                         .c_str());
+            tone_ = start_tone();
+            auto fresh = wait_for_session(tone_->pid());
+            if (fresh) {
+                info("after_quit_new_session_channel_volumes", channel_volumes(fresh->channel_volume().Get()),
+                     "volumes of the next run");
+                record_app(tone_->pid());
+                const auto m = measure("next run after closed-session restore", "after_quit_restore");
+                info("restore_after_quit_works", std::fabs(m.app.level_db - base.app.level_db) < 0.2,
+                     "true = putting the volume back on the closed session is enough");
+            }
+            restore_all(restore_file_);  // in case it didn't work
         }
     }
 
