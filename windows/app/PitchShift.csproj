@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- The Pitch Shift window (WPF). Build one self-contained .exe per processor type:
+         dotnet publish windows/app -c Release -r win-x64   -p:EngineDir=<folder with PitchShiftEngine.dll>
+         dotnet publish windows/app -c Release -r win-arm64 -p:EngineDir=... -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>PitchShift</AssemblyName>
+    <RootNamespace>PitchShift</RootNamespace>
+    <ApplicationIcon>AppIcon.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Version>2.0.0</Version>
+    <Product>Pitch Shift</Product>
+    <Copyright>GPL-3.0-or-later</Copyright>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+    <!-- The Fluent (Windows 11) look is still marked "experimental" in WPF. -->
+    <NoWarn>$(NoWarn);WPF0001</NoWarn>
+  </PropertyGroup>
+
+  <!-- When publishing for one processor type: everything in one file, no .NET install needed. -->
+  <PropertyGroup Condition="'$(RuntimeIdentifier)' != ''">
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <DebugType>none</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Resource Include="AppIcon.ico" />
+  </ItemGroup>
+
+  <!-- The sound engine (built with CMake) sits next to PitchShift.exe. -->
+  <ItemGroup Condition="'$(EngineDir)' != ''">
+    <None Include="$(EngineDir)\PitchShiftEngine.dll" Link="PitchShiftEngine.dll"
+          CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest"
+          ExcludeFromSingleFile="true" />
+  </ItemGroup>
+
+</Project>
