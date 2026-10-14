@@ -159,10 +159,14 @@ bool wait_music_state(MusicPath& music, const std::string& state, double seconds
     return false;
 }
 
+// The child player (not the console helper "conhost.exe" Windows may start next to it).
 DWORD child_of(DWORD parent) {
     const ProcessSnapshot snap;
-    for (DWORD pid : snap.tree(parent))
-        if (pid != parent) return pid;
+    const std::wstring player = lower(file_name_of(self_path()));
+    for (DWORD pid : snap.tree(parent)) {
+        const auto* p = snap.find(pid);
+        if (pid != parent && p && p->exe_name == player) return pid;
+    }
     return 0;
 }
 

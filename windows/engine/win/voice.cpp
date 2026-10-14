@@ -7,6 +7,7 @@
 #include "win/sessions.h"
 
 #include <audiopolicy.h>
+#include <avrt.h>
 
 #include <algorithm>
 #include <cmath>
@@ -170,6 +171,9 @@ void VoicePath::start_chain(const std::wstring& mic_id, const std::wstring& feed
             // A made-up voice instead of a microphone, delivered in real time on its own clock.
             synth_stop_ = false;
             synth_ = std::thread([this, input] {
+                // Same priority a real microphone's recording thread gets.
+                DWORD task_index = 0;
+                HANDLE task = AvSetMmThreadCharacteristicsW(L"Pro Audio", &task_index);
                 std::vector<float> piece(480);
                 auto next = std::chrono::steady_clock::now();
                 while (!synth_stop_) {
@@ -178,6 +182,7 @@ void VoicePath::start_chain(const std::wstring& mic_id, const std::wstring& feed
                     next += std::chrono::milliseconds(10);
                     std::this_thread::sleep_until(next);
                 }
+                if (task) AvRevertMmThreadCharacteristics(task);
             });
         } else {
             capture_ = Capture::from_endpoint(mic_id, [this](const float* d, size_t n) { on_mic(d, n); }, 1);
@@ -375,6 +380,9 @@ void VoicePath::tick() {
                         {"trims", drift_ ? drift_->trims() : 0},
                         {"repeats", drift_ ? drift_->repeats() : 0},
                         {"queued_ms", drift_ ? drift_->queued_ms() : 0.0},
+                        // Rubber Band (about 60 ms, measured in the sound math tests) + the cushion + the cable's buffer.
+                        {"delay_estimate_ms",
+                         feed_ && drift_ ? 60 + drift_->queued_ms() + feed_->buffer_ms() + feed_->latency_ms() : 0.0},
                         {"gaps", capture_ ? capture_->stats().gaps : 0},
                         {"clipped", clipped_.load()}};
     std::lock_guard<std::mutex> lock(status_lock_);

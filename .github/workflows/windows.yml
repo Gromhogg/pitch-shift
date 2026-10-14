@@ -182,3 +182,52 @@ jobs:
         with:
           name: e2e-${{ matrix.arch }}
           path: e2e-out/
+
+  mic-setup:
+    name: mic setup (${{ matrix.arch }})
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2025
+          - arch: arm64
+            runner: windows-11-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: pitchshift-${{ matrix.arch }}
+          path: dist
+
+      - name: Before (no virtual cable yet)
+        run: |
+          New-Item -ItemType Directory -Force mic-out | Out-Null
+          foreach ($s in 'AudioEndpointBuilder', 'Audiosrv') { Set-Service $s -StartupType Automatic; Start-Service $s }
+          dist/PitchShiftTool.exe diag | Out-File mic-out/diag-before.json -Encoding utf8
+
+      - name: Set up Pitch Shift Mic (downloads VB-CABLE, installs it silently, names it)
+        run: dist/PitchShiftTool.exe setup-mic --silent | Tee-Object -FilePath mic-out/setup.json
+
+      - name: Check the names
+        run: ./windows/ci/check-mic-setup.ps1 -Tool dist/PitchShiftTool.exe -Expect named -Out mic-out/diag-named.json
+
+      - name: Give VB-CABLE its own names back
+        run: |
+          dist/PitchShiftTool.exe restore-names
+          ./windows/ci/check-mic-setup.ps1 -Tool dist/PitchShiftTool.exe -Expect original -Out mic-out/diag-original.json
+
+      - name: Remove VB-CABLE
+        run: |
+          dist/PitchShiftTool.exe remove-cable
+          Start-Sleep -Seconds 5
+          ./windows/ci/check-mic-setup.ps1 -Tool dist/PitchShiftTool.exe -Expect removed -Out mic-out/diag-removed.json
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: mic-setup-${{ matrix.arch }}
+          path: mic-out/
