@@ -20,10 +20,12 @@ public sealed record EngineStatus
     public string MusicState { get; init; } = "off";   // off, waiting, running, error
     public string MusicError { get; init; } = "";
     public IReadOnlyList<WatchedApp> MusicApps { get; init; } = Array.Empty<WatchedApp>();
+    public string MusicSpeaker { get; init; } = "";    // the speakers the shifted sound plays to
     public string VoiceState { get; init; } = "off";   // off, idle, running, no_mic, mic_denied, cable_missing, restart_needed, error
     public string VoiceError { get; init; } = "";
     public bool? CablePresent { get; init; }            // null = not known yet
     public bool CableRestartNeeded { get; init; }       // setup put VB-CABLE in, but Windows needs a restart
+                                                        // (false when VB-Audio's window was closed without installing)
     public bool InUse { get; init; }                    // a call app is using Pitch Shift Mic
     public string TestState { get; init; } = "idle";    // idle, recording, playing
     public int TestSecondsLeft { get; init; }
@@ -51,7 +53,13 @@ public static class EngineJson
                 if (music.TryGetProperty("apps", out var list) && list.ValueKind == JsonValueKind.Array)
                     foreach (var a in list.EnumerateArray())
                         apps.Add(new WatchedApp(Text(a, "exe"), Bool(a, "running")));
-                status = status with { MusicState = Text(music, "state", "off"), MusicError = Text(music, "error"), MusicApps = apps };
+                status = status with
+                {
+                    MusicState = Text(music, "state", "off"),
+                    MusicError = Text(music, "error"),
+                    MusicApps = apps,
+                    MusicSpeaker = Text(music, "speaker"),
+                };
             }
             if (root.TryGetProperty("voice", out var voice) && voice.ValueKind == JsonValueKind.Object)
             {

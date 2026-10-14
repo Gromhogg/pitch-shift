@@ -224,6 +224,9 @@ int e2e_music(const Args& args) {
         r.check("app_quieted", all_equal(volumes_of(a->pid()), kQuietLevel), volumes_of(a->pid()),
                 "the player's hidden volume is 0.001");
         r.info("app_thdn_db", m.thdn_db);
+        const std::string speaker = music.status().value("speaker", "");
+        r.check("status_speaker", speaker.find("CABLE") != std::string::npos, speaker,
+                "the status names the speakers it plays to (here the cable)");
         r.wav("music_app_plus2", rec, 2);
     }
 

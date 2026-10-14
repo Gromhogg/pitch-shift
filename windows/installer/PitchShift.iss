@@ -178,8 +178,14 @@ begin
   WizardForm.StatusLabel.Caption := 'Setting up Pitch Shift Mic. If VB-Audio''s window opens, click "Install Driver".';
 #endif
   Code := RunTool(Params);
+  // 0 = ready, 3010 = installed but Windows needs a restart, 1223 = VB-Audio's window was closed
+  // without installing (no restart; Pitch Shift offers "Repair Pitch Shift Mic").
   if Code = 3010 then
     MicNeedsRestart := True
+  else if Code = 1223 then
+    SuppressibleMsgBox('Pitch Shift Mic (for your voice in calls) was not installed.' + #13#10#13#10 +
+      'Everything else works. To add it later, open Pitch Shift and click "Repair Pitch Shift Mic".',
+      mbInformation, MB_OK, IDOK)
   else if Code <> 0 then
     SuppressibleMsgBox('Pitch Shift Mic (for your voice in calls) could not be set up this time.' + #13#10#13#10 +
       'Everything else works. To try again later, open Pitch Shift and click "Repair Pitch Shift Mic".',

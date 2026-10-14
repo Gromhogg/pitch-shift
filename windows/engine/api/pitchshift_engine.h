@@ -31,7 +31,8 @@ PS_API int ps_restore_all(void);
 PS_API const char* ps_list_sources_json(void);
 /* JSON list of microphones (not the virtual cable): [{"id":..,"name":..,"default":true}, ...] */
 PS_API const char* ps_list_mics_json(void);
-/* JSON with what the engine is doing right now ("music", "voice", "cable"). */
+/* JSON with what the engine is doing right now: "music" (state, apps, speaker = the speakers it plays to,
+   counts) and "voice" (state, in_use, mic, cable {present, restart_needed, mic_name}, test, counts). */
 PS_API const char* ps_status_json(void);
 
 /* What you hear. mode 0 = process `pid` and everything it started, mode 1 = all sound. */

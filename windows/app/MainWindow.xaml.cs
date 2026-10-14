@@ -9,7 +9,6 @@ using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
-using Microsoft.Win32;
 
 namespace PitchShift;
 
@@ -27,7 +26,7 @@ public partial class MainWindow : Window
     List<Mic> mics = new();
     bool micsKnown;
     bool updatingMics;
-    bool restartNeeded;
+    bool restartNeeded;  // only for pictures (--preview restart); live, the engine says (cable.restart_needed)
     bool settingUp;
     bool dirty;
     DateTime dirtySince, lastSlowCheck;
@@ -144,7 +143,6 @@ public partial class MainWindow : Window
         if (!Engine.Ready) Log.Write(Engine.Problem);
         ApplyHear();
         ApplyVoice();
-        restartNeeded = ReadRestartNeeded();
         RefreshMics(force: true);
         Tick();
     }
@@ -205,23 +203,9 @@ public partial class MainWindow : Window
         if (DateTime.UtcNow - lastSlowCheck > TimeSpan.FromSeconds(2))
         {
             lastSlowCheck = DateTime.UtcNow;
-            restartNeeded = ReadRestartNeeded();
             RefreshMics(force: false);
         }
         Refresh();
-    }
-
-    static bool ReadRestartNeeded()
-    {
-        try
-        {
-            using var key = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Pitch Shift");
-            return key?.GetValue("RestartNeeded") is int v && v != 0;
-        }
-        catch (Exception)
-        {
-            return false;
-        }
     }
 
     // ---------- Showing the state ----------
@@ -233,7 +217,10 @@ public partial class MainWindow : Window
 
         var waiting = s.HearOn && st.MusicState == "waiting";
         HearCard.Show(on: s.HearOn, value: s.HearSteps, active: s.HearOn, waiting: waiting);
-        HearCard.Amount.Hint = st.MusicState == "error" ? st.MusicError : waiting ? WaitingTip() : "";
+        HearCard.Amount.Hint = st.MusicState == "error" ? st.MusicError
+            : waiting ? WaitingTip()
+            : s.HearOn && st.MusicState == "running" && st.MusicSpeaker.Length > 0 ? "Playing to " + st.MusicSpeaker
+            : "";
         ShowHearTitle();
 
         var cable = st.CablePresent ?? true;
@@ -507,7 +494,6 @@ public partial class MainWindow : Window
         finally
         {
             settingUp = false;
-            restartNeeded = ReadRestartNeeded();
             RefreshMics(force: true);
             Refresh();
         }

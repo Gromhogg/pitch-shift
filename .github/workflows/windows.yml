@@ -5,7 +5,7 @@ name: Windows
 
 on:
   push:
-    branches: [v2, v2-windows]
+    branches: [v2, 'v2-windows*']
     paths:
       - 'windows/**'
       - '.github/workflows/windows.yml'
@@ -188,6 +188,22 @@ jobs:
           New-Item -ItemType Directory -Force mic-out | Out-Null
           foreach ($s in 'AudioEndpointBuilder', 'Audiosrv') { Set-Service $s -StartupType Automatic; Start-Service $s }
           dist/PitchShiftTool.exe diag | Out-File mic-out/diag-before.json -Encoding utf8
+
+      - name: Closing VB-Audio's window without installing means "not installed", not "restart"
+        run: |
+          # A leftover flag from an older version must not make it say "restart" either.
+          New-Item -Path 'HKLM:\SOFTWARE\Pitch Shift' -Force | Out-Null
+          New-ItemProperty -Path 'HKLM:\SOFTWARE\Pitch Shift' -Name RestartNeeded -Value 1 -PropertyType DWord -Force | Out-Null
+          dist/PitchShiftTool.exe setup-mic --skip-vb-setup | Tee-Object -FilePath mic-out/setup-cancelled.json
+          $code = $LASTEXITCODE
+          $key = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Pitch Shift' -ErrorAction SilentlyContinue
+          $diag = ((dist/PitchShiftTool.exe diag) -join "`n") | ConvertFrom-Json
+          Write-Host "exit code $code, RestartNeeded=$($key.RestartNeeded), InstalledByPitchShift=$($key.InstalledByPitchShift), engine restart_needed=$($diag.cable.restart_needed)"
+          if ($code -ne 1223) { throw "expected 1223 (not installed), got $code" }
+          if ($key.RestartNeeded -eq 1) { throw 'RestartNeeded should not be set' }
+          if ($key.InstalledByPitchShift -eq 1) { throw 'InstalledByPitchShift should not be set' }
+          if ($diag.cable.restart_needed) { throw 'the engine should not say "restart needed"' }
+          $global:LASTEXITCODE = 0
 
       - name: Set up Pitch Shift Mic (downloads VB-CABLE, installs it silently, names it)
         run: dist/PitchShiftTool.exe setup-mic --silent | Tee-Object -FilePath mic-out/setup.json

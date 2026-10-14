@@ -228,6 +228,7 @@ void VoicePath::tick() {
     const auto now = std::chrono::steady_clock::now();
     if (now - cable_checked_ > std::chrono::seconds(cable_.present ? 5 : 2)) {
         cable_ = find_cable();
+        restart_needed_ = !cable_.present && cable_restart_needed();
         cable_checked_ = now;
     }
 
@@ -299,7 +300,7 @@ void VoicePath::tick() {
         }
     } else if (!cable_.present) {
         stop_chain();
-        state = cable_restart_needed() ? "restart_needed" : "cable_missing";
+        state = restart_needed_ ? "restart_needed" : "cable_missing";
     } else {
         if (!took_default_) {
             // Pitch Shift Mic becomes the default microphone (the old defaults are written down first).
@@ -372,7 +373,7 @@ void VoicePath::tick() {
                         {"error", error},
                         {"in_use", in_use_},
                         {"mic", {{"id", utf8(mic_id)}, {"name", utf8(mic_id.empty() ? L"" : mic_name_)}}},
-                        {"cable", {{"present", cable_.present}, {"restart_needed", !cable_.present && cable_restart_needed()}, {"mic_name", utf8(cable_.mic_name)}, {"feed_name", utf8(cable_.feed_name)}}},
+                        {"cable", {{"present", cable_.present}, {"restart_needed", restart_needed_}, {"mic_name", utf8(cable_.mic_name)}, {"feed_name", utf8(cable_.feed_name)}}},
                         {"semitones", semitones_.load()},
                         {"natural", natural_.load()},
                         {"test", {{"state", test_state}, {"seconds_left", int(std::ceil(left_s))}}},

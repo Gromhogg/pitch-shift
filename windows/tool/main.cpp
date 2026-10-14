@@ -2,6 +2,7 @@
 //
 // Everyday (the installer and the app use these):
 //   setup-mic [--silent] [--pack file.zip]   install VB-CABLE if needed and name it "Pitch Shift Mic" (admin)
+//                                            exit code: 0 ready, 3010 restart needed, 1223 not installed
 //   restore [--file path]                    put back app volumes that Pitch Shift lowered
 //   restore-names                            give VB-CABLE its own names back (admin)
 //   remove-cable                             remove VB-CABLE (admin)
@@ -54,7 +55,7 @@ double Args::number(const wchar_t* flag, double fallback) const {
 
 std::wstring Args::positional(size_t index, const std::wstring& fallback) const {
     // Flags that stand alone (no value after them).
-    static const std::vector<std::wstring> switches = {L"--silent", L"--pulse", L"--spawn-child", L"--quick", L"--voice"};
+    static const std::vector<std::wstring> switches = {L"--silent", L"--pulse", L"--spawn-child", L"--quick", L"--voice", L"--skip-vb-setup"};
     size_t seen = 0;
     for (size_t i = 1; i < items.size(); ++i) {
         if (items[i].rfind(L"--", 0) == 0) {

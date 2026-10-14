@@ -38,6 +38,10 @@ public class PickerTests
         Assert.Equal(VoiceAction.None, PickerText.Action(EngineStatus.Empty, restartNeeded: true));  // not known yet
         Assert.Equal(VoiceAction.Repair, PickerText.Action(fine with { CablePresent = false }, false));
         Assert.Equal(VoiceAction.Restart, PickerText.Action(fine with { CablePresent = false }, true));
+        // Setup put VB-CABLE in and Windows needs a restart (the engine says so) ...
+        Assert.Equal(VoiceAction.Restart, PickerText.Action(fine with { CablePresent = false, CableRestartNeeded = true }, false));
+        // ... but VB-Audio's window was closed without installing: Repair, not Restart.
+        Assert.Equal(VoiceAction.Repair, PickerText.Action(fine with { CablePresent = false, CableRestartNeeded = false }, false));
         Assert.Equal(VoiceAction.Restart, PickerText.Action(fine with { VoiceState = "restart_needed" }, false));
         Assert.Equal(VoiceAction.Repair, PickerText.Action(fine with { VoiceState = "cable_missing" }, false));
         Assert.Equal(VoiceAction.AllowMic, PickerText.Action(fine with { VoiceState = "mic_denied" }, false));
@@ -63,7 +67,7 @@ public class EngineJsonTests
         {"version":"2.0.0-beta","started":true,"arch":"x64",
          "music":{"state":"waiting","error":"","mode":"apps",
                   "apps":[{"exe":"C:\\x\\Spotify.exe","running":false,"pid":0},{"exe":"C:\\x\\chrome.exe","running":true,"pid":42}],
-                  "semitones":2.0,"quieted":0},
+                  "speaker":"Speakers (Realtek(R) Audio)","semitones":2.0,"quieted":0},
          "voice":{"state":"running","error":"","in_use":true,"mic":{"id":"m1","name":"Mic"},
                   "cable":{"present":true,"mic_name":"Pitch Shift Mic","feed_name":"Pitch Shift Mic Feed"},
                   "semitones":3.0,"natural":true,"test":{"state":"recording","seconds_left":4}}}
@@ -77,6 +81,7 @@ public class EngineJsonTests
         Assert.Equal(2, s.MusicApps.Count);
         Assert.False(s.MusicApps[0].Running);
         Assert.True(s.MusicApps[1].Running);
+        Assert.Equal("Speakers (Realtek(R) Audio)", s.MusicSpeaker);
         Assert.Equal("running", s.VoiceState);
         Assert.True(s.CablePresent);
         Assert.True(s.InUse);

@@ -155,7 +155,36 @@ CableInfo find_cable() {
     return info;
 }
 
-bool cable_restart_needed() { return reg_dword(L"RestartNeeded") != 0; }
+namespace {
+// Calls `each` for every VB-CABLE device Windows knows about (also ones that aren't working yet).
+template <typename Each>
+void for_each_cable_device(Each each) {
+    HDEVINFO devs = SetupDiGetClassDevsW(nullptr, nullptr, nullptr, DIGCF_ALLCLASSES);
+    if (devs == INVALID_HANDLE_VALUE) return;
+    SP_DEVINFO_DATA dev{};
+    dev.cbSize = sizeof dev;
+    for (DWORD i = 0; SetupDiEnumDeviceInfo(devs, i, &dev); ++i) {
+        wchar_t ids[2048] = {};
+        if (!SetupDiGetDeviceRegistryPropertyW(devs, &dev, SPDRP_HARDWAREID, nullptr, reinterpret_cast<PBYTE>(ids),
+                                               sizeof(ids) - 4, nullptr))
+            continue;
+        bool match = false;
+        for (const wchar_t* p = ids; *p; p += wcslen(p) + 1) match = match || _wcsicmp(p, kHardwareId) == 0;
+        if (match) each(devs, dev);
+    }
+    SetupDiDestroyDeviceInfoList(devs);
+}
+
+void reg_remove(const wchar_t* name) { RegDeleteKeyValueW(HKEY_LOCAL_MACHINE, kSettingsKey, name); }
+}  // namespace
+
+bool cable_driver_installed() {
+    bool found = false;
+    for_each_cable_device([&](HDEVINFO, SP_DEVINFO_DATA&) { found = true; });
+    return found;
+}
+
+bool cable_restart_needed() { return reg_dword(L"RestartNeeded") != 0 && cable_driver_installed(); }
 
 HRESULT rename_endpoint(const std::wstring& id, const std::wstring& name) {
     PROPVARIANT value;
@@ -235,7 +264,8 @@ int setup_mic(const SetupOptions& o, nlohmann::json& log) {
         // Visible: VB-Audio's own window, where the person clicks "Install Driver".
         // Silent: no window (for checks, or once VB-Audio allows bundling).
         say(o.silent ? "Installing VB-CABLE (silent)" : "Opening VB-Audio's installer");
-        const int code = run_and_wait(setup.wstring(), o.silent ? L"-i -h" : L"", o.silent ? 300000 : 1800000, false);
+        const int code = o.skip_installer ? -1
+                                          : run_and_wait(setup.wstring(), o.silent ? L"-i -h" : L"", o.silent ? 300000 : 1800000, false);
         say("VB-CABLE setup finished with code " + std::to_string(code));
         installed_now = true;
         for (int i = 0; i < 30 && !find_cable().present; ++i) std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -249,10 +279,16 @@ int setup_mic(const SetupOptions& o, nlohmann::json& log) {
         }
         cable = find_cable();
         if (!cable.present) {
+            if (!cable_driver_installed()) {
+                // VB-Audio's window was closed without installing: nothing to restart for.
+                reg_remove(L"RestartNeeded");
+                say("VB-CABLE was not installed.");
+                return kSetupNotInstalled;
+            }
             reg_set(L"InstalledByPitchShift", DWORD(1));
             reg_set(L"RestartNeeded", DWORD(1));
             say("The virtual microphone will be ready after a restart.");
-            return 3010;
+            return kSetupRestart;
         }
     }
     if (installed_now) reg_set(L"InstalledByPitchShift", DWORD(1));
@@ -286,20 +322,9 @@ int restore_cable_names(nlohmann::json& log) {
 }
 
 int remove_cable(nlohmann::json& log) {
-    HDEVINFO devs = SetupDiGetClassDevsW(nullptr, nullptr, nullptr, DIGCF_ALLCLASSES);
-    if (devs == INVALID_HANDLE_VALUE) return 1;
     std::vector<std::wstring> infs;
     int removed = 0;
-    SP_DEVINFO_DATA dev{};
-    dev.cbSize = sizeof dev;
-    for (DWORD i = 0; SetupDiEnumDeviceInfo(devs, i, &dev); ++i) {
-        wchar_t ids[2048] = {};
-        if (!SetupDiGetDeviceRegistryPropertyW(devs, &dev, SPDRP_HARDWAREID, nullptr, reinterpret_cast<PBYTE>(ids),
-                                               sizeof(ids) - 4, nullptr))
-            continue;
-        bool match = false;
-        for (const wchar_t* p = ids; *p; p += wcslen(p) + 1) match = match || _wcsicmp(p, kHardwareId) == 0;
-        if (!match) continue;
+    for_each_cable_device([&](HDEVINFO devs, SP_DEVINFO_DATA& dev) {
         HKEY drv = SetupDiOpenDevRegKey(devs, &dev, DICS_FLAG_GLOBAL, 0, DIREG_DRV, KEY_READ);
         if (drv != INVALID_HANDLE_VALUE) {
             wchar_t inf[MAX_PATH];
@@ -310,8 +335,7 @@ int remove_cable(nlohmann::json& log) {
         }
         BOOL reboot = FALSE;
         if (DiUninstallDevice(nullptr, devs, &dev, 0, &reboot)) ++removed;
-    }
-    SetupDiDestroyDeviceInfoList(devs);
+    });
     for (const auto& inf : infs) SetupUninstallOEMInfW(inf.c_str(), SUOI_FORCEDELETE, nullptr);
     log.push_back("Removed " + std::to_string(removed) + " VB-CABLE device(s).");
     RegDeleteTreeW(HKEY_LOCAL_MACHINE, kSettingsKey);

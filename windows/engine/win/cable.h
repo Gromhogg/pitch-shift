@@ -23,7 +23,15 @@ struct CableInfo {
 };
 
 CableInfo find_cable();
-bool cable_restart_needed();  // setup installed it but Windows needs a restart first
+// Setup installed the driver, but Windows needs a restart before the cable appears. (Only true
+// while the driver really is there: if the person closed VB-Audio's window, a restart won't help.)
+bool cable_restart_needed();
+bool cable_driver_installed();  // a VB-CABLE device exists (working or not)
+
+// What "setup-mic" returns.
+constexpr int kSetupReady = 0;
+constexpr int kSetupRestart = 3010;       // installed; Windows needs a restart (ERROR_SUCCESS_REBOOT_REQUIRED)
+constexpr int kSetupNotInstalled = 1223;  // VB-Audio's window was closed without installing (ERROR_CANCELLED)
 
 // ---- Setup (needs administrator rights) ----
 
@@ -31,10 +39,12 @@ struct SetupOptions {
     bool silent = false;      // install without VB-Audio's window (CI, or once VB-Audio allows bundling)
     std::wstring pack_zip;    // use this VB-CABLE pack instead of downloading it
     std::wstring work_dir;    // where to download and unpack
+    bool skip_installer = false;  // checks only: act as if VB-Audio's window was closed without installing
 };
 
 // Installs VB-CABLE if needed, keeps the user's default devices, names the cable "Pitch Shift Mic".
-// Returns 0 when ready, 3010 when a restart is needed, other numbers on failure. Writes progress to `log`.
+// Returns kSetupReady, kSetupRestart, kSetupNotInstalled, or another number on failure
+// (2 download, 3 wrong file, 4 unpack). Writes progress to `log`.
 int setup_mic(const SetupOptions& options, nlohmann::json& log);
 // Gives the cable back its own names (when Pitch Shift is uninstalled but VB-CABLE stays).
 int restore_cable_names(nlohmann::json& log);

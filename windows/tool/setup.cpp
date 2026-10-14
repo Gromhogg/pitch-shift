@@ -22,6 +22,7 @@ int setup_mic(const Args& args) {
     options.silent = args.has(L"--silent");
     options.pack_zip = args.get(L"--pack");
     options.work_dir = args.get(L"--work");
+    options.skip_installer = args.has(L"--skip-vb-setup");  // checks only
     nlohmann::json log = nlohmann::json::array();
     const int code = ps::setup_mic(options, log);
     const auto cable = find_cable();

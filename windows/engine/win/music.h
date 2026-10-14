@@ -96,6 +96,8 @@ private:
     std::atomic<uint64_t> clipped_{0}, gaps_{0};
     double output_ms_ = 0;
     uint64_t current_gaps_ = 0;
+    std::wstring speaker_;
+    std::chrono::steady_clock::time_point speaker_checked_{};
 };
 
 }  // namespace ps

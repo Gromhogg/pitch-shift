@@ -92,6 +92,7 @@ private:
     std::wstring mic_resolved_, mic_name_, mic_choice_seen_;
     std::chrono::steady_clock::time_point mic_checked_{};
     CableInfo cable_;
+    bool restart_needed_ = false;
     std::chrono::steady_clock::time_point cable_checked_{};
 
     // Test.

@@ -1,6 +1,7 @@
 #include "win/music.h"
 
 #include "win/apps.h"
+#include "win/devices.h"
 #include "win/session_watch.h"
 
 #include <algorithm>
@@ -210,6 +211,20 @@ void MusicPath::tick() {
         retry_after_[root] = now + std::chrono::milliseconds(500);
     }
 
+    // Which speakers it plays to (the default; the stream follows it). Looked up every 2 s.
+    if (now - speaker_checked_ > std::chrono::seconds(2)) {
+        speaker_checked_ = now;
+        std::wstring name;
+        try {
+            const std::wstring id = default_endpoint_id(eRender, eConsole);
+            for (const auto& e : list_endpoints(eRender, DEVICE_STATE_ACTIVE))
+                if (e.id == id) name = e.name;
+        } catch (const std::exception&) {
+        }
+        std::lock_guard<std::mutex> lock(status_lock_);
+        speaker_ = name;
+    }
+
     bool running;
     double output_ms = 0;
     {
@@ -354,6 +369,7 @@ nlohmann::json MusicPath::status() const {
             {"error", error_},
             {"mode", mode},
             {"apps", apps_},
+            {"speaker", utf8(speaker_)},
             {"semitones", semitones_.load()},
             {"quieted", quieted_},
             {"dropouts", cushion_.dropouts()},
