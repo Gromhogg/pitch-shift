@@ -103,13 +103,16 @@ final class Player {
     private var playing = false
     private(set) var received: AVAudioFrameCount = 0
     private(set) var loudest: Float = 0
+    private(set) var dropouts = 0  // times the cushion ran dry (a tiny gap)
+    private(set) var skips = 0     // times sound was skipped to catch up
 
     init(device: AudioDeviceID, format: AVAudioFormat, halfSteps: Float) throws {
         self.device = device
         self.format = format
         self.halfSteps = halfSteps
-        startFrames = AVAudioFrameCount(format.sampleRate * 0.15)
-        maxFrames = AVAudioFrameCount(format.sampleRate * 0.5)
+        // Rubber Band hands back sound in pieces of at most ~16 ms, so a 50 ms cushion is enough; more is just delay.
+        startFrames = AVAudioFrameCount(format.sampleRate * 0.05)
+        maxFrames = AVAudioFrameCount(format.sampleRate * 0.15)
         let options = Int32(RubberBandOptionProcessRealTime.rawValue | RubberBandOptionEngineFiner.rawValue | RubberBandOptionChannelsTogether.rawValue)
         shifter = rubberband_new(UInt32(format.sampleRate), format.channelCount, options, 1, pow(2, Double(halfSteps) / 12))
         if let shifter { rubberband_set_max_process_size(shifter, 1024) }
@@ -161,19 +164,40 @@ final class Player {
         }
         guard let shifted = shift(buffer) else { return }
         let frames = shifted.frameLength
-        if queuedFrames + frames > maxFrames { return }  // falling behind: skip a bit to catch up
+        if queuedFrames + frames > maxFrames { skips += 1; return }  // falling behind: skip a bit to catch up
         queuedFrames += frames
         node.scheduleBuffer(shifted) { [weak self] in
             audioQueue.async {
                 guard let self else { return }
                 self.queuedFrames -= frames
-                if self.queuedFrames == 0 && self.playing { self.node.pause(); self.playing = false }  // ran dry: refill cushion
+                if self.queuedFrames == 0 && self.playing { self.node.pause(); self.playing = false; self.dropouts += 1 }  // ran dry: refill cushion
             }
         }
         if !playing && queuedFrames >= startFrames { node.play(); playing = true }
     }
 
     var isPlaying: Bool { playing }
+
+    // Where the delay comes from, in milliseconds: the cushion, Rubber Band, and the speakers or headphones.
+    var timing: (cushion: Double, shifter: Double, device: Double) {
+        let rate = format.sampleRate
+        let shifterFrames = halfSteps != 0 && shifter != nil ? Double(rubberband_get_start_delay(shifter!)) : 0
+        return (Double(queuedFrames) / rate * 1000, shifterFrames / rate * 1000, outputLatency(device) * 1000)
+    }
+}
+
+// How long the speakers or headphones take to play sound we hand them (as macOS reports it; Bluetooth adds more).
+func outputLatency(_ device: AudioDeviceID) -> Double {
+    let scope = kAudioDevicePropertyScopeOutput
+    let rate = nominalRate(device)
+    guard rate > 0 else { return 0 }
+    var frames = Double(getValue(device, kAudioDevicePropertyLatency, scope, default: UInt32(0)))
+    frames += Double(getValue(device, kAudioDevicePropertySafetyOffset, scope, default: UInt32(0)))
+    frames += Double(getValue(device, kAudioDevicePropertyBufferFrameSize, scope, default: UInt32(0)))
+    if let stream = getArray(device, kAudioDevicePropertyStreams, scope, of: AudioStreamID.self).first {
+        frames += Double(getValue(stream, kAudioStreamPropertyLatency, default: UInt32(0)))
+    }
+    return frames / rate
 }
 
 enum HearSource: Equatable {
@@ -267,6 +291,16 @@ final class HearShifter {
             guard let player else { return "state=\(state), no player" }
             return "state=\(state), out=\(deviceName(player.device)) running=\(player.engine.isRunning), rate=\(Int(player.format.sampleRate)), " +
                 "frames=\(player.received), loudest=\(player.loudest), playing=\(player.isPlaying), processes=\(capturedProcesses)"
+        }
+    }
+
+    var timing: String {
+        audioQueue.sync {
+            guard let player else { return "no player" }
+            let t = player.timing
+            // Rubber Band's real delay is about 110 ms at 48 kHz (its "start delay" alone undercounts it).
+            let shifter = player.timing.shifter > 0 ? 110.0 : 0
+            return String(format: "cushion %.0f ms + shifter %.0f ms + %@ %.0f ms = %.0f ms  (dropouts %d, skips %d)", t.cushion, shifter, deviceName(player.device), t.device, t.cushion + shifter + t.device, player.dropouts, player.skips)
         }
     }
 

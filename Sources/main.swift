@@ -64,6 +64,18 @@ if args.contains("--test") {
     let seconds = arg("--seconds").flatMap(Double.init) ?? 3
     onQuitSignals { shifter.stop(); exit(0) }
     shifter.start()
+    if args.contains("--watch") {  // print the delay every half second
+        let started = Date()
+        Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
+            print(String(format: "%5.1fs  ", Date().timeIntervalSince(started)) + shifter.timing)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
+            print("test: \(shifter.report)")
+            shifter.stop()
+            exit(0)
+        }
+        RunLoop.main.run()
+    }
     DispatchQueue.main.asyncAfter(deadline: .now() + seconds) {
         print("test: \(shifter.report)")
         shifter.stop()
