@@ -42,6 +42,24 @@ else()
     URL_HASH SHA256=24300f48a8014b7c863b573a9647e61b1b19b37875e2cdd92005e64c6424d266
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
   FetchContent_MakeAvailable(rubberband_src)
+  # A small fix to Rubber Band's built-in resampler (the one-file build uses it; the Mac's Homebrew copy uses
+  # libsamplerate instead): reset() didn't forget the old sound and position, so a shifter that was reset and set
+  # to a new pitch put its sound up to 1.7 ms later than a new one would. Advanced processing reuses reset shifters
+  # and needs them to line up like new ones (as on the Mac). Also reuses memory instead of making new.
+  set(_bq ${rubberband_src_SOURCE_DIR}/src/common/BQResampler.cpp)
+  file(READ ${_bq} _bq_text)
+  if(NOT _bq_text MATCHES "Pitch Shift fix")
+    set(_bq_before "    m_initialised = false;\n    m_fade_count = 0;\n}")
+    set(_bq_after "    m_initialised = false;\n    m_fade_count = 0;\n    // Pitch Shift fix: forget the old sound and position too, like a new resampler.\n    m_state_a.buffer.clear();\n    m_state_b.buffer.clear();\n    m_state_a.current_channel = 0;\n    m_state_b.current_channel = 0;\n    m_s = &m_state_a;\n    m_fade = &m_state_b;\n}")
+    string(FIND "${_bq_text}" "${_bq_before}" _bq_at)
+    if(_bq_at EQUAL -1)
+      message(FATAL_ERROR "Rubber Band resampler fix: the code to change wasn't found in ${_bq}")
+    endif()
+    string(REPLACE "${_bq_before}" "${_bq_after}" _bq_text "${_bq_text}")
+    string(REPLACE "target_state.buffer = floatbuf(buffer_length, 0.0);" "target_state.buffer.assign(buffer_length, 0.0f);"
+      _bq_text "${_bq_text}")
+    file(WRITE ${_bq} "${_bq_text}")
+  endif()
   add_library(rubberband STATIC ${rubberband_src_SOURCE_DIR}/single/RubberBandSingle.cpp)
   target_include_directories(rubberband SYSTEM PUBLIC ${rubberband_src_SOURCE_DIR})
   # RUBBERBAND_STATIC: keep Rubber Band's own functions private to our files.

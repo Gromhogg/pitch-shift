@@ -156,7 +156,9 @@ dotnet test windows/app.tests/PitchShift.Tests.csproj
 
 Advanced processing offline, same code as live (compare with the Mac app's `--render-file`):
 `PitchShiftTool make-song --out song.wav`, then `PitchShiftTool render-file song.wav out.wav --steps 8 --advanced`.
-On the Mac, `-DPS_PORTABLE_FFT=ON` makes the tests use the Windows FFT too.
+On the Mac, `-DPS_PORTABLE_FFT=ON` makes the tests use the Windows FFT too, and `-DPS_SYSTEM_RUBBERBAND=OFF` the same
+Rubber Band build as Windows. That build gets one small fix (in `CMakeLists.txt`): its resampler's `reset()` now forgets
+old sound, so Advanced processing's reused shifters line up like new ones, as on the Mac.
 
 The window app also builds on a Mac (to check for mistakes, not to run):
 `dotnet build windows/app/PitchShift.csproj -p:EnableWindowsTargeting=true`.

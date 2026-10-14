@@ -506,24 +506,30 @@ json engine_value(MusicPath& music, const char* key) {
 
 // From 440 Hz beeps (tonegen --pulse): how long after the quiet original reaches the cable the shifted copy
 // (at `out_hz`) arrives, for each beep (ms).
+// The cable is fully quiet between beeps. A beep starts with the quiet original (about -72 dB at 440 Hz); the loud
+// shifted copy follows. While the shifted copy plays, some of it also shows up near 440 Hz (with Advanced processing
+// the bass fold puts a part of it close by), so a start only counts right after a fully quiet moment.
 std::vector<double> beep_delays(const std::vector<float>& left, double out_hz) {
     std::vector<double> delays;
-    const size_t win = kRate / 50;
-    double from = 0;
-    for (int tries = 0; tries < 60 && delays.size() < 10; ++tries) {
-        const double t_in = onset_time(left.data(), left.size(), kRate, 440.0, -88.0, from);
-        if (t_in < 0) break;
-        // While the loud shifted copy plays, a little of it shows up near 440 Hz too: only count a start of the
-        // original when the shifted copy is quiet.
-        const size_t at = size_t(std::max(0.0, t_in - 0.01) * kRate);
-        if (at + win > left.size()) break;
-        if (to_db(tone_amplitude(left.data() + at, win, kRate, out_hz)) > -50) {
-            from = t_in + 0.02;
+    const size_t win = kRate / 50, step = kRate / 100;
+    bool after_quiet = false;
+    for (size_t at = 0; at + win <= left.size() && delays.size() < 10; at += step) {
+        const double in_db = to_db(tone_amplitude(left.data() + at, win, kRate, 440.0));
+        const double out_db = to_db(tone_amplitude(left.data() + at, win, kRate, out_hz));
+        if (in_db < -100 && out_db < -100) {
+            after_quiet = true;
             continue;
         }
+        if (!after_quiet) continue;
+        if (out_db > -60) {  // the shifted copy came first: not the start of a beep
+            after_quiet = false;
+            continue;
+        }
+        if (in_db < -88) continue;
+        const double t_in = double(at + win / 2) / kRate;
         const double t_out = onset_time(left.data(), left.size(), kRate, out_hz, -40.0, t_in);
         if (t_out > 0 && t_out - t_in > 0.05 && t_out - t_in < 0.9) delays.push_back((t_out - t_in) * 1000);
-        from = t_in + 0.8;
+        after_quiet = false;
     }
     return delays;
 }
@@ -556,9 +562,11 @@ int e2e_advanced(const Args& args) {
     music.set_advanced(true);
     music.set_semitones(8);
     music.start_pid(a->pid());
-    r.check("running", wait_music_state(music, "running", 15), music.status()["state"],
-            "the path starts with Advanced processing on");
-    r.check("advanced_player_within_12", wait_advanced(music, true, 10, 12), music.status()["advanced_engine"],
+    // (Each wait is done before the check, so the value shown is the one after waiting.)
+    const bool started = wait_music_state(music, "running", 15);
+    r.check("running", started, music.status()["state"], "the path starts with Advanced processing on");
+    const bool made12 = wait_advanced(music, true, 10, 12);
+    r.check("advanced_player_within_12", made12, music.status()["advanced_engine"],
             "the status shows the Advanced player, made for -12..+12");
     r.check("status_advanced", music.status()["advanced"] == true, music.status()["advanced"],
             "music.advanced is true in the status");
@@ -566,9 +574,11 @@ int e2e_advanced(const Args& args) {
     for (double steps : {8.0, -5.0, 15.0}) {
         const std::string name = amount_name(steps);
         music.set_semitones(steps);
-        if (steps > 12)
-            r.check("full_range_player_past_12", wait_advanced(music, true, 10, 24), music.status()["advanced_engine"],
+        if (steps > 12) {
+            const bool full = wait_advanced(music, true, 10, 24);
+            r.check("full_range_player_past_12", full, music.status()["advanced_engine"],
                     "going past +12 makes a new player for the full range (more delay), like the Mac");
+        }
         sleep_s(3.0);  // a new amount is heard 0.2-0.3 s later; then the slow tone control settles
         const auto rec = ear.listen(3.0);
         const auto left = left_of(rec);
@@ -598,7 +608,8 @@ int e2e_advanced(const Args& args) {
     music.set_semitones(8);
     music.start_pid(bass->pid());
     wait_music_state(music, "running", 15);
-    r.check("new_start_within_12", wait_advanced(music, true, 10, 12), music.status()["advanced_engine"],
+    const bool again12 = wait_advanced(music, true, 10, 12);
+    r.check("new_start_within_12", again12, music.status()["advanced_engine"],
             "starting again at +8 makes a -12..+12 player (less delay)");
     sleep_s(4.0);
     const double fold_hz = 82.41 * std::pow(2.0, -4.0 / 12), plain_hz = 82.41 * std::pow(2.0, 8.0 / 12);
@@ -616,7 +627,9 @@ int e2e_advanced(const Args& args) {
         r.wav("advanced_bass_plus8", rec, 2);
     }
     music.set_advanced(false);
-    r.check("switch_off_reaches_engine", wait_advanced(music, false, 10), music.status()["advanced"],
+    const bool normal = wait_advanced(music, false, 10);
+    r.check("switch_off_reaches_engine", normal,
+            json{{"advanced", music.status()["advanced"]}, {"advanced_engine", music.status()["advanced_engine"]}},
             "switching off makes a normal player");
     sleep_s(2.5);
     {
@@ -628,7 +641,8 @@ int e2e_advanced(const Args& args) {
         r.wav("normal_bass_plus8", rec, 2);
     }
     music.set_advanced(true);
-    r.check("switch_on_again_reaches_engine", wait_advanced(music, true, 10), music.status()["advanced_engine"],
+    const bool back_on = wait_advanced(music, true, 10);
+    r.check("switch_on_again_reaches_engine", back_on, music.status()["advanced_engine"],
             "switching on again makes an Advanced player");
     r.info("player_rebuilds", music.status()["player_rebuilds"]);
     music.stop();

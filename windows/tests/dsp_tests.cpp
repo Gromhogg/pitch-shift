@@ -18,6 +18,8 @@
 #include "dsp/voice_shifter.h"
 #include "dsp/wav.h"
 
+#include <rubberband/RubberBandStretcher.h>
+
 using namespace ps;
 
 TEST_CASE("measures a tone's pitch, level and cleanliness") {
@@ -345,6 +347,79 @@ std::vector<float> advanced_run(double hz, double amp, double half_steps, bool f
     return take_channel(out, 2, 0);
 }
 }  // namespace
+
+TEST_CASE("advanced: a shifter that was used and reset lines up like a new one") {
+    // Advanced processing reuses Rubber Band shifters (reset on a helper thread) and expects their sound in the same
+    // place as a new shifter's. Windows' Rubber Band needed a small fix for this (see CMakeLists.txt).
+    using RubberBand::RubberBandStretcher;
+    const int opts = RubberBandStretcher::OptionProcessRealTime | RubberBandStretcher::OptionEngineFiner |
+                     RubberBandStretcher::OptionChannelsTogether;
+    const auto song = make_test_song(48000, 3.0);
+    auto run = [&](RubberBandStretcher& rb) {
+        std::vector<float> out, l(512), r(512), ol(8192), orr(8192);
+        for (size_t p = 0; p + 512 <= song.size() / 2; p += 512) {
+            for (size_t i = 0; i < 512; ++i) {
+                l[i] = song[(p + i) * 2];
+                r[i] = song[(p + i) * 2 + 1];
+            }
+            const float* in[2] = {l.data(), r.data()};
+            rb.process(in, 512, false);
+            float* o[2] = {ol.data(), orr.data()};
+            int a;
+            while ((a = rb.available()) > 0) {
+                const size_t got = rb.retrieve(o, size_t(std::min(a, 8192)));
+                out.insert(out.end(), ol.begin(), ol.begin() + std::ptrdiff_t(got));
+            }
+        }
+        return out;
+    };
+    for (double steps : {-5.0, 3.0, 8.0}) {
+        const double scale = std::pow(2.0, steps / 12);
+        RubberBandStretcher fresh(48000, 2, opts, 1.0, scale);
+        fresh.setMaxProcessSize(1024);
+        RubberBandStretcher reused(48000, 2, opts, 1.0, 1.0);
+        reused.setMaxProcessSize(1024);
+        // Use it at other pitches first (like the engine's warm-up), then reset it.
+        const auto tone = make_tone(1234.0, 0.01, 48000, 1, 1024.0 / 48000);
+        std::vector<float> o0(16384), o1(16384);
+        for (double other : {1.5, 0.7}) {
+            reused.setPitchScale(other);
+            const float* in[2] = {tone.data(), tone.data()};
+            float* o[2] = {o0.data(), o1.data()};
+            for (int k = 0; k < 6; ++k) {
+                reused.process(in, 1024, false);
+                int a;
+                while ((a = reused.available()) > 0) reused.retrieve(o, size_t(std::min(a, 16384)));
+            }
+        }
+        reused.reset();
+        reused.setPitchScale(scale);
+        CHECK(reused.getStartDelay() == fresh.getStartDelay());
+        const auto a = run(fresh), b = run(reused);
+        const size_t n = std::min(a.size(), b.size());
+        REQUIRE(n > 96000);
+        // How far apart the two are in time: the best match of one second of their sound, within +-200 samples.
+        int best_lag = 0;
+        double best = -1;
+        for (int lag = -200; lag <= 200; ++lag) {
+            double c = 0;
+            for (size_t i = 48000; i < 96000; ++i) c += double(a[i]) * b[size_t(int(i) + lag)];
+            if (c > best) {
+                best = c;
+                best_lag = lag;
+            }
+        }
+        double sa = 0, sd = 0;
+        for (size_t i = 0; i < n; ++i) {
+            sa += double(a[i]) * a[i];
+            sd += (double(b[i]) - a[i]) * (double(b[i]) - a[i]);
+        }
+        const double diff_db = 10 * std::log10((sd + 1e-30) / (sa + 1e-30));
+        MESSAGE("reused vs new shifter at " << steps << ": " << best_lag << " samples apart, difference " << diff_db << " dB");
+        // Without the fix they were 30-80 samples (0.6-1.7 ms) apart. Their sound differs a little either way.
+        CHECK(std::abs(best_lag) <= 8);
+    }
+}
 
 TEST_CASE("advanced: +8 turns 440 Hz into 698.5 Hz, with a fixed delay of about 140 ms") {
     size_t latency = 0;
