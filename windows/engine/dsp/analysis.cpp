@@ -65,12 +65,27 @@ SineFit fit_sine(const float* x, size_t n, double rate, double hz) {
 
 // How strong `hz` is, with a smooth (Hann) window so nearby tones don't leak in. For the rough search.
 double windowed_power(const float* x, size_t n, double rate, double hz) {
-    const double w = 2 * kPi * hz / rate;
+    // cos/sin are stepped with rotations (much faster than calling them for every sample).
+    const double w = 2 * kPi * hz / rate, v = 2 * kPi / double(n);
+    const double cw = std::cos(w), sw = std::sin(w), cv = std::cos(v), sv = std::sin(v);
+    double co = 1, si = 0, wc = 1, ws = 0;
     double re = 0, im = 0;
     for (size_t i = 0; i < n; ++i) {
-        const double win = 0.5 - 0.5 * std::cos(2 * kPi * double(i) / double(n));
-        re += x[i] * win * std::cos(w * double(i));
-        im -= x[i] * win * std::sin(w * double(i));
+        if ((i & 1023) == 0) {
+            co = std::cos(w * double(i));
+            si = std::sin(w * double(i));
+            wc = std::cos(v * double(i));
+            ws = std::sin(v * double(i));
+        }
+        const double win = 0.5 - 0.5 * wc;
+        re += x[i] * win * co;
+        im -= x[i] * win * si;
+        const double nco = co * cw - si * sw;
+        si = si * cw + co * sw;
+        co = nco;
+        const double nwc = wc * cv - ws * sv;
+        ws = ws * cv + wc * sv;
+        wc = nwc;
     }
     return re * re + im * im;
 }
@@ -174,6 +189,93 @@ std::vector<float> make_tone(double hz, double amplitude, double rate, int chann
         for (int c = 0; c < channels; ++c) out[i * size_t(channels) + size_t(c)] = v;
     }
     return out;
+}
+
+std::vector<float> make_vowel(double f0, double rate, double seconds, double amplitude) {
+    const size_t n = size_t(rate * seconds);
+    std::vector<double> x(n, 0.0);
+    // Buzz: a sharp pulse once per pitch period (like the vocal folds).
+    double phase = 0;
+    for (size_t i = 0; i < n; ++i) {
+        phase += f0 / rate;
+        if (phase >= 1.0) {
+            phase -= 1.0;
+            x[i] = 1.0;
+        }
+    }
+    // Mouth resonances: three two-pole filters in a row.
+    const double formants[3][2] = {{700, 110}, {1220, 120}, {2600, 160}};
+    for (const auto& f : formants) {
+        const double r = std::exp(-kPi * f[1] / rate);
+        const double a1 = 2 * r * std::cos(2 * kPi * f[0] / rate), a2 = -r * r;
+        double y1 = 0, y2 = 0;
+        for (size_t i = 0; i < n; ++i) {
+            const double y = x[i] + a1 * y1 + a2 * y2;
+            y2 = y1;
+            y1 = y;
+            x[i] = y;
+        }
+    }
+    double peak = 0;
+    for (size_t i = n / 4; i < n; ++i) peak = std::max(peak, std::fabs(x[i]));
+    std::vector<float> out(n);
+    for (size_t i = 0; i < n; ++i) out[i] = float(peak > 0 ? x[i] / peak * amplitude : 0);
+    return out;
+}
+
+double spectral_centroid(const float* x, size_t n, double rate, double lo_hz, double hi_hz) {
+    // Average the spectrum of several 4096-sample pieces (Hann window), in 10 Hz steps.
+    const size_t frame = std::min<size_t>(4096, n);
+    if (frame < 256) return 0;
+    double weighted = 0, total = 0;
+    for (size_t start = 0; start + frame <= n; start += frame) {
+        for (double hz = lo_hz; hz <= hi_hz; hz += 10) {
+            const double p = windowed_power(x + start, frame, rate, hz);
+            weighted += hz * p;
+            total += p;
+        }
+    }
+    return total > 0 ? weighted / total : 0;
+}
+
+double estimate_f0(const float* x, size_t n, double rate, double lo_hz, double hi_hz) {
+    const size_t min_lag = size_t(rate / hi_hz), max_lag = size_t(rate / lo_hz);
+    if (n < max_lag * 3) return 0;
+    const size_t len = n - max_lag;
+    double energy = 0;
+    for (size_t i = 0; i < len; ++i) energy += double(x[i]) * x[i];
+    if (energy <= 0) return 0;
+    std::vector<double> corr(max_lag + 2, 0.0);
+    for (size_t lag = min_lag; lag <= max_lag + 1; ++lag) {
+        double s = 0;
+        for (size_t i = 0; i < len; ++i) s += double(x[i]) * x[i + lag];
+        corr[lag] = s / energy;
+    }
+    // The first strong peak (so we don't pick a multiple of the period).
+    double best = 0;
+    for (size_t lag = min_lag; lag <= max_lag; ++lag) best = std::max(best, corr[lag]);
+    for (size_t lag = min_lag + 1; lag <= max_lag; ++lag) {
+        if (corr[lag] >= 0.85 * best && corr[lag] >= corr[lag - 1] && corr[lag] >= corr[lag + 1]) {
+            // Refine between samples with a parabola through the peak.
+            const double a = corr[lag - 1], b = corr[lag], c = corr[lag + 1];
+            const double denom = a - 2 * b + c;
+            const double shift = denom != 0 ? 0.5 * (a - c) / denom : 0;
+            return rate / (double(lag) + shift);
+        }
+    }
+    return 0;
+}
+
+double onset_time(const float* x, size_t n, double rate, double hz, double threshold_db, double from_s) {
+    const size_t step = size_t(rate * 0.010);
+    const size_t win = size_t(rate * 0.020);
+    for (size_t start = size_t(from_s * rate); start + win <= n; start += step) {
+        // Hann-windowed level of `hz` in this 20 ms piece (scaled so a full-scale sine reads 0 dB).
+        const double p = windowed_power(x + start, win, rate, hz);
+        const double amp = 4.0 * std::sqrt(p) / double(win);
+        if (to_db(amp) > threshold_db) return double(start + win / 2) / rate;
+    }
+    return -1;
 }
 
 }  // namespace ps

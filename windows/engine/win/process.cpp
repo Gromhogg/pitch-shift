@@ -1,5 +1,7 @@
 #include "win/process.h"
 
+#include <tlhelp32.h>
+
 #include <cstdio>
 #include <vector>
 
@@ -33,6 +35,82 @@ std::wstring self_path() {
         if (n < buf.size()) return std::wstring(buf.data(), n);
         buf.resize(buf.size() * 2);
     }
+}
+
+std::wstring module_dir() {
+    HMODULE module = nullptr;
+    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                       reinterpret_cast<LPCWSTR>(&module_dir), &module);
+    std::vector<wchar_t> buf(MAX_PATH);
+    for (;;) {
+        const DWORD n = GetModuleFileNameW(module, buf.data(), DWORD(buf.size()));
+        if (n < buf.size()) {
+            std::wstring path(buf.data(), n);
+            const auto slash = path.find_last_of(L"\\/");
+            return slash == std::wstring::npos ? L"." : path.substr(0, slash);
+        }
+        buf.resize(buf.size() * 2);
+    }
+}
+
+std::wstring tool_path() { return module_dir() + L"\\PitchShiftTool.exe"; }
+
+DWORD parent_pid_of(DWORD pid) {
+    DWORD parent = 0;
+    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snap == INVALID_HANDLE_VALUE) return 0;
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof entry;
+    if (Process32FirstW(snap, &entry)) {
+        do {
+            if (entry.th32ProcessID == pid) parent = entry.th32ParentProcessID;
+        } while (Process32NextW(snap, &entry));
+    }
+    CloseHandle(snap);
+    return parent;
+}
+
+std::unique_ptr<ChildProcess> start_detached(const std::wstring& exe, const std::wstring& args, DWORD parent_pid) {
+    HANDLE parent = OpenProcess(PROCESS_CREATE_PROCESS, FALSE, parent_pid);
+    if (!parent) throw WinError("Could not open the parent process", HRESULT_FROM_WIN32(GetLastError()));
+    SIZE_T size = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &size);
+    std::vector<BYTE> buffer(size);
+    auto* attributes = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(buffer.data());
+    InitializeProcThreadAttributeList(attributes, 1, 0, &size);
+    UpdateProcThreadAttribute(attributes, 0, PROC_THREAD_ATTRIBUTE_PARENT_PROCESS, &parent, sizeof(parent), nullptr,
+                              nullptr);
+    STARTUPINFOEXW si{};
+    si.StartupInfo.cb = sizeof si;
+    si.lpAttributeList = attributes;
+    PROCESS_INFORMATION pi{};
+    std::wstring command = L"\"" + exe + L"\" " + args;
+    const BOOL ok = CreateProcessW(exe.c_str(), command.data(), nullptr, nullptr, FALSE,
+                                   CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr,
+                                   &si.StartupInfo, &pi);
+    const DWORD error = GetLastError();
+    DeleteProcThreadAttributeList(attributes);
+    CloseHandle(parent);
+    if (!ok) throw WinError("Could not start " + utf8(exe), HRESULT_FROM_WIN32(error));
+    CloseHandle(pi.hThread);
+    return std::make_unique<ChildProcess>(pi.hProcess, pi.dwProcessId);
+}
+
+bool start_helper(const std::wstring& exe, const std::wstring& args) {
+    std::wstring command = L"\"" + exe + L"\" " + args;
+    STARTUPINFOW si{};
+    si.cb = sizeof si;
+    PROCESS_INFORMATION pi{};
+    // Try to leave any "job" we're in, so the helper isn't ended together with us.
+    for (DWORD flags : {DWORD(CREATE_NO_WINDOW | CREATE_BREAKAWAY_FROM_JOB), DWORD(CREATE_NO_WINDOW)}) {
+        std::wstring cmd = command;
+        if (CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, flags, nullptr, nullptr, &si, &pi)) {
+            CloseHandle(pi.hThread);
+            CloseHandle(pi.hProcess);
+            return true;
+        }
+    }
+    return false;
 }
 
 std::unique_ptr<ChildProcess> start_process(const std::wstring& exe, const std::wstring& args) {

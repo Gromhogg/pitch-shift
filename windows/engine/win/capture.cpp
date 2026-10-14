@@ -127,26 +127,26 @@ std::unique_ptr<Capture> Capture::from_process(DWORD pid, bool include_tree, Sin
                                  AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM,
                              200000 /* 20 ms */, 0, &format, nullptr),
           "Start app recording (Initialize)");
-    return std::unique_ptr<Capture>(new Capture(client, std::move(sink), "app recording"));
+    return std::unique_ptr<Capture>(new Capture(client, std::move(sink), "app recording", kChannels));
 }
 
-std::unique_ptr<Capture> Capture::from_endpoint(const std::wstring& endpoint_id, Sink sink) {
+std::unique_ptr<Capture> Capture::from_endpoint(const std::wstring& endpoint_id, Sink sink, int channels) {
     auto device = device_by_id(endpoint_id);
     ComPtr<IAudioClient> client;
     check(device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr,
                            reinterpret_cast<void**>(client.GetAddressOf())),
           "Open recording device");
-    WAVEFORMATEX format = float_format();
+    WAVEFORMATEX format = float_format(kRate, channels);
     check(client->Initialize(AUDCLNT_SHAREMODE_SHARED,
                              AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM |
                                  AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
                              1000000 /* 100 ms */, 0, &format, nullptr),
           "Start recording (Initialize)");
-    return std::unique_ptr<Capture>(new Capture(client, std::move(sink), "recording"));
+    return std::unique_ptr<Capture>(new Capture(client, std::move(sink), "recording", channels));
 }
 
-Capture::Capture(ComPtr<IAudioClient> client, Sink sink, const char* what)
-    : client_(std::move(client)), sink_(std::move(sink)) {
+Capture::Capture(ComPtr<IAudioClient> client, Sink sink, const char* what, int channels)
+    : client_(std::move(client)), channels_(channels), sink_(std::move(sink)) {
     event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     check(client_->SetEventHandle(event_), (std::string(what) + " (SetEventHandle)").c_str());
     check(client_->GetService(__uuidof(IAudioCaptureClient), reinterpret_cast<void**>(capture_.GetAddressOf())),
@@ -211,7 +211,7 @@ void Capture::run() {
             const float* samples = reinterpret_cast<const float*>(data);
             if ((flags & AUDCLNT_BUFFERFLAGS_SILENT) || !data) {
                 ++silent_;
-                zeros.assign(size_t(frames) * kChannels, 0.0f);
+                zeros.assign(size_t(frames) * size_t(channels_), 0.0f);
                 samples = zeros.data();
             }
             if (frames > 0 && sink_) sink_(samples, frames);

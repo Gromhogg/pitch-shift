@@ -19,6 +19,7 @@ if(MSVC)
   add_compile_options(/utf-8 /permissive- /EHsc /W3)
 endif()
 if(WIN32)
+  enable_language(RC)
   add_compile_definitions(UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN _USE_MATH_DEFINES _WIN32_WINNT=0x0A00)
 endif()
 
@@ -68,7 +69,11 @@ file(DOWNLOAD https://github.com/nlohmann/json/releases/download/v3.12.0/json.hp
 
 add_library(ps_dsp STATIC
   engine/dsp/analysis.cpp
+  engine/dsp/booster.cpp
+  engine/dsp/cushion.cpp
+  engine/dsp/drift_buffer.cpp
   engine/dsp/music_shifter.cpp
+  engine/dsp/voice_shifter.cpp
   engine/dsp/wav.cpp)
 target_include_directories(ps_dsp PUBLIC engine)
 target_link_libraries(ps_dsp PUBLIC rubberband)
@@ -82,25 +87,36 @@ add_test(NAME dsp_tests COMMAND dsp_tests)
 
 if(WIN32)
   add_library(ps_win STATIC
+    engine/win/apps.cpp
+    engine/win/cable.cpp
+    engine/win/capture.cpp
     engine/win/com.cpp
     engine/win/devices.cpp
-    engine/win/capture.cpp
-    engine/win/render.cpp
-    engine/win/sessions.cpp
+    engine/win/mic_default.cpp
+    engine/win/music.cpp
+    engine/win/process.cpp
     engine/win/quiet.cpp
-    engine/win/process.cpp)
+    engine/win/render.cpp
+    engine/win/session_watch.cpp
+    engine/win/sessions.cpp
+    engine/win/voice.cpp)
   target_include_directories(ps_win PUBLIC engine ${PS_THIRD_PARTY})
-  target_link_libraries(ps_win PUBLIC ps_dsp ole32 oleaut32 uuid mmdevapi avrt propsys shlwapi version advapi32)
+  target_link_libraries(ps_win PUBLIC ps_dsp ole32 oleaut32 uuid mmdevapi avrt propsys shlwapi version advapi32
+    bcrypt setupapi newdev urlmon)
 
-  add_library(PitchShiftEngine SHARED engine/api/engine_api.cpp)
+  add_library(PitchShiftEngine SHARED engine/api/engine_api.cpp engine/api/engine.rc)
   target_compile_definitions(PitchShiftEngine PRIVATE PS_ENGINE_BUILD)
   target_link_libraries(PitchShiftEngine PRIVATE ps_win)
 
   add_executable(PitchShiftTool
-    tool/main.cpp
-    tool/tonegen.cpp
     tool/diag.cpp
-    tool/probe.cpp)
+    tool/e2e.cpp
+    tool/main.cpp
+    tool/probe.cpp
+    tool/record.cpp
+    tool/setup.cpp
+    tool/tonegen.cpp
+    tool/tool.rc)
   target_include_directories(PitchShiftTool PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
   target_link_libraries(PitchShiftTool PRIVATE ps_win)
 

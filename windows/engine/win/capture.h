@@ -22,14 +22,15 @@ WAVEFORMATEX float_format(int rate = kRate, int channels = kChannels);
 
 class Capture {
 public:
-    // Called on the recording thread with `frames` frames of interleaved stereo sound.
+    // Called on the recording thread with `frames` frames of interleaved sound (2 channels unless asked).
     using Sink = std::function<void(const float* data, size_t frames)>;
 
     // The sound of process `pid` and its children (include_tree = true),
     // or everything except that process and its children (include_tree = false).
     static std::unique_ptr<Capture> from_process(DWORD pid, bool include_tree, Sink sink);
-    // A recording device (microphone, "CABLE Output", ...), by endpoint id.
-    static std::unique_ptr<Capture> from_endpoint(const std::wstring& endpoint_id, Sink sink);
+    // A recording device (microphone, "CABLE Output", ...), by endpoint id. Windows converts it to
+    // 48 kHz with `channels` channels.
+    static std::unique_ptr<Capture> from_endpoint(const std::wstring& endpoint_id, Sink sink, int channels = kChannels);
 
     ~Capture();
     Capture(const Capture&) = delete;
@@ -46,13 +47,16 @@ public:
     };
     Stats stats() const;
 
+    int channels() const { return channels_; }
+
 private:
-    Capture(ComPtr<IAudioClient> client, Sink sink, const char* what);
+    Capture(ComPtr<IAudioClient> client, Sink sink, const char* what, int channels);
     void run();
 
     ComPtr<IAudioClient> client_;
     ComPtr<IAudioCaptureClient> capture_;
     HANDLE event_ = nullptr;
+    int channels_ = kChannels;
     Sink sink_;
     std::thread thread_;
     std::atomic<bool> stop_{false};

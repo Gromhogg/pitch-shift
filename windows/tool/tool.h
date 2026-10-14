@@ -13,10 +13,26 @@ struct Args {
     std::wstring positional(size_t index, const std::wstring& fallback = L"") const;  // after the command
 };
 
-int tonegen(const Args& args);
-int diag(const Args& args);
-int probe(const Args& args);
+// Everyday commands (setup.cpp)
+int setup_mic(const Args& args);
 int restore(const Args& args);
+int restore_names(const Args& args);
+int remove_cable(const Args& args);
+int watch(const Args& args);
+
+// Information (diag.cpp)
+int diag(const Args& args);
+
+// Checks (tonegen.cpp, record.cpp, probe.cpp, e2e.cpp)
+int tonegen(const Args& args);
+int record(const Args& args);
+int probe(const Args& args);
+int e2e_music(const Args& args);
+int e2e_voice(const Args& args);
+int e2e_crash(const Args& args);
+int host(const Args& args);
+int add_root_device(const Args& args);
+int rename_other_mic(const Args& args);
 int set_default(const Args& args);
 int selftest(const Args& args);
 

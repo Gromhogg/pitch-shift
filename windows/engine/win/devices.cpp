@@ -1,5 +1,7 @@
 #include "win/devices.h"
 
+#include "win/policy_config.h"
+
 #include <audioclient.h>
 #include <ksmedia.h>
 #include <mmreg.h>
@@ -9,31 +11,6 @@
 namespace ps {
 
 namespace {
-
-// Names of the device properties we read (copied from the Windows SDK so we don't need initguid tricks).
-const PROPERTYKEY kFriendlyName = {{0xa45c254e, 0xdf1c, 0x4efd, {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0}}, 14};
-const PROPERTYKEY kDeviceDesc = {{0xa45c254e, 0xdf1c, 0x4efd, {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0}}, 2};
-const PROPERTYKEY kAdapterName = {{0x026e516e, 0xb814, 0x414b, {0x83, 0xcd, 0x85, 0x6d, 0x6f, 0xef, 0x48, 0x22}}, 2};
-
-// Windows' own interface for choosing default sound devices. It isn't documented, but the Sound
-// control panel uses it, and so do well-known tools (EarTrumpet, SoundSwitch, AudioDeviceCmdlets).
-const CLSID kPolicyConfigClient = {0x870af99c, 0x171d, 0x4f9e, {0xaf, 0x0d, 0xe6, 0x3d, 0xf4, 0x0c, 0x2b, 0xc9}};
-const IID kPolicyConfigIid = {0xf8679f50, 0x850a, 0x41cf, {0x9c, 0x72, 0x43, 0x0f, 0x29, 0x02, 0x90, 0xc8}};
-
-struct IPolicyConfig : public IUnknown {
-    virtual HRESULT STDMETHODCALLTYPE GetMixFormat(PCWSTR, WAVEFORMATEX**) = 0;
-    virtual HRESULT STDMETHODCALLTYPE GetDeviceFormat(PCWSTR, INT, WAVEFORMATEX**) = 0;
-    virtual HRESULT STDMETHODCALLTYPE ResetDeviceFormat(PCWSTR) = 0;
-    virtual HRESULT STDMETHODCALLTYPE SetDeviceFormat(PCWSTR, WAVEFORMATEX*, WAVEFORMATEX*) = 0;
-    virtual HRESULT STDMETHODCALLTYPE GetProcessingPeriod(PCWSTR, INT, PINT64, PINT64) = 0;
-    virtual HRESULT STDMETHODCALLTYPE SetProcessingPeriod(PCWSTR, PINT64) = 0;
-    virtual HRESULT STDMETHODCALLTYPE GetShareMode(PCWSTR, void*) = 0;
-    virtual HRESULT STDMETHODCALLTYPE SetShareMode(PCWSTR, void*) = 0;
-    virtual HRESULT STDMETHODCALLTYPE GetPropertyValue(PCWSTR, INT, const PROPERTYKEY&, PROPVARIANT*) = 0;
-    virtual HRESULT STDMETHODCALLTYPE SetPropertyValue(PCWSTR, INT, const PROPERTYKEY&, PROPVARIANT*) = 0;
-    virtual HRESULT STDMETHODCALLTYPE SetDefaultEndpoint(PCWSTR, ERole) = 0;
-    virtual HRESULT STDMETHODCALLTYPE SetEndpointVisibility(PCWSTR, INT) = 0;
-};
 
 std::wstring read_string(IPropertyStore* store, const PROPERTYKEY& key) {
     PROPVARIANT value;
@@ -52,7 +29,7 @@ Endpoint describe(IMMDevice* device, EDataFlow flow) {
     device->GetState(&e.state);
     ComPtr<IPropertyStore> store;
     if (SUCCEEDED(device->OpenPropertyStore(STGM_READ, &store))) {
-        e.name = read_string(store.Get(), kFriendlyName);
+        e.name = read_string(store.Get(), kDeviceFriendlyName);
         e.description = read_string(store.Get(), kDeviceDesc);
         e.adapter = read_string(store.Get(), kAdapterName);
     }
@@ -113,8 +90,7 @@ std::optional<Endpoint> find_endpoint(EDataFlow flow, const std::wstring& name_p
 
 HRESULT set_default_endpoint(const std::wstring& id, ERole role) {
     ComPtr<IPolicyConfig> policy;
-    HRESULT hr = CoCreateInstance(kPolicyConfigClient, nullptr, CLSCTX_ALL, kPolicyConfigIid,
-                                  reinterpret_cast<void**>(policy.GetAddressOf()));
+    const HRESULT hr = open_policy_config(policy);
     if (FAILED(hr)) return hr;
     return policy->SetDefaultEndpoint(id.c_str(), role);
 }

@@ -1,23 +1,34 @@
 // PitchShiftTool.exe <command> [options]
-//   diag                      list sound devices and app sound sessions (JSON)
-//   tonegen [--freq 440] [--amp 0.25] [--seconds 600] [--device "name"]
-//                             play a test tone (to the default speakers unless --device)
-//   probe [--out folder]      check how app volumes affect app recording (see probe.cpp)
-//   restore [--file path]     put back app volumes that Pitch Shift lowered
-//   set-default <playback|recording> "name"
-//                             make a device the default (used by the GitHub checks)
-//   selftest                  shift a made-up tone with Rubber Band and check the pitch
+//
+// Everyday (the installer and the app use these):
+//   setup-mic [--silent] [--pack file.zip]   install VB-CABLE if needed and name it "Pitch Shift Mic" (admin)
+//   restore [--file path]                    put back app volumes that Pitch Shift lowered
+//   restore-names                            give VB-CABLE its own names back (admin)
+//   remove-cable                             remove VB-CABLE (admin)
+//   watch <pid> [--file path]                wait for Pitch Shift to end, then put volumes back
+// Information:
+//   diag                                     sound devices, app sessions, restore list (JSON)
+// Checks (used on GitHub):
+//   tonegen [--freq 440] [--amp 0.25] [--seconds 600] [--device "name"] [--pulse] [--spawn-child]
+//   record --device "name" --seconds 5 --out file.wav [--channels 1]
+//   probe [--out folder]                     how app volume affects app recording
+//   e2e-music | e2e-voice | e2e-crash [--out folder]
+//   set-default <playback|recording> "name"   ("pitch-shift-feed" / "pitch-shift-mic" = our cable)
+//   add-root-device <inf> <hardware id>      add another copy of a driver's device (checks only)
+//   rename-other-mic ["Test Mic"]           rename the recording device that isn't our cable (checks only)
+//   selftest                                 shift a made-up tone with Rubber Band and check the pitch
 #include "tool/tool.h"
 
 #include "dsp/analysis.h"
 #include "dsp/music_shifter.h"
 #include "win/com.h"
+#include "win/cable.h"
 #include "win/devices.h"
-#include "win/quiet.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
-#include <iostream>
+#include <nlohmann/json.hpp>
 
 namespace ps::tool {
 
@@ -44,10 +55,12 @@ double Args::number(const wchar_t* flag, double fallback) const {
 }
 
 std::wstring Args::positional(size_t index, const std::wstring& fallback) const {
+    // Flags that stand alone (no value after them).
+    static const std::vector<std::wstring> switches = {L"--silent", L"--pulse", L"--spawn-child", L"--quick", L"--voice"};
     size_t seen = 0;
     for (size_t i = 1; i < items.size(); ++i) {
         if (items[i].rfind(L"--", 0) == 0) {
-            ++i;  // skip the flag's value
+            if (std::find(switches.begin(), switches.end(), items[i]) == switches.end()) ++i;  // skip its value
             continue;
         }
         if (seen++ == index) return items[i];
@@ -61,28 +74,22 @@ void say(const std::string& line) {
     std::fflush(stdout);
 }
 
-int restore(const Args& args) {
-    ComScope com;
-    const std::wstring file = args.get(L"--file", restore_file_path());
-    const auto result = restore_all(file);
-    say(nlohmann::json{{"restored", result.restored}, {"failed", result.failed}, {"pending", result.pending},
-                       {"log", result.log}}
-            .dump());
-    return result.failed == 0 ? 0 : 1;
-}
-
 int set_default(const Args& args) {
     ComScope com;
     const std::wstring direction = args.positional(0);
     const std::wstring name = args.positional(1);
     const EDataFlow flow = direction == L"recording" ? eCapture : eRender;
-    const auto endpoint = find_endpoint(flow, name);
-    if (!endpoint) {
+    // "pitch-shift-feed" / "pitch-shift-mic": our cable, even when there are two cables.
+    std::wstring id;
+    if (name == L"pitch-shift-feed") id = find_cable().feed_id;
+    else if (name == L"pitch-shift-mic") id = find_cable().mic_id;
+    else if (const auto endpoint = find_endpoint(flow, name)) id = endpoint->id;
+    if (id.empty()) {
         say("No active device named like \"" + utf8(name) + "\".");
         return 1;
     }
-    const HRESULT hr = set_default_endpoint_all(endpoint->id);
-    say("Default " + utf8(direction) + " device -> " + utf8(endpoint->name) + ": " + hr_text(hr));
+    const HRESULT hr = set_default_endpoint_all(id);
+    say("Default " + utf8(direction) + " device -> " + utf8(name) + ": " + hr_text(hr));
     return SUCCEEDED(hr) ? 0 : 1;
 }
 
@@ -115,16 +122,28 @@ int wmain(int argc, wchar_t** argv) {
     for (int i = 1; i < argc; ++i) args.items.emplace_back(argv[i]);
     const std::wstring command = args.items.empty() ? L"" : args.items[0];
     try {
-        if (command == L"tonegen") return tonegen(args);
-        if (command == L"diag") return diag(args);
-        if (command == L"probe") return probe(args);
+        if (command == L"setup-mic") return setup_mic(args);
         if (command == L"restore") return restore(args);
+        if (command == L"restore-names") return restore_names(args);
+        if (command == L"remove-cable") return remove_cable(args);
+        if (command == L"watch") return watch(args);
+        if (command == L"diag") return diag(args);
+        if (command == L"tonegen") return tonegen(args);
+        if (command == L"record") return record(args);
+        if (command == L"probe") return probe(args);
+        if (command == L"e2e-music") return e2e_music(args);
+        if (command == L"e2e-voice") return e2e_voice(args);
+        if (command == L"e2e-crash") return e2e_crash(args);
+        if (command == L"host") return host(args);
+        if (command == L"add-root-device") return add_root_device(args);
+        if (command == L"rename-other-mic") return rename_other_mic(args);
         if (command == L"set-default") return set_default(args);
         if (command == L"selftest") return selftest(args);
     } catch (const std::exception& e) {
         say(std::string("Error: ") + e.what());
         return 2;
     }
-    say("Usage: PitchShiftTool <diag|tonegen|probe|restore|set-default|selftest> [options]");
+    say("Usage: PitchShiftTool <setup-mic|restore|restore-names|remove-cable|watch|diag|tonegen|record|probe|"
+        "e2e-music|e2e-voice|e2e-crash|set-default|selftest> [options]");
     return command.empty() ? 0 : 1;
 }

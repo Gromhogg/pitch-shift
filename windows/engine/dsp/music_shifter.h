@@ -22,6 +22,9 @@ public:
     // Takes `frames` of interleaved sound and adds whatever shifted sound is ready to `out` (interleaved).
     void process(const float* interleaved, size_t frames, std::vector<float>& out);
 
+    // What Rubber Band reports as its delay, in frames (the real delay is longer, about 110 ms).
+    size_t start_delay() const;
+
     static constexpr size_t kMaxChunk = 1024;
 
 private:

@@ -1,21 +1,35 @@
 // Makes an app's own sound very quiet (so only the shifted copy is heard) and, above all,
-// always puts it back. Before any change, the original volumes are written to a restore list
-// (%LOCALAPPDATA%\Pitch Shift\restore.json), so even after a crash the next start can fix them.
+// always puts it back.
+//
+// How it stays safe:
+//   - Before any change, the original volumes go into a restore list
+//     (%LOCALAPPDATA%\Pitch Shift\restore.json), so a later start can fix things after a crash.
+//   - Windows remembers an app's volume when the app quits, so an app that quit while quiet would
+//     start quiet next time. Apps on the list are fixed as soon as they play again, and their
+//     remembered volume in the registry is put back too.
+//   - While anything is quiet, a "RunOnce" entry runs "PitchShiftTool restore" at the next sign-in.
 #pragma once
 #include "win/sessions.h"
 
+#include <chrono>
+#include <functional>
+#include <map>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <string>
 #include <vector>
 
 namespace ps {
 
+constexpr float kQuietLevel = 0.001f;  // -60 dB; the captured sound is boosted by 1000 to match
+
 struct QuietEntry {
-    std::wstring exe;              // program path; new sessions of the same program are fixed too
+    std::wstring exe;             // program path; new sessions of the same program are fixed too
+    std::wstring native_exe;      // the same path as Windows' sound settings store it (\Device\...)
     DWORD pid = 0;
     std::wstring instance_id;
-    std::vector<float> original;   // channel volumes before we changed them
-    float quiet_level = 0.001f;
+    std::vector<float> original;  // channel volumes before we changed them
+    float quiet_level = kQuietLevel;
 };
 
 std::wstring restore_file_path();  // %LOCALAPPDATA%\Pitch Shift\restore.json
@@ -26,14 +40,50 @@ std::vector<QuietEntry> load_restore_list(const std::wstring& path);
 // Writes the session's current volumes to the restore list, then lowers every channel to `level`.
 HRESULT quiet_session(const Session& session, float level, const std::wstring& path);
 
+// Puts back the volume Windows remembered for a program that quit while quiet (in the registry).
+// Returns how many remembered volumes were fixed.
+int fix_remembered_volume(const QuietEntry& entry);
+
 struct RestoreResult {
-    int restored = 0;
+    int restored = 0;   // running sessions put back
+    int remembered = 0; // remembered (registry) volumes put back
     int failed = 0;
-    int pending = 0;  // listed apps that aren't playing right now (kept on the list)
+    int pending = 0;    // listed apps not playing now, kept on the list
     nlohmann::json log = nlohmann::json::array();
 };
 
-// Puts back every listed app that is still quiet, then deletes the list (if everything worked).
+// Puts back every listed app that is still quiet (running or remembered), then deletes the list
+// if nothing is left to do.
 RestoreResult restore_all(const std::wstring& path);
+
+// The RunOnce safety net: runs `command` at the next sign-in. Empty command removes it.
+void set_restore_at_sign_in(const std::wstring& command);
+// Sets the safety net while anything needs putting back (quiet apps or the default microphone),
+// and removes it when nothing does.
+void update_sign_in_safety_net(const std::wstring& command, bool busy = false);
+
+// Keeps a set of sessions quiet while Pitch Shift runs.
+class QuietKeeper {
+public:
+    explicit QuietKeeper(std::wstring list_path, std::wstring restore_command = L"");
+    ~QuietKeeper();
+
+    // Quiets every session `wanted` says yes to, and puts back every session we quieted that
+    // isn't wanted any more. Also fixes listed apps that came back quiet from an earlier run.
+    void update(const std::vector<Session>& sessions, const std::function<bool(const Session&)>& wanted);
+    // Puts everything back.
+    void restore_everything();
+
+    int quieted() const;
+    const std::wstring& list_path() const { return path_; }
+
+private:
+    void sync_sign_in_entry();
+
+    std::wstring path_, restore_command_;
+    mutable std::mutex lock_;
+    std::map<std::wstring, Session> ours_;  // by session instance id
+    std::map<std::wstring, std::chrono::steady_clock::time_point> gone_;  // quieted, then the app quit
+};
 
 }  // namespace ps

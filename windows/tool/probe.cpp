@@ -15,8 +15,11 @@
 // Writes probe.json and WAV recordings to the --out folder.
 #include "tool/tool.h"
 
+#include "tool/recorder.h"
+
 #include "dsp/analysis.h"
 #include "dsp/wav.h"
+#include "win/apps.h"
 #include "win/capture.h"
 #include "win/devices.h"
 #include "win/process.h"
@@ -47,29 +50,6 @@ constexpr double kToneAmp = 0.25;  // -12 dB
 constexpr float kQuiet = 0.001f;   // -60 dB
 
 void sleep_s(double seconds) { std::this_thread::sleep_for(std::chrono::duration<double>(seconds)); }
-
-// Keeps the most recent recorded sound (up to 20 s) so it can be measured.
-class Recorder {
-public:
-    void add(const float* data, size_t frames) {
-        std::lock_guard<std::mutex> lock(m_);
-        buf_.insert(buf_.end(), data, data + frames * kChannels);
-        const size_t max = size_t(kRate) * kChannels * 20;
-        if (buf_.size() > max) buf_.erase(buf_.begin(), buf_.begin() + std::ptrdiff_t(buf_.size() - max));
-    }
-    void clear() {
-        std::lock_guard<std::mutex> lock(m_);
-        buf_.clear();
-    }
-    std::vector<float> take() {
-        std::lock_guard<std::mutex> lock(m_);
-        return buf_;
-    }
-
-private:
-    std::mutex m_;
-    std::vector<float> buf_;
-};
 
 json tone_json(const ToneMeasure& m) {
     auto r = [](double v) { return std::round(v * 1000) / 1000; };
@@ -505,6 +485,42 @@ int Probe::run() {
                      "true = putting the volume back on the closed session is enough");
             }
             restore_all(restore_file_);  // in case it didn't work
+        }
+    }
+
+    // ---- 13. The app quit while quiet; we rewrite the volume Windows remembered for it in the
+    // registry (no session to fix). Does the next run really start at full volume?
+    say("13. fix the remembered volume in the registry");
+    {
+        session = session_now(tone_->pid());
+        if (session) {
+            const Session old = *session;
+            QuietEntry entry;
+            entry.exe = old.exe;
+            entry.native_exe = native_process_path(old.pid);
+            entry.original = {1.0f, 1.0f};
+            quiet_session(old, kQuiet, restore_file_);
+            sleep_s(0.5);
+            tone_->kill();
+            sleep_s(2.0);  // Windows writes the remembered volume when the session ends
+            const int fixed = fix_remembered_volume(entry);
+            info("registry_values_fixed", fixed, "remembered quiet volumes rewritten to full");
+            _wsystem((L"reg query \"HKCU\\Software\\Microsoft\\Internet Explorer\\LowRegistry\\Audio\\PolicyConfig\\"
+                      L"PropertyStore\" /s > \"" +
+                      (out_ / L"registry_after_fix.txt").wstring() + L"\" 2>&1")
+                         .c_str());
+            tone_ = start_tone();
+            auto fresh = wait_for_session(tone_->pid());
+            if (fresh) {
+                const auto levels = channel_volumes(fresh->channel_volume().Get());
+                info("after_registry_fix_channel_volumes", levels, "volumes of the next run");
+                record_app(tone_->pid());
+                const auto m = measure("next run after registry fix", "after_registry_fix");
+                check("registry_fix_works", fixed > 0 && std::fabs(m.app.level_db - base.app.level_db) < 0.2,
+                      m.app.level_db - base.app.level_db,
+                      "rewriting the remembered volume makes the app start at full volume");
+            }
+            restore_all(restore_file_);
         }
     }
 

@@ -23,6 +23,8 @@ MusicShifter::MusicShifter(int rate, int channels, double half_steps)
 
 MusicShifter::~MusicShifter() = default;
 
+size_t MusicShifter::start_delay() const { return rb_->getStartDelay(); }
+
 void MusicShifter::set_half_steps(double value) {
     if (half_steps_ == 0 && value != 0) rb_->reset();  // clear out old sound
     rb_->setPitchScale(pitch_scale(value));

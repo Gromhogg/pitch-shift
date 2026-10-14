@@ -30,4 +30,18 @@ std::vector<float> take_channel(const std::vector<float>& interleaved, int chann
 // Makes a sine tone: `channels` interleaved, `seconds` long.
 std::vector<float> make_tone(double hz, double amplitude, double rate, int channels, double seconds);
 
+// Makes a voice-like "aah" (one channel): buzz at pitch f0 shaped by mouth resonances at 700, 1220
+// and 2600 Hz. Used to check that Natural keeps those resonances and Cartoon moves them.
+std::vector<float> make_vowel(double f0, double rate, double seconds, double amplitude = 0.3);
+
+// The "center of gravity" of the sound's spectrum between lo and hi Hz.
+double spectral_centroid(const float* samples, size_t count, double rate, double lo_hz, double hi_hz);
+
+// The pitch (fundamental) of a voice-like sound, between lo and hi Hz. 0 if none found.
+double estimate_f0(const float* samples, size_t count, double rate, double lo_hz, double hi_hz);
+
+// When a tone starts: the first time (seconds) its level at `hz` (in 10 ms steps) rises above
+// `threshold_db`, at or after `from_s`. Negative if never.
+double onset_time(const float* samples, size_t count, double rate, double hz, double threshold_db, double from_s = 0);
+
 }  // namespace ps

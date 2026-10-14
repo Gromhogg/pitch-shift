@@ -110,26 +110,8 @@ jobs:
           name: pitchshift-${{ matrix.arch }}
           path: dist
 
-      - name: Install VB-CABLE (virtual audio cable)
-        run: ./windows/ci/install-vbcable.ps1
-
-      - name: Allow apps to use the microphone
-        run: |
-          $policy = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\AppPrivacy'
-          New-Item -Path $policy -Force | Out-Null
-          New-ItemProperty -Path $policy -Name LetAppsAccessMicrophone -Value 1 -PropertyType DWord -Force | Out-Null
-          foreach ($root in 'HKLM:', 'HKCU:') {
-            $store = "$root\SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\microphone"
-            New-Item -Path $store -Force | Out-Null
-            New-ItemProperty -Path $store -Name Value -Value Allow -PropertyType String -Force | Out-Null
-            New-Item -Path "$store\NonPackaged" -Force | Out-Null
-            New-ItemProperty -Path "$store\NonPackaged" -Name Value -Value Allow -PropertyType String -Force | Out-Null
-          }
-
-      - name: Use the cable as speakers and microphone
-        run: |
-          dist/PitchShiftTool.exe set-default playback "CABLE Input"
-          dist/PitchShiftTool.exe set-default recording "CABLE Output"
+      - name: Get sound ready (VB-CABLE, microphone access)
+        run: ./windows/ci/prepare-audio.ps1 -Tool dist/PitchShiftTool.exe
 
       - name: Sound setup before
         run: |
@@ -145,22 +127,58 @@ jobs:
 
       - name: Summary
         if: always()
-        run: |
-          if (-not (Test-Path probe-out/probe.json)) { exit 0 }
-          $r = Get-Content probe-out/probe.json -Raw | ConvertFrom-Json
-          $lines = @("## Probe ($($r.machine), $($r.os))", '', "Recommended quieting mode: **$($r.recommended_mode)**", '',
-                     '| check | result | value | meaning |', '|---|---|---|---|')
-          foreach ($p in $r.checks.PSObject.Properties) {
-            $c = $p.Value
-            $mark = if ($null -eq $c.pass) { 'info' } elseif ($c.pass) { 'pass' } else { 'FAIL' }
-            $lines += "| $($p.Name) | $mark | $($c.value | ConvertTo-Json -Compress) | $($c.meaning) |"
-          }
-          $lines += ''
-          foreach ($n in $r.notes) { $lines += "- $n" }
-          $lines -join "`n" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+        run: ./windows/ci/summary.ps1 -Folder probe-out -Title 'Probe (${{ matrix.arch }})'
 
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: probe-${{ matrix.arch }}
           path: probe-out/
+
+  audio-e2e:
+    name: audio e2e (${{ matrix.arch }})
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2025
+          - arch: arm64
+            runner: windows-11-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: pitchshift-${{ matrix.arch }}
+          path: dist
+
+      - name: Get sound ready (VB-CABLE, microphone access)
+        run: ./windows/ci/prepare-audio.ps1 -Tool dist/PitchShiftTool.exe -SecondMic
+
+      - name: What you hear (music path)
+        run: dist/PitchShiftTool.exe e2e-music --out e2e-out
+
+      - name: Your voice (voice path)
+        if: always()
+        run: dist/PitchShiftTool.exe e2e-voice --out e2e-out
+
+      - name: Crash recovery
+        if: always()
+        run: dist/PitchShiftTool.exe e2e-crash --out e2e-out
+
+      - name: Sound setup after
+        if: always()
+        run: dist/PitchShiftTool.exe diag | Tee-Object -FilePath e2e-out/diag-after.json
+
+      - name: Summary
+        if: always()
+        run: ./windows/ci/summary.ps1 -Folder e2e-out -Title 'Audio checks (${{ matrix.arch }})'
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: e2e-${{ matrix.arch }}
+          path: e2e-out/
