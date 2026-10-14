@@ -163,6 +163,25 @@ old sound, so Advanced processing's reused shifters line up like new ones, as on
 The window app also builds on a Mac (to check for mistakes, not to run):
 `dotnet build windows/app/PitchShift.csproj -p:EnableWindowsTargeting=true`.
 
+## Are the sound checks steady?
+
+Run the **Windows** workflow by hand with **repeat** above 0 (Actions → Windows → Run workflow, or
+`gh workflow run windows.yml --ref BRANCH -f repeat=10`). It runs only "What you hear" (`e2e-music`) that many times
+on each processor type and always ends green (a failed run would send an email each time). The `repeat-x64` and
+`repeat-arm64` artifacts hold `summary.md` (passes, and which checks failed how often), every run's log and report,
+and the recordings of runs with a failed check. Normal pushes still run every check once and fail on any failed check.
+
+How `e2e-music` measures (in `tool/e2e.cpp`):
+- A tone's level is the middle value of its level in 100 ms pieces (`steady_level`). A one-off hiccup on the way to
+  the cable (a few ms of sound lost, so the tone's timing jumps once) only changes a piece or two. One best-fit sine
+  over the whole recording dropped 0.5–1.5 dB after such a jump, which made the level checks fail now and then.
+- The quieted original is measured with a smooth window (`faint_tone_amplitude`). A sharp-edged window let the loud
+  shifted tone spill onto 440 Hz (up to −51 dB in a 2 s recording), so the "original is 50 dB down" checks were really
+  measuring that spill, and failed now and then. Measured properly, the original is 60 dB down, as set.
+- Each listening window is saved (`music_<name>.wav`) with notes in the report (`<name>_window`): the steady level,
+  the quietest piece, the engine's dropouts / skips / lost packets / speaker stream running empty
+  (`output_starved`), packets lost on the way to the recording, and the test player's own hiccups (`tonegen --log`).
+
 ## The window app
 
 - `PitchShift.exe --preview hear-on,voice-on,cartoon --screenshot shot.png [--theme dark] [--scale 2] [--size 900x450]`

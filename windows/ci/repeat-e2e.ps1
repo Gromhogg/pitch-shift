@@ -24,6 +24,7 @@ for ($i = 1; $i -le $Times; $i++) {
     # A run that stopped early could leave test players playing; they would spoil the next run.
     Get-Process PitchShiftTool, FakePlayer -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     $fails = @()
+    $hiccups = $false  # a listening window with a hiccup in it (its recordings are worth keeping)
     $report = Join-Path $folder 'e2e_music.json'
     if (Test-Path $report) {
         $r = Get-Content $report -Raw | ConvertFrom-Json
@@ -33,12 +34,17 @@ for ($i = 1; $i -le $Times; $i++) {
                 $failedChecks[$p.Name] = 1 + [int]$failedChecks[$p.Name]
             }
         }
+        foreach ($p in $r.info.PSObject.Properties) {
+            if ($p.Name -like '*_window' -and ($p.Value.lowest_piece_db -lt -1 -or ($p.Value.cable_silent_ms | Measure-Object).Count -gt 0)) {
+                $hiccups = $true
+            }
+        }
     } else {
         $fails += "no report (exit code $code)"
         $failedChecks['(no report)'] = 1 + [int]$failedChecks['(no report)']
     }
-    if ($code -eq 0 -and $fails.Count -eq 0) {
-        $passed++
+    if ($code -eq 0 -and $fails.Count -eq 0) { $passed++ }
+    if ($code -eq 0 -and $fails.Count -eq 0 -and -not $hiccups) {
         Get-ChildItem $folder -Filter *.wav -ErrorAction SilentlyContinue | Remove-Item -Force
     }
     $seconds = [int]((Get-Date) - $started).TotalSeconds

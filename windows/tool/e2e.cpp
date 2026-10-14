@@ -119,9 +119,29 @@ double steady_db(const std::vector<float>& mono, double hz) {
     return steady_level(mono.data(), mono.size(), kRate, hz).level_db;
 }
 
-// The level of a faint tone next to a loud one (the quieted original next to the shifted copy).
+// The level of a faint tone next to a loud one (the quieted original next to the shifted copy): the middle of its
+// level in 0.5 s pieces, each with a smooth window. 0.5 s is long enough to keep a loud tone 54 Hz away out; taking
+// the middle keeps a one-off hiccup out (its click spreads over all pitches, also onto the faint one).
 double faint_db(const std::vector<float>& mono, double hz) {
-    return to_db(faint_tone_amplitude(mono.data(), mono.size(), kRate, hz));
+    return steady_level(mono.data(), mono.size(), kRate, hz, 0.5).level_db;
+}
+
+// Where the recording is exactly zero for 1 ms or more (start, length in frames). Then nothing at all reached the
+// cable, not even the quieted original, which never goes through Pitch Shift. So such a gap comes from Windows, the
+// cable or the recording: a gap in Pitch Shift's own sound would still leave the quiet original playing.
+std::vector<std::pair<size_t, size_t>> cable_silences(const std::vector<float>& mono) {
+    std::vector<std::pair<size_t, size_t>> out;
+    const size_t at_least = kRate / 1000;
+    size_t start = 0, run = 0;
+    for (size_t i = 0; i <= mono.size(); ++i) {
+        if (i < mono.size() && mono[i] == 0.0f) {
+            if (run++ == 0) start = i;
+            continue;
+        }
+        if (run >= at_least) out.push_back({start, run});
+        run = 0;
+    }
+    return out;
 }
 
 int64_t now_ms() {
@@ -254,12 +274,15 @@ int e2e_music(const Args& args) {
             engine[key] = count_of(after, key) - count_of(before, key);
         int hiccups = 0;
         for (const auto& log : player_logs) hiccups += player_hiccups(log, from - 300, to + 200);
+        json silences = json::array();
+        for (const auto& [at, length] : cable_silences(left)) silences.push_back(round3(length * 1000.0 / kRate));
         r.info(name + "_window", json{{"steady_db", round3(steady.level_db)},
                                       {"lowest_piece_db", round3(steady.lowest_db - steady.level_db)},
                                       {"one_fit_db", round3(one_fit.level_db)},
                                       {"engine", engine},
                                       {"recording_gaps", ear.gaps() - ear_gaps},
-                                      {"player_hiccups", hiccups}});
+                                      {"player_hiccups", hiccups},
+                                      {"cable_silent_ms", silences}});
         r.wav("music_" + name, rec, 2);
         return left;
     };
@@ -445,6 +468,7 @@ int e2e_music(const Args& args) {
             }
             wait_session(player->pid());
             wait_music_state(music, "running", 10);
+            counts(name + "_running");
             sleep_s(2.5);
             const auto left = hear(name, 2.0, target);
             const auto m = measure_tone(left.data(), left.size(), kRate, target);
@@ -454,6 +478,7 @@ int e2e_music(const Args& args) {
                     "it is shifted as soon as it opens (493.9 Hz, the original 50+ dB quieter)");
             player->kill();
             sleep_s(1.0);
+            counts(name + "_closed");
         }
         music.stop();
         wait_music_state(music, "off", 5);
@@ -510,17 +535,28 @@ int e2e_music(const Args& args) {
         r.check("long_run_dropouts", status["dropouts"] == 0, status["dropouts"], "the cushion never ran dry");
         r.check("long_run_skips", status["skips"] == 0, status["skips"], "nothing had to be skipped");
         r.info("long_run_gaps", status["gaps"], "packets Windows marked as 'something was lost'");
-        // Listen for gaps: the shifted tone's level in 50 ms pieces should never dip.
+        // Listen for gaps: the shifted tone's level in 50 ms pieces should never dip. Pieces where the whole cable
+        // went silent (see cable_silences: not Pitch Shift's gap) are counted on their own.
         const auto left = left_of(rec);
         const size_t piece = kRate / 20;
+        const auto silences = cable_silences(left);
         std::vector<double> levels;
-        for (size_t i = 0; i + piece <= left.size(); i += piece)
-            levels.push_back(to_db(tone_amplitude(left.data() + i, piece, kRate, target)));
+        json cable_gaps = json::array();
+        for (size_t i = 0; i + piece <= left.size(); i += piece) {
+            const double db = to_db(tone_amplitude(left.data() + i, piece, kRate, target));
+            bool cable_silent = false;
+            for (const auto& [at, length] : silences) cable_silent = cable_silent || (at < i + piece && at + length > i);
+            if (cable_silent) cable_gaps.push_back(json{{"at_s", round3(double(i) / kRate)}, {"level_db", round3(db)}});
+            else levels.push_back(db);
+        }
         std::vector<double> sorted = levels;
         std::sort(sorted.begin(), sorted.end());
         const double median = sorted.empty() ? -200 : sorted[sorted.size() / 2];
         const double lowest = sorted.empty() ? -200 : sorted.front();
         r.info("long_run_seconds_recorded", double(left.size()) / kRate);
+        r.info("long_run_cable_silences", cable_gaps,
+               "pieces where nothing at all reached the cable, not even the quiet original (a hiccup of Windows, the "
+               "cable or the recording, not of Pitch Shift)");
         r.check("long_run_no_dips", !levels.empty() && lowest > median - 3.0, lowest - median,
                 "the shifted tone never dipped more than 3 dB (no audible gaps)");
         const size_t keep = std::min(rec.size(), size_t(kRate) * 2 * 10);
