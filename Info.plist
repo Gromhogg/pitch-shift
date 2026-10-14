@@ -15,12 +15,14 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>1.0.0</string>
+	<string>2.0.0</string>
 	<key>CFBundleVersion</key>
-	<string>1</string>
+	<string>2.0.0</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.4</string>
 	<key>NSAudioCaptureUsageDescription</key>
-	<string>Pitch Shift grabs the Music app's sound to play it at a different pitch.</string>
+	<string>Pitch Shift grabs the sound of the app you pick to play it at a different pitch.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Pitch Shift changes the pitch of your microphone and sends it to Pitch Shift Mic.</string>
 </dict>
 </plist>

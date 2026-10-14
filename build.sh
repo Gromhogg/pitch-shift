@@ -1,5 +1,6 @@
 #!/bin/zsh
-# Builds "Pitch Shift.app" and puts it on the Desktop.
+# Builds "Pitch Shift.app" (with the Pitch Shift Mic driver inside) into build/, then installs it in /Applications
+# with a shortcut on the Desktop. Use ./build.sh --no-install to only build.
 set -e
 cd "${0:A:h}"
 if [[ ! -f /opt/homebrew/lib/librubberband.a ]]; then
@@ -8,18 +9,35 @@ if [[ ! -f /opt/homebrew/lib/librubberband.a ]]; then
 fi
 app=build/"Pitch Shift.app"
 rm -rf "$app"
-mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/Contents/PlugIns"
+
+./driver/build.sh
+ditto build/PitchShiftMic.driver "$app/Contents/PlugIns/PitchShiftMic.driver"
+
 # Rubber Band (brew install rubberband) is built into the app, so the app works on its own.
-swiftc -O -swift-version 5 main.swift -o "$app/Contents/MacOS/PitchShift" \
-  -import-objc-header rubberband.h -I/opt/homebrew/include \
+swiftc -O -swift-version 5 Sources/*.swift -o "$app/Contents/MacOS/PitchShift" \
+  -import-objc-header Sources/Bridging.h -I/opt/homebrew/include \
   -Xlinker /opt/homebrew/lib/librubberband.a -Xlinker /opt/homebrew/opt/libsamplerate/lib/libsamplerate.a \
   -lc++ -framework Accelerate
+
 if [[ ! -f AppIcon.icns ]]; then
   swift make-icon.swift build/AppIcon.iconset && iconutil -c icns build/AppIcon.iconset -o AppIcon.icns
 fi
 cp Info.plist "$app/Contents/Info.plist"
-cp AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
+cp AppIcon.icns LICENSE packaging/install-driver.sh "$app/Contents/Resources/"
 codesign --force --sign - "$app"
-rm -rf ~/Desktop/"Pitch Shift.app"
-cp -R "$app" ~/Desktop/
-echo "Built ~/Desktop/Pitch Shift.app"
+codesign --verify --deep --strict "$app"
+echo "Built $app"
+[[ "$1" == "--no-install" ]] && exit 0
+
+# Install here: the app in /Applications, a shortcut on the Desktop (replacing an old real copy there).
+pkill -x PitchShift && sleep 1 || true
+rm -rf "/Applications/Pitch Shift.app"
+ditto "$app" "/Applications/Pitch Shift.app"
+desktop=~/Desktop/"Pitch Shift.app"
+[[ -e $desktop && ! -L $desktop ]] && rm -rf $desktop
+ln -sfn "/Applications/Pitch Shift.app" $desktop
+if ! cmp -s build/PitchShiftMic.driver/Contents/MacOS/PitchShiftMic /Library/Audio/Plug-Ins/HAL/PitchShiftMic.driver/Contents/MacOS/PitchShiftMic 2>/dev/null; then
+  echo "Pitch Shift Mic is new or changed. Install it with: sudo packaging/install-driver.sh build/PitchShiftMic.driver"
+fi
+echo "Installed /Applications/Pitch Shift.app (shortcut on the Desktop)"
