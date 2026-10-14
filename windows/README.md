@@ -185,7 +185,9 @@ How `e2e-music` measures (in `tool/e2e.cpp`), and why:
   window let the loud shifted tone spill onto 440 Hz (up to −51 dB in a 2 s recording), so the "original is 50 dB
   down" checks were really measuring that spill. Measured properly, the original is 60 dB down, as set.
 - The long runs' "no gaps" check lists pieces where the whole cable went silent on their own
-  (`long_run_cable_silences`); a gap of Pitch Shift's own would still leave the quiet original playing.
+  (`long_run_cable_silences`); a gap of Pitch Shift's own would still leave the quiet original playing. The voice's
+  long run (`e2e-voice`) plays a quiet 1 kHz reference tone on the cable for the same reason
+  (`long_voice_cable_silences`).
 - Closing a player while it is being shifted lets the cushion run dry once, which counts as a dropout (the sound
   simply ended). The beep section resets the counts first, so its status is about the beeps.
 - Each listening window is saved (`music_<name>.wav`) with notes in the report (`<name>_window`): the steady level,

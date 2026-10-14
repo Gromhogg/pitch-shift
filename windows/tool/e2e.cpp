@@ -1032,6 +1032,11 @@ int e2e_voice(const Args& args) {
         steady.set_semitones(4);
         steady.set_natural(true);
         steady.start(L"");
+        // A very quiet reference tone on the cable too (1 kHz, -70 dB). Where it is missing as well, nothing at all
+        // reached the cable (see cable_silences): a hiccup of Windows or the cable, not a gap of the voice path.
+        auto reference = start_player(L"--freq 1000 --amp 0.0003 --seconds " + std::to_wstring(int(long_seconds) + 60) +
+                                          L" --device \"" + cable.feed_name + L"\"",
+                                      r);
         const fs::path wav = r.out() / "voice_long_run.wav";
         auto call = start_process(self_path(), L"record --device \"" + cable.mic_id + L"\" --seconds " +
                                                    std::to_wstring(int(long_seconds) + 4) + L" --out \"" + wav.wstring() +
@@ -1048,9 +1053,19 @@ int e2e_voice(const Args& args) {
         const double target = 300.0 * std::pow(2.0, 4.0 / 12);
         const size_t piece = kRate / 20;
         std::vector<double> levels;
+        const auto silences = cable_silences(data.samples);
+        json cable_gaps = json::array();
         // Skip the first 4 s (start-up), look at the rest in 50 ms pieces.
-        for (size_t i = size_t(kRate) * 4; i + piece <= data.samples.size(); i += piece)
-            levels.push_back(to_db(tone_amplitude(data.samples.data() + i, piece, kRate, target)));
+        for (size_t i = size_t(kRate) * 4; i + piece <= data.samples.size(); i += piece) {
+            const double db = to_db(tone_amplitude(data.samples.data() + i, piece, kRate, target));
+            bool cable_silent = false;
+            for (const auto& [at, length] : silences) cable_silent = cable_silent || (at < i + piece && at + length > i);
+            if (cable_silent) cable_gaps.push_back(json{{"at_s", round3(double(i) / kRate)}, {"level_db", round3(db)}});
+            else levels.push_back(db);
+        }
+        r.info("long_voice_cable_silences", cable_gaps,
+               "pieces where nothing at all reached the cable, not even the quiet reference tone (a hiccup of Windows "
+               "or the cable, not of the voice path)");
         std::vector<double> sorted = levels;
         std::sort(sorted.begin(), sorted.end());
         const double median = sorted.empty() ? -200 : sorted[sorted.size() / 2];
@@ -1060,6 +1075,7 @@ int e2e_voice(const Args& args) {
                 lowest - median, "the shifted voice never dipped more than 3 dB (no gaps)");
         r.info("long_voice_trims_repeats", json{{"trims", status["trims"]}, {"repeats", status["repeats"]}});
         steady.stop();
+        reference->kill();
     }
     return r.finish("e2e_voice.json");
 }
