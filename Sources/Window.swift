@@ -253,7 +253,8 @@ final class GradientSlider: NSView {
             (text as NSString).draw(at: NSPoint(x: left ? bounds.minX : bounds.maxX - width, y: top - labelHeight), withAttributes: attributes)
         }
 
-        // The knob, with a soft shadow.
+        // The knob, with a soft shadow and a thin edge (so it stands out on a white card too).
+        let k = knob
         NSGraphicsContext.saveGraphicsState()
         let shadow = NSShadow()
         shadow.shadowColor = NSColor.black.withAlphaComponent(isEnabled ? 0.3 : 0.15)
@@ -261,8 +262,13 @@ final class GradientSlider: NSView {
         shadow.shadowOffset = NSSize(width: 0, height: -1)
         shadow.set()
         NSColor.white.withAlphaComponent(isEnabled ? 1 : 0.7).setFill()
-        NSBezierPath(ovalIn: knob).fill()
+        NSBezierPath(ovalIn: k).fill()
         NSGraphicsContext.restoreGraphicsState()
+        let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        (dark ? NSColor.white : NSColor.black).withAlphaComponent((dark ? 0.25 : 0.14) * (isEnabled ? 1 : 0.6)).setStroke()
+        let edge = NSBezierPath(ovalIn: k.insetBy(dx: 0.5, dy: 0.5))
+        edge.lineWidth = 1
+        edge.stroke()
     }
 
     // Reachable with Tab when "Keyboard navigation" is on in the Mac's settings (like the switches).
