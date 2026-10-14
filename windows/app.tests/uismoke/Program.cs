@@ -121,7 +121,14 @@ sealed class Smoke(string appExe, string toolExe, string outDir, string sourceNa
             var item = menu.FindFirstDescendant(cf => cf.ByControlType(ControlType.MenuItem).And(cf.ByName(sourceName)));
             item?.Patterns.Invoke.Pattern.Invoke();
             Thread.Sleep(300);
-            Keyboard.Type(VirtualKeyShort.ESCAPE);
+            // Close the menu (it stays open so several apps can be ticked).
+            for (var i = 0; i < 3 && FindMenu(app.Id) is not null; i++)
+            {
+                window.SetForeground();
+                Keyboard.Type(VirtualKeyShort.ESCAPE);
+                Thread.Sleep(500);
+            }
+            Check("app menu closes with Esc", FindMenu(app.Id) is null);
         }
         Check("picker shows the ticked app", WaitName(window, "HearPicker", sourceName), Find(window, "HearPicker")?.Name);
         var running = WaitFor(() =>
@@ -137,11 +144,13 @@ sealed class Smoke(string appExe, string toolExe, string outDir, string sourceNa
         Shot(window, "app-ticked");
 
         // ---------- What you hear: off and on ----------
-        Find(window, "HearSwitch")?.AsToggleButton().Toggle();
-        Check("hear switch off stops the sound", WaitFor(() => Status()?["music"]?["state"]?.GetValue<string>() == "off" ? "" : null, TimeSpan.FromSeconds(5)) is not null);
+        Toggle(window, "HearSwitch");
+        Check("hear switch off stops the sound", WaitFor(() => Status()?["music"]?["state"]?.GetValue<string>() == "off" ? "" : null, TimeSpan.FromSeconds(8)) is not null,
+            Status()?["music"]?["state"]);
         Shot(window, "hear-off");
-        Find(window, "HearSwitch")?.AsToggleButton().Toggle();
-        Check("hear switch on starts again", WaitFor(() => Status()?["music"]?["state"]?.GetValue<string>() is "running" or "waiting" ? "" : null, TimeSpan.FromSeconds(5)) is not null);
+        Toggle(window, "HearSwitch");
+        Check("hear switch on starts again", WaitFor(() => Status()?["music"]?["state"]?.GetValue<string>() is "running" or "waiting" ? "" : null, TimeSpan.FromSeconds(8)) is not null,
+            Status()?["music"]?["state"]);
 
         // ---------- Your voice ----------
         var micName = Find(window, "MicPicker")?.Properties.ItemStatus.ValueOrDefault ?? "";
@@ -156,7 +165,7 @@ sealed class Smoke(string appExe, string toolExe, string outDir, string sourceNa
         }
         else
         {
-            Find(window, "VoiceSwitch")?.AsToggleButton().Toggle();
+            Toggle(window, "VoiceSwitch");
             var voiceOn = WaitFor(() => Status()?["voice"]?["state"]?.GetValue<string>() is string v && v != "off" ? v : null, TimeSpan.FromSeconds(6));
             Check("voice switch on starts the voice", voiceOn is not null, voiceOn);
             var micDuring = WaitFor(() => DefaultMic() is string m && m.Contains("Pitch Shift Mic") ? m : null, TimeSpan.FromSeconds(6));
@@ -170,7 +179,7 @@ sealed class Smoke(string appExe, string toolExe, string outDir, string sourceNa
             Find(window, "TestButton")?.AsButton().Invoke();
             Check("Test can be stopped", WaitName(window, "TestButton", "Test", 4000), Find(window, "TestButton")?.Name);
             Shot(window, "voice-on");
-            Find(window, "VoiceSwitch")?.AsToggleButton().Toggle();
+            Toggle(window, "VoiceSwitch");
             Check("voice switch off", WaitFor(() => Status()?["voice"]?["state"]?.GetValue<string>() == "off" ? "" : null, TimeSpan.FromSeconds(5)) is not null);
             var micAfter = WaitFor(() => DefaultMic() == micBefore ? micBefore : null, TimeSpan.FromSeconds(6));
             Check("the real default mic is given back", micAfter is not null || micBefore is null, $"{DefaultMic()} (before: {micBefore})");
@@ -283,6 +292,21 @@ sealed class Smoke(string appExe, string toolExe, string outDir, string sourceNa
         var desktop = automation.GetDesktop();
         return desktop.FindFirstChild(cf => cf.ByProcessId(pid).And(cf.ByControlType(ControlType.Window)).And(cf.ByName(Title)))?.AsWindow();
     }, timeout);
+
+    // Switches a card on or off through UI Automation (like a screen reader would), waiting for the switch first.
+    void Toggle(Window window, string id)
+    {
+        var toggle = WaitFor(() => Find(window, id), TimeSpan.FromSeconds(5))?.AsToggleButton();
+        if (toggle is null)
+        {
+            Check($"found {id}", false);
+            return;
+        }
+        var before = toggle.ToggleState;
+        toggle.Toggle();
+        if (WaitFor(() => toggle.ToggleState != before ? "" : null, TimeSpan.FromSeconds(3)) is null)
+            Check($"{id} switched", false, before);
+    }
 
     static AutomationElement? Find(AutomationElement root, string id)
     {

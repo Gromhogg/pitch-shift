@@ -26,11 +26,31 @@
         <FontFamily x:Key="PsIcons">Segoe Fluent Icons, Segoe MDL2 Assets</FontFamily>
         <SolidColorBrush x:Key="PsPill" Color="#121B1B1B" />
 
+        <!-- Focus rings: shown only when moving around with the keyboard (Tab), not after a click. -->
+        <Style x:Key="PsFocusRound">
+            <Setter Property="Control.Template">
+                <Setter.Value>
+                    <ControlTemplate>
+                        <Border Margin="-3" CornerRadius="7" BorderThickness="2" BorderBrush="{DynamicResource PsText}" />
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+        <Style x:Key="PsFocusPill">
+            <Setter Property="Control.Template">
+                <Setter.Value>
+                    <ControlTemplate>
+                        <Border Margin="-3" CornerRadius="16" BorderThickness="2" BorderBrush="{DynamicResource PsText}" />
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <!-- Natural | Cartoon: the chosen half is filled with the middle color. -->
         <Style x:Key="PsSegment" TargetType="RadioButton">
             <Setter Property="Foreground" Value="{DynamicResource PsText}" />
             <Setter Property="Cursor" Value="Hand" />
-            <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+            <Setter Property="FocusVisualStyle" Value="{StaticResource PsFocusRound}" />
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="RadioButton">
@@ -45,10 +65,6 @@
                                 <Setter TargetName="Back" Property="Background" Value="{StaticResource PsMid}" />
                                 <Setter Property="Foreground" Value="White" />
                             </Trigger>
-                            <Trigger Property="IsKeyboardFocused" Value="True">
-                                <Setter TargetName="Back" Property="BorderBrush" Value="{DynamicResource PsText}" />
-                                <Setter TargetName="Back" Property="BorderThickness" Value="1" />
-                            </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
                 </Setter.Value>
@@ -60,14 +76,13 @@
             <Setter Property="Background" Value="{StaticResource PsPurple}" />
             <Setter Property="Foreground" Value="White" />
             <Setter Property="Cursor" Value="Hand" />
-            <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+            <Setter Property="FocusVisualStyle" Value="{StaticResource PsFocusRound}" />
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
                         <Grid>
                             <Border x:Name="Back" CornerRadius="5" Background="{TemplateBinding Background}" />
                             <Border x:Name="Shine" CornerRadius="5" Background="White" Opacity="0" />
-                            <Border x:Name="Focus" CornerRadius="6" Margin="-2" BorderThickness="2" BorderBrush="{DynamicResource PsText}" Visibility="Collapsed" />
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="6,0" />
                         </Grid>
                         <ControlTemplate.Triggers>
@@ -76,9 +91,6 @@
                             </Trigger>
                             <Trigger Property="IsPressed" Value="True">
                                 <Setter TargetName="Shine" Property="Opacity" Value="0.2" />
-                            </Trigger>
-                            <Trigger Property="IsKeyboardFocused" Value="True">
-                                <Setter TargetName="Focus" Property="Visibility" Value="Visible" />
                             </Trigger>
                             <Trigger Property="IsEnabled" Value="False">
                                 <Setter Property="Opacity" Value="0.4" />

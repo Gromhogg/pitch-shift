@@ -44,11 +44,12 @@ The window has two cards. Each has an on/off switch.
   12 half-steps is one octave.
 - **−** and **+** move it by one half-step. **0** goes back to normal.
 - **Exact amount:** click the number, type any amount from −24 to 24 (like `2.5` or `-1.25`) and
-  press **Enter**. **Esc** cancels.
+  press **Enter**. **Esc** cancels. While typing, the **↑** and **↓** keys change it by 1.
 - The button under the number picks what changes:
   - **All sound**: everything on your PC.
   - Or tick one or more apps (like Spotify or Chrome). Only apps that are playing sound show up.
     Ticked apps that aren't open stay in the list (greyed) and are picked up again when they start.
+    A small green dot marks apps playing sound right now.
 - When the number looks faded, the apps you picked aren't playing right now.
 - Your speakers, headphones and volume keys work like normal.
 
@@ -59,11 +60,14 @@ The window has two cards. Each has an on/off switch.
 - **Natural** keeps your voice sounding like a person. **Cartoon** sounds like a cartoon character.
 - **Test** records 5 seconds of how you sound in calls (red countdown), then plays it back.
   Click again to stop.
-- The dot next to **Pitch Shift Mic** turns green while a call app is using your changed voice.
+- The dot next to **Pitch Shift Mic** turns green (and gently pulses) while a call app is using your changed voice.
 
 **In Discord, Zoom and other call apps:** leave the microphone on **Default**, or pick
 **Pitch Shift Mic**. While "Your voice" is on, Pitch Shift Mic is your PC's default microphone.
 When you switch it off or quit, your real microphone goes back to being the default.
+
+**Bigger window:** drag an edge or a corner. Everything grows with the window. In a tall, narrow window
+the two cards sit one above the other (handy next to Discord). Pitch Shift remembers the size.
 
 **Closing the window** keeps Pitch Shift running (its icon is next to the clock).
 Click the icon to open the window again. To stop it, right-click the icon and pick **Quit**.
@@ -150,8 +154,11 @@ The window app also builds on a Mac (to check for mistakes, not to run):
 
 ## The window app
 
-- `PitchShift.exe --preview hear-on,voice-on,cartoon --screenshot shot.png [--theme dark] [--scale 2]` draws a
-  made-up state into a picture without sound (states are listed in `app/Preview.cs`).
+- `PitchShift.exe --preview hear-on,voice-on,cartoon --screenshot shot.png [--theme dark] [--scale 2] [--size 900x450]`
+  draws a made-up state into a picture without sound (states are listed in `app/Preview.cs`).
+- The window is resizable (smallest = the cards at their base size, largest 1000×640); `app/MainWindow.Layout.cs`
+  places the cards (side by side or stacked) and picks the scale. Animations follow Windows' "Animation effects"
+  setting (`app/Motion.cs`).
 - `PitchShift.exe --quit` asks the running copy to quit (the installer uses this); `--diag [--out file]` writes the
   diagnostics report; `--shot file` asks the running copy for a picture of itself.
 - Settings: `%APPDATA%\Pitch Shift\settings.json`. Problems are logged to `%LOCALAPPDATA%\Pitch Shift\app-log.txt`.

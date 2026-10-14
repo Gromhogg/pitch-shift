@@ -33,15 +33,16 @@ sealed class GradientSwitch : ToggleButton
 
     public GradientSwitch()
     {
+        Style = new Style(typeof(GradientSwitch));  // not the Windows 11 toggle button look
         Template = new ControlTemplate(typeof(GradientSwitch));  // draws itself (OnRender)
+        MinWidth = MinHeight = 0;
         Background = Brushes.Transparent;
-        FocusVisualStyle = null;
+        FocusVisualStyle = (Style)Application.Current.FindResource("PsFocusPill");  // keyboard (Tab) only
         Cursor = Cursors.Hand;
         Size = new Size(40, 22);
         Checked += (_, _) => Slide();
         Unchecked += (_, _) => Slide();
         IsEnabledChanged += (_, _) => InvalidateVisual();
-        IsKeyboardFocusedChanged += (_, _) => InvalidateVisual();
         Theme.Changed += InvalidateVisual;
     }
 
@@ -99,12 +100,6 @@ sealed class GradientSwitch : ToggleButton
         dc.PushOpacity(IsEnabled ? 1 : 0.7);
         dc.DrawRoundedRectangle(Brushes.White, null, knob, size / 2, size / 2);
         dc.Pop();
-
-        if (IsKeyboardFocused)
-        {
-            var ring = new Rect(-1.5, -1.5, w + 3, h + 3);
-            dc.DrawRoundedRectangle(null, new Pen((Brush)FindResource("PsText"), 2), ring, ring.Height / 2, ring.Height / 2);
-        }
     }
 
     static readonly Brush Shadow = MakeShadow();
