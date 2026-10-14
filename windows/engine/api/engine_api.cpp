@@ -13,7 +13,6 @@
 #include "win/voice.h"
 
 #include <algorithm>
-#include <cmath>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -220,14 +219,7 @@ PS_API int ps_voice_set_semitones(double half_steps) {
 PS_API int ps_voice_set_formant(int natural) {
     std::lock_guard<std::mutex> lock(g_lock);
     if (!g_voice) return -1;
-    g_voice->set_cartoon(natural != 0 ? 0.0 : 1.0);
-    return 0;
-}
-
-PS_API int ps_voice_set_cartoon(double cartoon) {
-    std::lock_guard<std::mutex> lock(g_lock);
-    if (!g_voice || !std::isfinite(cartoon)) return -1;
-    g_voice->set_cartoon(std::clamp(cartoon, 0.0, 1.0));
+    g_voice->set_natural(natural != 0);
     return 0;
 }
 

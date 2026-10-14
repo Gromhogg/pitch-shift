@@ -4,20 +4,15 @@
 #include "dsp/voice_settings.h"
 
 #include <algorithm>
-#include <cmath>
 
 namespace ps {
 
 using RubberBand::RubberBandStretcher;
 
-VoiceShifter::VoiceShifter(int rate, double half_steps, double cartoon)
-    : half_steps_(half_steps),
-      cartoon_(std::clamp(cartoon, 0.0, 1.0)),
-      cartoon_now_(cartoon_),
-      glide_step_(1.0 / (voice_settings::kStyleGlideSeconds * rate)) {
-    rb_ = std::make_unique<RubberBandStretcher>(size_t(rate), 1, voice_settings::options(), 1.0, pitch_scale(half_steps));
+VoiceShifter::VoiceShifter(int rate, double half_steps, bool natural) : half_steps_(half_steps), natural_(natural) {
+    rb_ = std::make_unique<RubberBandStretcher>(size_t(rate), 1, voice_settings::options(natural), 1.0,
+                                                pitch_scale(half_steps));
     rb_->setMaxProcessSize(voice_settings::kMaxProcess);
-    rb_->setFormantScale(voice_settings::formant_scale(half_steps_, cartoon_now_));
     ready_.resize(voice_settings::kMaxProcess * 2);
 }
 
@@ -27,19 +22,15 @@ void VoiceShifter::set_half_steps(double value) {
     if (half_steps_ == 0 && value != 0) rb_->reset();  // clear out old sound
     rb_->setPitchScale(pitch_scale(value));
     half_steps_ = value;
-    rb_->setFormantScale(voice_settings::formant_scale(half_steps_, cartoon_now_));
 }
 
-void VoiceShifter::set_cartoon(double cartoon) { cartoon_ = std::clamp(cartoon, 0.0, 1.0); }
+void VoiceShifter::set_natural(bool natural) {
+    if (natural == natural_) return;
+    rb_->setFormantOption(voice_settings::formant_option(natural));
+    natural_ = natural;
+}
 
 void VoiceShifter::process(const float* in, size_t n, std::vector<float>& out) {
-    // The style glides toward where it's heading (just a number for Rubber Band: no memory is made).
-    if (cartoon_now_ != cartoon_) {
-        const double step = glide_step_ * double(n);
-        cartoon_now_ = std::fabs(cartoon_ - cartoon_now_) <= step ? cartoon_
-                                                                   : cartoon_now_ + (cartoon_ > cartoon_now_ ? step : -step);
-        rb_->setFormantScale(voice_settings::formant_scale(half_steps_, cartoon_now_));
-    }
     if (half_steps_ == 0) {  // unchanged voice
         out.insert(out.end(), in, in + n);
         return;

@@ -33,8 +33,7 @@ PS_API const char* ps_list_sources_json(void);
 PS_API const char* ps_list_mics_json(void);
 /* JSON with what the engine is doing right now: "music" (state, apps, speaker = the speakers it plays to,
    advanced = Advanced processing on, counts) and "voice" (state, in_use, mic, cable {present, restart_needed,
-   mic_name}, cartoon = the voice style asked for, cartoon_now = the style in use while it glides there,
-   natural = the style is 0, test, counts). */
+   mic_name}, test, counts). */
 PS_API const char* ps_status_json(void);
 
 /* What you hear. mode 0 = process `pid` and everything it started, mode 1 = all sound. */
@@ -56,10 +55,7 @@ PS_API int ps_music_set_advanced(int on);
 PS_API int ps_voice_start(const char* endpoint_id);
 PS_API int ps_voice_stop(void);
 PS_API int ps_voice_set_semitones(double half_steps);
-PS_API int ps_voice_set_formant(int natural); /* 1 = Natural, 0 = Cartoon (same as ps_voice_set_cartoon 0 or 1) */
-/* The voice style, from 0 (Natural: the voice keeps its character) to 1 (Cartoon: chipmunk or monster).
-   In between blends the two. It changes smoothly while the voice runs. */
-PS_API int ps_voice_set_cartoon(double cartoon);
+PS_API int ps_voice_set_formant(int natural); /* 1 = Natural, 0 = Cartoon */
 PS_API int ps_voice_test_start(void);
 PS_API int ps_voice_test_stop(void);
 

@@ -264,7 +264,7 @@ TEST_CASE("voice cushion: small delay, no gaps when the clocks drift, no clicks"
 }
 
 TEST_CASE("voice shifter: 0 half-steps passes the voice through") {
-    VoiceShifter v(48000, 0.0, 0.0);
+    VoiceShifter v(48000, 0.0, true);
     const auto in = make_vowel(120, 48000, 0.5);
     std::vector<float> out;
     v.process(in.data(), in.size(), out);
@@ -273,7 +273,7 @@ TEST_CASE("voice shifter: 0 half-steps passes the voice through") {
 
 TEST_CASE("voice shifter: how long the voice takes to come through") {
     const int rate = 48000;
-    VoiceShifter v(rate, 4.0, 0.0);
+    VoiceShifter v(rate, 4.0, true);
     auto in = make_tone(300.0, 0.3, rate, 1, 3.0);
     std::fill(in.begin(), in.begin() + rate, 0.0f);  // silence, then a tone from 1 s
     std::vector<float> out;
@@ -314,7 +314,7 @@ TEST_CASE("voice shifter: keeps the sound above 10 kHz (no hiss band, no missing
         }
         return 10 * std::log10(e + 1e-30);
     };
-    VoiceShifter v(rate, 4.0, 0.0);
+    VoiceShifter v(rate, 4.0, true);
     std::vector<float> out;
     for (size_t i = 0; i < in.size(); i += 480) v.process(in.data() + i, 480, out);
     REQUIRE(out.size() > size_t(rate) * 2);
@@ -324,87 +324,29 @@ TEST_CASE("voice shifter: keeps the sound above 10 kHz (no hiss band, no missing
     CHECK(std::fabs(after - before) < 6.0);
 }
 
-TEST_CASE("voice shifter: the style slider moves the voice's resonances from Natural (0) to Cartoon (1)") {
+TEST_CASE("voice shifter: Natural keeps the voice's resonances, Cartoon moves them") {
     const int rate = 48000;
     const auto in = make_vowel(120, rate, 3.0);
     const double in_centroid = spectral_centroid(in.data() + rate, size_t(rate), rate, 300, 4000);
     const double in_f0 = estimate_f0(in.data() + rate, size_t(rate), rate, 70, 400);
-    const double styles[3] = {0.0, 0.5, 1.0};
-    double ratio[3], f0[3];
-    for (int k = 0; k < 3; ++k) {
-        VoiceShifter v(rate, 4.0, styles[k]);
+    double centroid[2], f0[2];
+    for (int natural = 0; natural < 2; ++natural) {
+        VoiceShifter v(rate, 4.0, natural == 1);
         std::vector<float> out;
         for (size_t i = 0; i < in.size(); i += 480) v.process(in.data() + i, std::min<size_t>(480, in.size() - i), out);
         REQUIRE(out.size() > size_t(rate) * 2);
         const float* tail = out.data() + out.size() - size_t(rate);
-        ratio[k] = spectral_centroid(tail, size_t(rate), rate, 300, 4000) / in_centroid;
-        f0[k] = estimate_f0(tail, size_t(rate), rate, 70, 400);
-        MESSAGE("style " << styles[k] << ": f0 " << f0[k] << " Hz, formant ratio " << ratio[k]);
+        centroid[natural] = spectral_centroid(tail, size_t(rate), rate, 300, 4000);
+        f0[natural] = estimate_f0(tail, size_t(rate), rate, 70, 400);
     }
     const double expect_f0 = in_f0 * std::pow(2.0, 4.0 / 12);
-    for (double f : f0) CHECK(f == doctest::Approx(expect_f0).epsilon(0.03));
-    CHECK(ratio[0] == doctest::Approx(1.0).epsilon(0.08));  // Natural: the resonances stay put
-    CHECK(ratio[2] > 1.15);                                 // Cartoon: they move up with the pitch (1.26)
-    CHECK(ratio[1] > ratio[0] + 0.04);                      // in between: part of the way
-    CHECK(ratio[1] < ratio[2] - 0.03);
-}
-
-// The ends of the slider sound exactly like the old Natural / Cartoon switch (version 2.0).
-TEST_CASE("voice shifter: style 0 and 1 are the old Natural and Cartoon, sample for sample") {
-    const int rate = 48000;
-    const auto in = make_vowel(140, rate, 1.5);
-    using RB = RubberBand::RubberBandStretcher;
-    const int old_options = RB::OptionProcessRealTime | RB::OptionEngineFiner | RB::OptionWindowShort |
-                            RB::OptionPitchHighConsistency;
-    for (double steps : {4.0, -5.0}) {
-        for (int natural = 0; natural < 2; ++natural) {
-            RB old(size_t(rate), 1, old_options | (natural ? RB::OptionFormantPreserved : RB::OptionFormantShifted), 1.0,
-                   std::pow(2.0, steps / 12));
-            old.setMaxProcessSize(4096);
-            std::vector<float> expected, got, piece(8192);
-            VoiceShifter v(rate, steps, natural ? 0.0 : 1.0);
-            for (size_t i = 0; i < in.size(); i += 480) {
-                const float* input = in.data() + i;
-                old.process(&input, 480, false);
-                for (int ready; (ready = old.available()) > 0;) {
-                    float* output = piece.data();
-                    const size_t n = old.retrieve(&output, size_t(ready));
-                    expected.insert(expected.end(), piece.begin(), piece.begin() + std::ptrdiff_t(n));
-                }
-                v.process(in.data() + i, 480, got);
-            }
-            REQUIRE(expected.size() > size_t(rate));
-            CHECK(got == expected);
-        }
-    }
-}
-
-TEST_CASE("voice shifter: moving the style while it runs glides there without a click") {
-    const int rate = 48000;
-    const auto in = make_vowel(140, rate, 3.0);
-    // The sound above 6 kHz in 2 ms pieces: a click would stand out there.
-    auto top = [&](const std::vector<float>& x, size_t from, size_t to) {
-        double most = 0;
-        for (size_t i = from; i + 96 <= to && i + 96 <= x.size(); i += 96) {
-            double e = 0;
-            for (size_t j = i + 1; j < i + 96; ++j) e += double(x[j] - x[j - 1]) * (x[j] - x[j - 1]);
-            most = std::max(most, e);
-        }
-        return 10 * std::log10(most + 1e-30);
-    };
-    std::vector<float> moved, natural, cartoon;
-    VoiceShifter a(rate, 4.0, 0.0), b(rate, 4.0, 0.0), c(rate, 4.0, 1.0);
-    for (size_t i = 0; i < in.size(); i += 480) {
-        if (i == size_t(rate)) a.set_cartoon(1.0);  // jump from Natural to Cartoon at 1 s
-        a.process(in.data() + i, 480, moved);
-        b.process(in.data() + i, 480, natural);
-        c.process(in.data() + i, 480, cartoon);
-    }
-    CHECK(a.cartoon_now() == 1.0);  // got there
-    const size_t from = size_t(rate), to = size_t(rate * 1.4);  // the change, Rubber Band's delay and the glide
-    const double during = top(moved, from, to), steady = std::max(top(natural, from, to), top(cartoon, from, to));
-    MESSAGE("sound change while gliding: " << during << " dB, steady styles: " << steady << " dB");
-    CHECK(during < steady + 3.0);
+    MESSAGE("input: f0 " << in_f0 << " Hz, centroid " << in_centroid << " Hz");
+    MESSAGE("natural: f0 " << f0[1] << " Hz, centroid " << centroid[1] << " Hz (ratio " << centroid[1] / in_centroid << ")");
+    MESSAGE("cartoon: f0 " << f0[0] << " Hz, centroid " << centroid[0] << " Hz (ratio " << centroid[0] / in_centroid << ")");
+    CHECK(f0[1] == doctest::Approx(expect_f0).epsilon(0.03));
+    CHECK(f0[0] == doctest::Approx(expect_f0).epsilon(0.03));
+    CHECK(centroid[1] / in_centroid == doctest::Approx(1.0).epsilon(0.08));
+    CHECK(centroid[0] / in_centroid > 1.15);
 }
 
 TEST_CASE("test song: the same every time, peaks at -3 dBFS") {

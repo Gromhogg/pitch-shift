@@ -8,8 +8,8 @@
 //   e2e-advanced: "Advanced processing": 440 Hz at +8, -5 and +15 lands on the right pitch, a bass note at +8
 //              lands an octave lower than a plain shift would put it, switching on and off, the total delay
 //              (at most 0.8 s), quick amount changes, and 60 s without dropouts.
-//   e2e-voice: a made-up voice through the voice path into the cable: pitch, the voice style at 0 (Natural),
-//              0.5 and 1 (Cartoon), runs only while a "call app" records, and the Test button.
+//   e2e-voice: a made-up voice through the voice path into the cable: pitch, Natural vs Cartoon,
+//              runs only while a "call app" records, and the Test button.
 //   e2e-crash: the app is ended suddenly while an app is quiet: the watchdog puts it back,
 //              also when the quiet app had quit too.
 #include "tool/tool.h"
@@ -922,7 +922,7 @@ int e2e_voice(const Args& args) {
         }
     });
     voice.set_semitones(4);
-    voice.set_cartoon(0.0);
+    voice.set_natural(true);
     const std::wstring before_console = default_endpoint_id(eCapture, eConsole);
     const std::wstring before_comms = default_endpoint_id(eCapture, eCommunications);
     r.info("default_mic_before", utf8(before_console));
@@ -953,19 +953,13 @@ int e2e_voice(const Args& args) {
         return read_wav(wav.string());
     };
 
-    // The voice style slider: 0 = Natural, 0.5 = halfway, 1 = Cartoon.
-    const double styles[3] = {0.0, 0.5, 1.0};
-    const char* names[3] = {"voice_natural_plus4", "voice_half_plus4", "voice_cartoon_plus4"};
-    double ratio[3] = {0, 0, 0};
-    for (int pass = 0; pass < 3; ++pass) {
-        voice.set_cartoon(styles[pass]);
+    double centroid_natural = 0, centroid_cartoon = 0;
+    for (int pass = 0; pass < 2; ++pass) {
+        const bool natural = pass == 0;
+        voice.set_natural(natural);
         sleep_s(0.3);
-        const std::string name = names[pass];
-        r.check(name + "_status_style", voice.status()["cartoon"] == styles[pass], voice.status()["cartoon"],
-                "the status shows the style asked for");
+        const std::string name = natural ? "voice_natural_plus4" : "voice_cartoon_plus4";
         const auto data = listen(name);
-        r.check(name + "_style_reached", voice.status()["cartoon_now"] == styles[pass], voice.status()["cartoon_now"],
-                "the voice glided all the way to the new style");
         const size_t n = std::min(data.samples.size(), size_t(kRate * 3));
         if (n < size_t(kRate)) {
             r.check(name + "_heard", false, data.samples.size(), "the call app heard the voice");
@@ -979,20 +973,18 @@ int e2e_voice(const Args& args) {
         r.check(name + "_heard", sum2 / double(n) > 1e-5, to_db(std::sqrt(sum2 / double(n))), "the call app heard the voice");
         r.check(name + "_f0_hz", std::fabs(f0 / (in_f0 * std::pow(2.0, 4.0 / 12)) - 1) < 0.03, f0,
                 "120 Hz voice +4 = 151.2 Hz");
-        ratio[pass] = centroid / in_centroid;
+        (natural ? centroid_natural : centroid_cartoon) = centroid / in_centroid;
     }
-    r.check("natural_keeps_formants", std::fabs(ratio[0] - 1.0) < 0.10, ratio[0],
-            "Natural (0): the voice's resonances stay put (ratio about 1.07)");
-    r.check("half_moves_formants_part_way", ratio[1] > ratio[0] + 0.04 && ratio[1] < ratio[2] - 0.03, ratio[1],
-            "halfway (0.5): the resonances move part of the way (ratio about 1.18)");
-    r.check("cartoon_moves_formants", ratio[2] > 1.15, ratio[2],
-            "Cartoon (1): the resonances move up with the pitch (ratio about 1.26)");
+    r.check("natural_keeps_formants", std::fabs(centroid_natural - 1.0) < 0.10, centroid_natural,
+            "Natural: the voice's resonances stay put (ratio about 1.0)");
+    r.check("cartoon_moves_formants", centroid_cartoon > 1.15, centroid_cartoon,
+            "Cartoon: the resonances move up with the pitch (ratio about 1.26)");
     sleep_s(3.0);
     r.check("idle_after_call_app_stops", voice.status()["state"] == "idle", voice.status()["state"],
             "the microphone is let go when the call app stops");
 
     // The Test button: records 5 s (counting down), plays it back, then goes back to normal.
-    voice.set_cartoon(0.0);
+    voice.set_natural(true);
     voice.test_start();
     std::vector<int> countdown;
     bool played = false;
@@ -1038,7 +1030,7 @@ int e2e_voice(const Args& args) {
             }
         });
         steady.set_semitones(4);
-        steady.set_cartoon(0.0);
+        steady.set_natural(true);
         steady.start(L"");
         // A very quiet reference tone on the cable too (1 kHz, -70 dB). Where it is missing as well, nothing at all
         // reached the cable (see cable_silences): a hiccup of Windows or the cable, not a gap of the voice path.

@@ -11,7 +11,6 @@
 #include "win/capture.h"
 #include "win/render.h"
 
-#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <functional>
@@ -33,7 +32,7 @@ public:
     void start(const std::wstring& mic_id);  // empty = Windows' default microphone for calls
     void stop();
     void set_semitones(double value) { semitones_ = value; }
-    void set_cartoon(double cartoon) { cartoon_ = std::clamp(cartoon, 0.0, 1.0); }  // 0 = Natural ... 1 = Cartoon
+    void set_natural(bool natural) { natural_ = natural; }
 
     // Test: record 5 s of what call apps would hear, then play it back on the speakers.
     void test_start();
@@ -70,7 +69,7 @@ private:
     std::function<void(float*, size_t)> test_input_;
     std::atomic<bool> always_run_{false};
     std::atomic<double> semitones_{0.0};
-    std::atomic<double> cartoon_{0.0};
+    std::atomic<bool> natural_{true};
     std::atomic<int> test_request_{0};  // 1 = start, 2 = stop
 
     // Manager thread.
