@@ -2,8 +2,12 @@
 // Checks from Terminal (inside "Pitch Shift.app/Contents/MacOS/PitchShift"):
 //   --list                                     sound devices, Pitch Shift Mic, and which app each sound process belongs to
 //   --test [--pid N | --app BUNDLE_ID | --all] [--steps 2.5] [--seconds S]     "What you hear" for a few seconds
-//   --test-voice [--mic NAME] [--tone 440 | --file F] [--steps 3] [--cartoon] [--seconds S] [--out F.caf]
-//                                              sends a tone or file through the voice chain and records Pitch Shift Mic
+//   --test-voice [--mic NAME] [--tone 440 | --file F] [--steps 3] [--cartoon | --cartoon-amount 0.5] [--seconds S]
+//                [--out F.caf]                 sends a tone or file through the voice chain and records Pitch Shift Mic
+//                                              (voice style: 0 = Natural, the default; 1 = Cartoon, same as --cartoon)
+//   --render-voice IN OUT [--steps 3] [--cartoon | --cartoon-amount 0.5] [--cartoon-at "1:1,2:0"]
+//                                              shifts a sound file with the voice's own settings (offline, no devices;
+//                                              --cartoon-at moves the style part way through)
 //   --test-button [--volume 0.03]              presses Test with a quiet tone as the voice (record 5 s, play back)
 //   --test ... --advanced [--record-out F.wav] [--steps-at "3:8,6:-5"]
 //                                              "What you hear" with Advanced processing on (--watch prints the delay;
@@ -38,6 +42,10 @@ func onQuitSignals(_ handler: @escaping () -> Void) {
 func fourCC(_ value: UInt32) -> String {
     String(bytes: [24, 16, 8, 0].map { UInt8((value >> $0) & 0xFF) }, encoding: .ascii) ?? "\(value)"
 }
+
+// Voice style from the command line: --cartoon = 1 (Cartoon), --cartoon-amount X (0 = Natural ... 1 = Cartoon).
+// In --preview it sets where the slider is.
+let cartoonArg: Float? = args.contains("--cartoon") ? 1 : arg("--cartoon-amount").flatMap(Float.init).map { max(0, min(1, $0)) }
 
 // The watchdog: a second copy of the app that gives the real mic back if the app ends without doing it.
 if let pid = arg("--watchdog").flatMap({ pid_t($0) }) { DefaultMic.watch(pid) }
@@ -96,6 +104,26 @@ if let input = arg("--render-file") {
     }
 }
 
+if let input = arg("--render-voice") {
+    let i = args.firstIndex(of: "--render-voice")!
+    guard i + 2 < args.count else { print("usage: --render-voice IN OUT [--steps N] [--cartoon-amount X]"); exit(1) }
+    // "1:1,2:0" = at 1 s go to Cartoon, at 2 s back to Natural
+    let changes: [(Double, Float)] = (arg("--cartoon-at") ?? "").split(separator: ",").compactMap { item in
+        let parts = item.split(separator: ":")
+        guard parts.count == 2, let t = Double(parts[0]), let n = Float(parts[1]) else { return nil }
+        return (t, n)
+    }
+    do {
+        try renderVoiceFile(input: input, output: args[i + 2], halfSteps: arg("--steps").flatMap(Float.init) ?? 3,
+                            cartoon: cartoonArg ?? 0, changes: changes)
+        print("wrote \(args[i + 2])")
+        exit(0)
+    } catch {
+        print("render failed: \((error as? Problem)?.message ?? "\(error)")")
+        exit(1)
+    }
+}
+
 if args.contains("--test") {
     let source: HearSource = args.contains("--all") ? .all : HearSource(saved: arg("--app") ?? "com.apple.Music")
     let shifter = HearShifter(halfSteps: arg("--steps").flatMap(Float.init) ?? 2, source: source, advanced: args.contains("--advanced"))
@@ -132,7 +160,7 @@ if args.contains("--test") {
 if args.contains("--test-voice") {
     let steps = arg("--steps").flatMap(Float.init) ?? 3
     let micUID = arg("--mic").flatMap { name in Mics.list().first { $0.name == name }?.uid }
-    let voice = VoiceShifter(halfSteps: steps, natural: !args.contains("--cartoon"), micUID: micUID)
+    let voice = VoiceShifter(halfSteps: steps, cartoon: cartoonArg ?? 0, micUID: micUID)
     guard let mic = voice.currentMic, let virtualMic = Mics.virtualMic else { print("No mic or Pitch Shift Mic not installed"); exit(1) }
     let rate = nominalRate(mic)
     let seconds = arg("--seconds").flatMap(Double.init) ?? 3
@@ -180,7 +208,7 @@ if args.contains("--test-voice") {
         voice.stop()
         let peak = recorded.reduce(Float(0)) { max($0, abs($1)) }
         let firstSound = recorded.firstIndex { abs($0) > 0.02 }.map { Double($0) / recorder.sampleRate * 1000 }
-        var line = "voice test: mic=\(chain.micName) rate=\(Int(chain.sampleRate)) cushion=\(Int(Double(chain.cushion) / chain.sampleRate * 1000))ms "
+        var line = "voice test: mic=\(chain.micName) rate=\(Int(chain.sampleRate)) style=\(voice.cartoon) cushion=\(Int(Double(chain.cushion) / chain.sampleRate * 1000))ms "
         line += "recorded=\(recorded.count) peak=\(peak) firstSound=\(firstSound.map { "\(Int($0))ms" } ?? "none")"
         if tone != nil, let heard = recorded.firstIndex(where: { abs($0) > 0.02 }), chain.firstInputTime > 0, recorder.firstInputTime > 0 {
             // From the tone starting at the mic to it coming out of Pitch Shift Mic.
@@ -216,7 +244,7 @@ if args.contains("--test-voice") {
 
 // Presses the Test button with a quiet tone as the "voice": records 5 s from Pitch Shift Mic, then plays it back.
 if args.contains("--test-button") {
-    let voice = VoiceShifter(halfSteps: 3, natural: true, micUID: nil)
+    let voice = VoiceShifter(halfSteps: 3, cartoon: 0, micUID: nil)
     let rate = voice.currentMic.map(nominalRate) ?? 48000
     let volume = arg("--volume").flatMap(Double.init) ?? 0.03
     var phase = 0.0

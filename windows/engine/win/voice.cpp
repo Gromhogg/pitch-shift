@@ -153,7 +153,7 @@ void VoicePath::start_chain(const std::wstring& mic_id, const std::wstring& feed
         std::lock_guard<std::mutex> lock(settings_lock_);
         input = test_input_;
     }
-    shifter_ = std::make_unique<VoiceShifter>(kRate, semitones_.load(), natural_.load());
+    shifter_ = std::make_unique<VoiceShifter>(kRate, semitones_.load(), cartoon_.load());
     drift_ = std::make_unique<DriftBuffer>(kRate);
     shifted_.reserve(8192);
     mono_.assign(8192, 0.0f);
@@ -210,7 +210,7 @@ void VoicePath::stop_chain() {
 void VoicePath::on_mic(const float* data, size_t n) {
     const double want = semitones_.load();
     if (want != shifter_->half_steps()) shifter_->set_half_steps(want);
-    shifter_->set_natural(natural_.load());
+    shifter_->set_cartoon(cartoon_.load());
     shifted_.clear();
     shifter_->process(data, n, shifted_);
     clipped_ += limit(shifted_.data(), shifted_.size());
@@ -375,7 +375,9 @@ void VoicePath::tick() {
                         {"mic", {{"id", utf8(mic_id)}, {"name", utf8(mic_id.empty() ? L"" : mic_name_)}}},
                         {"cable", {{"present", cable_.present}, {"restart_needed", restart_needed_}, {"mic_name", utf8(cable_.mic_name)}, {"feed_name", utf8(cable_.feed_name)}}},
                         {"semitones", semitones_.load()},
-                        {"natural", natural_.load()},
+                        {"cartoon", cartoon_.load()},
+                        {"cartoon_now", shifter_ ? shifter_->cartoon_now() : cartoon_.load()},
+                        {"natural", cartoon_.load() == 0.0},
                         {"test", {{"state", test_state}, {"seconds_left", int(std::ceil(left_s))}}},
                         {"dropouts", drift_ ? drift_->dropouts() : 0},
                         {"trims", drift_ ? drift_->trims() : 0},
