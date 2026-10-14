@@ -320,9 +320,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Show the window first: the first time, macOS asks for permission to grab sound and waits for an answer.
         DispatchQueue.main.async { [self] in
             if defaults.object(forKey: Keys.hearOn) as? Bool ?? true { hear.start() }
-            if defaults.bool(forKey: Keys.voiceOn) && AVCaptureDevice.authorizationStatus(for: .audio) == .authorized {
-                voice.start()
-                DefaultMic.takeOver()
+            if defaults.bool(forKey: Keys.voiceOn) {
+                setVoice(true)  // asks for mic permission again if needed (each update looks like a new app to macOS)
             } else {
                 DefaultMic.giveBack()  // in case the app didn't close cleanly last time
             }
@@ -586,6 +585,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func micDenied() {
+        defaults.set(false, forKey: Keys.voiceOn)
         refresh()
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")!)
     }
