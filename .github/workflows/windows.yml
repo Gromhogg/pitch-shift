@@ -156,7 +156,7 @@ jobs:
           path: dist
 
       - name: Get sound ready (VB-CABLE, microphone access)
-        run: ./windows/ci/prepare-audio.ps1 -Tool dist/PitchShiftTool.exe -SecondMic
+        run: ./windows/ci/prepare-audio.ps1 -Tool dist/PitchShiftTool.exe
 
       - name: What you hear (music path)
         run: dist/PitchShiftTool.exe e2e-music --out e2e-out

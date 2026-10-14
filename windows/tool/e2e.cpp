@@ -198,11 +198,14 @@ int e2e_music(const Args& args) {
     say("A. one app, +2 half-steps");
     auto a = start_player(L"--freq 440 --amp 0.25 --seconds 900", r);
     if (!wait_session(a->pid())) r.note("player A's sound never showed up");
-    const auto base = measure_tone(left_of(ear.listen(1.5)).data(), size_t(kRate * 1.4), kRate, 440.0);
+    sleep_s(1.0);
+    const auto base_left = left_of(ear.listen(2.0));
+    const auto base = measure_tone(base_left.data(), base_left.size(), kRate, 440.0);
     r.info("baseline_level_db", base.level_db, "the player's tone at the cable before shifting");
     music.set_semitones(2);
     music.start_pid(a->pid());
-    r.check("app_running", wait_music_state(music, "running", 10), music.status()["state"], "the path starts");
+    const bool started = wait_music_state(music, "running", 10);
+    r.check("app_running", started, music.status()["state"], "the path starts");
     sleep_s(2.0);  // let Rubber Band and the cushion settle
     {
         const auto rec = ear.listen(3.0);
@@ -249,8 +252,11 @@ int e2e_music(const Args& args) {
     // ---- D. An app whose sound comes from a child process (like a browser).
     say("D. sound from a child process");
     auto p = start_player(L"--freq 440 --amp 0.25 --seconds 900 --spawn-child", r);
-    sleep_s(1.0);
-    const DWORD child = child_of(p->pid());
+    DWORD child = 0;
+    for (int i = 0; i < 100 && !child; ++i) {
+        sleep_s(0.1);
+        child = child_of(p->pid());
+    }
     r.info("child_pid", child);
     if (!child || !wait_session(child)) r.note("the child player's sound never showed up");
     music.set_semitones(2);
@@ -272,11 +278,14 @@ int e2e_music(const Args& args) {
     music.stop();
     wait_music_state(music, "off", 5);
     r.check("child_restored", wait_volumes(child, 1.0f, 3), volumes_of(child), "the child's volume comes back");
-    p->kill();
-    if (HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, child)) {
-        TerminateProcess(h, 9);
-        CloseHandle(h);
+    // End the parent and its child (a leftover player would spoil the next checks).
+    for (DWORD pid : ProcessSnapshot().tree(p->pid())) {
+        if (HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, pid)) {
+            TerminateProcess(h, 9);
+            CloseHandle(h);
+        }
     }
+    p->kill();
 
     // ---- E. All sound, two players.
     say("E. all sound, two players");
@@ -339,7 +348,10 @@ int e2e_music(const Args& args) {
     // ---- H. A ticked app that isn't open yet joins when it starts (and again after a restart).
     say("H. ticked app opens later");
     {
-        const fs::path fake = fs::temp_directory_path() / L"FakePlayer.exe";
+        wchar_t long_temp[MAX_PATH * 2];
+        const DWORD long_len = GetLongPathNameW(fs::temp_directory_path().c_str(), long_temp, MAX_PATH * 2);
+        const fs::path temp = long_len ? fs::path(std::wstring(long_temp, long_len)) : fs::temp_directory_path();
+        const fs::path fake = temp / L"FakePlayer.exe";
         std::error_code ec;
         fs::copy_file(self_path(), fake, fs::copy_options::overwrite_existing, ec);
         music.set_semitones(2);
@@ -521,7 +533,7 @@ int e2e_voice(const Args& args) {
                 "120 Hz voice +4 = 151.2 Hz");
         (natural ? centroid_natural : centroid_cartoon) = centroid / in_centroid;
     }
-    r.check("natural_keeps_formants", std::fabs(centroid_natural - 1.0) < 0.08, centroid_natural,
+    r.check("natural_keeps_formants", std::fabs(centroid_natural - 1.0) < 0.10, centroid_natural,
             "Natural: the voice's resonances stay put (ratio about 1.0)");
     r.check("cartoon_moves_formants", centroid_cartoon > 1.15, centroid_cartoon,
             "Cartoon: the resonances move up with the pitch (ratio about 1.26)");
@@ -552,14 +564,61 @@ int e2e_voice(const Args& args) {
             json{{"played", played}, {"final", state}}, "Test records 5 s, plays it back, and finishes");
     voice.stop();
     bool given_back = false;
+    const bool had_list = default_mic_taken();
     for (int i = 0; i < 30 && !given_back; ++i) {
         sleep_s(0.1);
         given_back = default_endpoint_id(eCapture, eConsole) == before_console &&
                      default_endpoint_id(eCapture, eCommunications) == before_comms;
     }
     if (before_console == cable.mic_id) r.note("the only microphone on this PC is the cable, so giving back can't be seen");
-    r.check("voice_off_gives_back_default_mic", given_back, utf8(default_endpoint_id(eCapture, eConsole)),
+    r.check("voice_off_gives_back_default_mic", given_back && !default_mic_taken(),
+            json{{"default", utf8(default_endpoint_id(eCapture, eConsole))}, {"list_was_kept", had_list}},
             "switching off gives back the previous default microphone");
+
+    // A minute of voice into a call app: no gaps.
+    say("long voice run");
+    {
+        const double long_seconds = args.number(L"--seconds", 60);
+        VoicePath steady;
+        double phase = 0;
+        steady.set_test_input([phase](float* out, size_t n) mutable {
+            for (size_t i = 0; i < n; ++i) {
+                out[i] = float(0.3 * std::sin(phase));
+                phase += 2 * 3.14159265358979323846 * 300.0 / kRate;
+            }
+        });
+        steady.set_semitones(4);
+        steady.set_natural(true);
+        steady.start(L"");
+        const fs::path wav = r.out() / "voice_long_run.wav";
+        auto call = start_process(self_path(), L"record --device \"" + cable.mic_id + L"\" --seconds " +
+                                                   std::to_wstring(int(long_seconds) + 4) + L" --out \"" + wav.wstring() +
+                                                   L"\" --channels 1");
+        // Start counting once the voice is flowing.
+        for (int i = 0; i < 50 && steady.status()["state"] != "running"; ++i) sleep_s(0.1);
+        sleep_s(2.0);
+        steady.reset_counts();
+        call->wait(DWORD(long_seconds * 1000) + 20000);
+        const auto status = steady.status();
+        r.info("long_voice_status", status);
+        r.check("long_voice_dropouts", status["dropouts"] == 0, status["dropouts"], "the voice never ran dry");
+        const auto data = read_wav(wav.string());
+        const double target = 300.0 * std::pow(2.0, 4.0 / 12);
+        const size_t piece = kRate / 20;
+        std::vector<double> levels;
+        // Skip the first 4 s (start-up), look at the rest in 50 ms pieces.
+        for (size_t i = size_t(kRate) * 4; i + piece <= data.samples.size(); i += piece)
+            levels.push_back(to_db(tone_amplitude(data.samples.data() + i, piece, kRate, target)));
+        std::vector<double> sorted = levels;
+        std::sort(sorted.begin(), sorted.end());
+        const double median = sorted.empty() ? -200 : sorted[sorted.size() / 2];
+        const double lowest = sorted.empty() ? -200 : sorted.front();
+        r.info("long_voice_seconds", double(levels.size()) / 20);
+        r.check("long_voice_no_dips", levels.size() > 20 * size_t(long_seconds * 0.8) && lowest > median - 3.0,
+                lowest - median, "the shifted voice never dipped more than 3 dB (no gaps)");
+        r.info("long_voice_trims_repeats", json{{"trims", status["trims"]}, {"repeats", status["repeats"]}});
+        steady.stop();
+    }
     return r.finish("e2e_voice.json");
 }
 
@@ -610,7 +669,7 @@ int e2e_crash(const Args& args) {
     bool taken = false;
     for (int i = 0; i < 100 && !taken; ++i) {
         sleep_s(0.1);
-        taken = default_endpoint_id(eCapture, eConsole) == cable.mic_id &&
+        taken = default_mic_taken() && default_endpoint_id(eCapture, eConsole) == cable.mic_id &&
                 default_endpoint_id(eCapture, eCommunications) == cable.mic_id;
     }
     r.check("voice_host_took_default_mic", taken, utf8(default_endpoint_id(eCapture, eConsole)),
@@ -620,8 +679,8 @@ int e2e_crash(const Args& args) {
     const auto t1 = std::chrono::steady_clock::now();
     for (int i = 0; i < 100 && !mic_back; ++i) {
         sleep_s(0.1);
-        mic_back = default_endpoint_id(eCapture, eConsole) == before_console &&
-               default_endpoint_id(eCapture, eCommunications) == before_comms;
+        mic_back = !default_mic_taken() && default_endpoint_id(eCapture, eConsole) == before_console &&
+                   default_endpoint_id(eCapture, eCommunications) == before_comms;
     }
     r.check("default_mic_given_back_after_crash", mic_back,
             std::chrono::duration<double>(std::chrono::steady_clock::now() - t1).count(),

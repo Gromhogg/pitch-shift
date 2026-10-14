@@ -310,9 +310,18 @@ void VoicePath::tick() {
         // Keep running 2 s after the last call app stops, so short gaps don't restart it.
         const bool want = always_run_ || test_phase_ == TestPhase::recording || in_use_ ||
                           now - last_in_use_ < std::chrono::seconds(2);
-        mic_id = choice;
-        if (!mic_id.empty() && endpoint_name(eCapture, mic_id).empty()) mic_id.clear();  // unplugged
-        if (mic_id.empty()) mic_id = default_mic_id();
+        // Which microphone to read (checked once a second; looking at devices isn't free). The
+        // chain is only rebuilt when this really changes, never because of our own streams.
+        if (now - mic_checked_ > std::chrono::seconds(1) || choice != mic_choice_seen_) {
+            std::wstring id = choice;
+            if (!id.empty() && endpoint_name(eCapture, id).empty()) id.clear();  // unplugged
+            if (id.empty()) id = default_mic_id();
+            mic_resolved_ = id;
+            mic_name_ = endpoint_name(eCapture, id);
+            mic_checked_ = now;
+            mic_choice_seen_ = choice;
+        }
+        mic_id = mic_resolved_;
         bool has_input;
         {
             std::lock_guard<std::mutex> lock(settings_lock_);
@@ -357,18 +366,17 @@ void VoicePath::tick() {
     nlohmann::json s = {{"state", state},
                         {"error", error},
                         {"in_use", in_use_},
-                        {"mic", {{"id", utf8(mic_id)}, {"name", utf8(endpoint_name(eCapture, mic_id))}}},
-                        {"cable", {{"present", cable_.present}, {"mic_name", utf8(cable_.mic_name)}, {"feed_name", utf8(cable_.feed_name)}}},
+                        {"mic", {{"id", utf8(mic_id)}, {"name", utf8(mic_id.empty() ? L"" : mic_name_)}}},
+                        {"cable", {{"present", cable_.present}, {"restart_needed", !cable_.present && cable_restart_needed()}, {"mic_name", utf8(cable_.mic_name)}, {"feed_name", utf8(cable_.feed_name)}}},
                         {"semitones", semitones_.load()},
                         {"natural", natural_.load()},
                         {"test", {{"state", test_state}, {"seconds_left", int(std::ceil(left_s))}}},
                         {"dropouts", drift_ ? drift_->dropouts() : 0},
-                        {"drops", drift_ ? drift_->drops() : 0},
+                        {"trims", drift_ ? drift_->trims() : 0},
                         {"repeats", drift_ ? drift_->repeats() : 0},
                         {"queued_ms", drift_ ? drift_->queued_ms() : 0.0},
                         {"gaps", capture_ ? capture_->stats().gaps : 0},
-                        {"clipped", clipped_.load()},
-                        {"block", shifter_ ? shifter_->block_size() : 0}};
+                        {"clipped", clipped_.load()}};
     std::lock_guard<std::mutex> lock(status_lock_);
     status_ = std::move(s);
 }
@@ -378,6 +386,9 @@ nlohmann::json VoicePath::status() const {
     return status_;
 }
 
-void VoicePath::reset_counts() { clipped_ = 0; }
+void VoicePath::reset_counts() {
+    clipped_ = 0;
+    if (drift_) drift_->reset_counts();
+}
 
 }  // namespace ps

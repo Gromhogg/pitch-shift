@@ -14,8 +14,6 @@
 //   probe [--out folder]                     how app volume affects app recording
 //   e2e-music | e2e-voice | e2e-crash [--out folder]
 //   set-default <playback|recording> "name"   ("pitch-shift-feed" / "pitch-shift-mic" = our cable)
-//   add-root-device <inf> <hardware id>      add another copy of a driver's device (checks only)
-//   rename-other-mic ["Test Mic"]           rename the recording device that isn't our cable (checks only)
 //   selftest                                 shift a made-up tone with Rubber Band and check the pitch
 #include "tool/tool.h"
 
@@ -135,8 +133,6 @@ int wmain(int argc, wchar_t** argv) {
         if (command == L"e2e-voice") return e2e_voice(args);
         if (command == L"e2e-crash") return e2e_crash(args);
         if (command == L"host") return host(args);
-        if (command == L"add-root-device") return add_root_device(args);
-        if (command == L"rename-other-mic") return rename_other_mic(args);
         if (command == L"set-default") return set_default(args);
         if (command == L"selftest") return selftest(args);
     } catch (const std::exception& e) {

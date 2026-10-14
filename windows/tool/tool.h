@@ -31,8 +31,6 @@ int e2e_music(const Args& args);
 int e2e_voice(const Args& args);
 int e2e_crash(const Args& args);
 int host(const Args& args);
-int add_root_device(const Args& args);
-int rename_other_mic(const Args& args);
 int set_default(const Args& args);
 int selftest(const Args& args);
 

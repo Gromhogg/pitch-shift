@@ -9,9 +9,6 @@
 #include "win/process.h"
 #include "win/quiet.h"
 
-#include <setupapi.h>
-#include <newdev.h>
-
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
@@ -123,53 +120,3 @@ int host(const Args& args) {
 
 }  // namespace ps::tool
 
-namespace ps::tool {
-
-// GitHub checks only: adds another copy of a driver's device (like "devcon install"), so the
-// runner gets a second recording device that stands in for a real microphone.
-int add_root_device(const Args& args) {
-    const std::wstring inf = args.positional(0);
-    const std::wstring hwid = args.positional(1);
-    GUID class_guid;
-    wchar_t class_name[64];
-    if (!SetupDiGetINFClassW(inf.c_str(), &class_guid, class_name, 64, nullptr)) {
-        say("add-root-device: can't read " + utf8(inf));
-        return 1;
-    }
-    HDEVINFO set = SetupDiCreateDeviceInfoList(&class_guid, nullptr);
-    SP_DEVINFO_DATA dev{};
-    dev.cbSize = sizeof dev;
-    std::wstring ids = hwid;
-    ids.push_back(L'\0');
-    ids.push_back(L'\0');
-    bool ok = SetupDiCreateDeviceInfoW(set, class_name, &class_guid, nullptr, nullptr, DICD_GENERATE_ID, &dev) &&
-              SetupDiSetDeviceRegistryPropertyW(set, &dev, SPDRP_HARDWAREID, reinterpret_cast<const BYTE*>(ids.data()),
-                                                DWORD(ids.size() * sizeof(wchar_t))) &&
-              SetupDiCallClassInstaller(DIF_REGISTERDEVICE, set, &dev);
-    DWORD error = ok ? 0 : GetLastError();
-    BOOL reboot = FALSE;
-    if (ok) {
-        ok = UpdateDriverForPlugAndPlayDevicesW(nullptr, hwid.c_str(), inf.c_str(), INSTALLFLAG_FORCE, &reboot);
-        if (!ok) error = GetLastError();
-    }
-    say("add-root-device: " + std::string(ok ? "done" : "failed") + " (" + hr_text(HRESULT_FROM_WIN32(error)) + ")");
-    SetupDiDestroyDeviceInfoList(set);
-    return ok ? 0 : 1;
-}
-
-// GitHub checks only: renames the recording device that isn't our cable (the stand-in microphone).
-int rename_other_mic(const Args& args) {
-    ComScope com;
-    const std::wstring name = args.positional(0, L"Test Mic");
-    const auto cable = find_cable();
-    for (const auto& e : list_endpoints(eCapture, DEVICE_STATE_ACTIVE)) {
-        if (e.id == cable.mic_id) continue;
-        const HRESULT hr = rename_endpoint(e.id, name);
-        say("rename-other-mic: " + utf8(e.name) + " -> " + utf8(name) + ": " + hr_text(hr));
-        return SUCCEEDED(hr) ? 0 : 1;
-    }
-    say("rename-other-mic: there's no other recording device");
-    return 1;
-}
-
-}  // namespace ps::tool

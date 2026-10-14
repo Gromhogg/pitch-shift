@@ -4,6 +4,7 @@
 #include "win/session_watch.h"
 
 #include <algorithm>
+#include <iterator>
 #include <set>
 
 namespace ps {
@@ -41,10 +42,17 @@ void MusicPath::start_all() {
 }
 
 void MusicPath::start_apps(const std::vector<std::wstring>& exe_paths) {
+    // Compare full paths (C:\Users\RUNNER~1 and C:\Users\runneradmin are the same folder).
+    std::vector<std::wstring> full;
+    for (const auto& p : exe_paths) {
+        wchar_t buf[MAX_PATH * 2];
+        const DWORD n = GetLongPathNameW(p.c_str(), buf, DWORD(std::size(buf)));
+        full.push_back(n > 0 && n < std::size(buf) ? std::wstring(buf, n) : p);
+    }
     {
         std::lock_guard<std::mutex> lock(settings_lock_);
         mode_ = Mode::apps;
-        target_exes_ = exe_paths;
+        target_exes_ = full;
     }
     SetEvent(wake_);
 }

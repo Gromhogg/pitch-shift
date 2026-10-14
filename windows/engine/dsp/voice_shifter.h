@@ -1,10 +1,10 @@
-// Changes the pitch of a voice (one channel) with Rubber Band's live shifter, which works in
-// fixed-size blocks with low delay. Settings are in voice_settings.h. At 0 half-steps the voice
-// skips Rubber Band.
+// Changes the pitch of a voice (one channel) with Rubber Band. Settings are in voice_settings.h.
+// At 0 half-steps the voice passes through unchanged.
 #pragma once
+#include <memory>
 #include <vector>
 
-struct RubberBandLiveState_;
+namespace RubberBand { class RubberBandStretcher; }
 
 namespace ps {
 
@@ -20,19 +20,14 @@ public:
     double half_steps() const { return half_steps_; }
     bool natural() const { return natural_; }
 
-    // Takes any number of samples; adds shifted samples to `out` one block at a time.
+    // Takes any number of samples; adds whatever shifted sound is ready to `out`.
     void process(const float* in, size_t n, std::vector<float>& out);
 
-    size_t block_size() const { return block_; }
-    unsigned start_delay() const;
-
 private:
-    RubberBandLiveState_* rb_;
-    size_t block_;
+    std::unique_ptr<RubberBand::RubberBandStretcher> rb_;
     double half_steps_;
     bool natural_;
-    std::vector<float> in_block_, out_block_;
-    size_t filled_ = 0;
+    std::vector<float> ready_;
 };
 
 }  // namespace ps

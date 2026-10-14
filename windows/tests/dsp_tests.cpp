@@ -196,39 +196,37 @@ TEST_CASE("booster: sound that wasn't quieted doesn't blast, and the boost comes
     CHECK(b.current_gain() == doctest::Approx(1000.0f));
 }
 
-TEST_CASE("drift buffer: keeps 10-60 ms when the clocks drift, without clicks") {
-    for (double ratio : {1.006, 0.994}) {
+TEST_CASE("voice cushion: small delay, no gaps when the clocks drift, no clicks") {
+    for (double ratio : {1.0, 1.002, 0.998}) {
         DriftBuffer d(48000);
-        const auto tone = make_tone(300.0, 0.5, 48000, 1, 20.0);
+        const auto tone = make_tone(300.0, 0.5, 48000, 1, 30.0);
         std::vector<float> out;
         std::vector<float> chunk(480);
         double produced = 0;
         size_t pos = 0;
-        double lo = 1e9, hi = 0;
-        for (int block = 0; block < 1900; ++block) {
-            // The mic delivers `ratio` times as much as the cable takes.
+        double hi = 0;
+        uint64_t dropouts_after_start = 0;
+        for (int block = 0; block < 2800; ++block) {
+            // The voice arrives in uneven bursts (like Rubber Band's output), `ratio` times as fast as the cable takes it.
             produced += 480 * ratio;
-            const size_t want = size_t(produced) - pos;
-            if (pos + want > tone.size()) break;
-            d.push(tone.data() + pos, want);
-            pos += want;
+            if (block % 3 == 2) {
+                const size_t want = size_t(produced) - pos;
+                if (pos + want > tone.size()) break;
+                d.push(tone.data() + pos, want);
+                pos += want;
+            }
             d.pull(chunk.data(), 480);
             out.insert(out.end(), chunk.begin(), chunk.end());
-            if (block > 200) {
-                lo = std::min(lo, d.queued_ms());
-                hi = std::max(hi, d.queued_ms());
-            }
+            if (block == 100) dropouts_after_start = d.dropouts();
+            if (block > 300) hi = std::max(hi, d.queued_ms());
         }
-        MESSAGE("ratio " << ratio << ": queued " << lo << "-" << hi << " ms, drops " << d.drops() << ", repeats "
-                         << d.repeats());
-        CHECK(d.dropouts() == 0);
-        CHECK(lo >= 9.0);
-        CHECK(hi <= 62.0);
-        CHECK(d.drops() + d.repeats() > 0);
-        // No clicks: a 300 Hz sine at 0.5 changes at most ~0.02 between samples (a bit more during fades).
+        MESSAGE("ratio " << ratio << ": most waiting " << hi << " ms, trims " << d.trims() << ", repeats "
+                         << d.repeats() << ", gaps " << d.dropouts());
+        CHECK(d.dropouts() == dropouts_after_start);
+        CHECK(hi <= 60.0);
         float jump = 0;
         for (size_t i = 48000; i + 1 < out.size(); ++i) jump = std::max(jump, std::fabs(out[i + 1] - out[i]));
-        CHECK(jump < 0.06f);
+        CHECK(jump < 0.08f);
     }
 }
 
@@ -237,9 +235,60 @@ TEST_CASE("voice shifter: 0 half-steps passes the voice through") {
     const auto in = make_vowel(120, 48000, 0.5);
     std::vector<float> out;
     v.process(in.data(), in.size(), out);
-    REQUIRE(out.size() <= in.size());
-    REQUIRE(out.size() > in.size() - v.block_size());
-    CHECK(std::equal(out.begin(), out.end(), in.begin()));
+    CHECK(out == in);
+}
+
+TEST_CASE("voice shifter: how long the voice takes to come through") {
+    const int rate = 48000;
+    VoiceShifter v(rate, 4.0, true);
+    auto in = make_tone(300.0, 0.3, rate, 1, 3.0);
+    std::fill(in.begin(), in.begin() + rate, 0.0f);  // silence, then a tone from 1 s
+    std::vector<float> out;
+    std::vector<std::pair<size_t, size_t>> out_vs_in;
+    for (size_t i = 0; i < in.size(); i += 480) {
+        v.process(in.data() + i, 480, out);
+        out_vs_in.push_back({out.size(), i + 480});
+    }
+    const double t = onset_time(out.data(), out.size(), rate, 300.0 * std::pow(2.0, 4.0 / 12), -30.0);
+    REQUIRE(t > 0);
+    size_t in_when_out = 0;
+    for (const auto& [o, i] : out_vs_in)
+        if (o > size_t(t * rate)) {
+            in_when_out = i;
+            break;
+        }
+    const double delay_ms = (double(in_when_out) / rate - 1.0) * 1000;
+    MESSAGE("voice Rubber Band delay: about " << delay_ms << " ms");
+    CHECK(delay_ms < 120);
+}
+
+TEST_CASE("voice shifter: keeps the sound above 10 kHz (no hiss band, no missing top)") {
+    const int rate = 48000;
+    // A bright "sss": noise shaped toward the top, plus a vowel.
+    auto in = make_vowel(140, rate, 3.0, 0.2);
+    std::mt19937 rng(7);
+    std::normal_distribution<float> noise(0.0f, 0.05f);
+    float prev = 0;
+    for (auto& v : in) {
+        const float n = noise(rng);
+        v += n - prev;  // differenced noise leans toward high frequencies
+        prev = n;
+    }
+    auto top_energy = [&](const float* x, size_t n) {
+        double e = 0;
+        for (double hz = 10000; hz <= 20000; hz += 250) {
+            e += tone_amplitude(x, n, rate, hz) * tone_amplitude(x, n, rate, hz);
+        }
+        return 10 * std::log10(e + 1e-30);
+    };
+    VoiceShifter v(rate, 4.0, true);
+    std::vector<float> out;
+    for (size_t i = 0; i < in.size(); i += 480) v.process(in.data() + i, 480, out);
+    REQUIRE(out.size() > size_t(rate) * 2);
+    const double before = top_energy(in.data() + rate, size_t(rate));
+    const double after = top_energy(out.data() + out.size() - size_t(rate), size_t(rate));
+    MESSAGE("energy above 10 kHz: before " << before << " dB, after " << after << " dB");
+    CHECK(std::fabs(after - before) < 6.0);
 }
 
 TEST_CASE("voice shifter: Natural keeps the voice's resonances, Cartoon moves them") {

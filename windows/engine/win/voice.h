@@ -89,6 +89,8 @@ private:
     std::wstring chain_mic_, chain_feed_;
     std::chrono::steady_clock::time_point retry_after_{}, last_in_use_{}, last_check_{};
     bool in_use_ = false;
+    std::wstring mic_resolved_, mic_name_, mic_choice_seen_;
+    std::chrono::steady_clock::time_point mic_checked_{};
     CableInfo cable_;
     std::chrono::steady_clock::time_point cable_checked_{};
 
