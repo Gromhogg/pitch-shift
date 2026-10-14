@@ -201,7 +201,7 @@ void MusicPath::tick() {
     // the quiet volume of an app that had only just started. Write it again (at most twice a second).
     const uint64_t guarded = booster_.guarded();
     const auto nudge_now = std::chrono::steady_clock::now();
-    if (guarded != guarded_seen_ && nudge_now - nudged_at_ > std::chrono::milliseconds(500)) {
+    if (nudging_ && guarded != guarded_seen_ && nudge_now - nudged_at_ > std::chrono::milliseconds(500)) {
         keeper_.nudge();
         nudged_at_ = nudge_now;
     }

@@ -2,7 +2,9 @@
 // and for the call app's microphone. Each writes a JSON report (and WAV recordings) to --out.
 //   e2e-music: a 440 Hz test player shifted +2 comes out at 493.9 Hz, the original is 50+ dB
 //              quieter, the level stays within 1 dB; also 0 (bypass), stop, a child process,
-//              All sound with two tones, the total delay, and 60 s without dropouts.
+//              All sound with two tones, a ticked app that opens later, the total delay, and 60 s without
+//              dropouts. Levels and pitches are measured so that a one-off ~10 ms hiccup of the cable doesn't
+//              move them (see steady_level, steady_frequency, cable_silences).
 //   e2e-advanced: "Advanced processing": 440 Hz at +8, -5 and +15 lands on the right pitch, a bass note at +8
 //              lands an octave lower than a plain shift would put it, switching on and off, the total delay
 //              (at most 0.8 s), quick amount changes, and 60 s without dropouts.
@@ -331,7 +333,7 @@ int e2e_music(const Args& args) {
 
     // ---- H. A ticked app that isn't open yet joins when it starts (and again after a restart).
     // (`suffix` tells repeats apart: e2e-music --only-later N runs just this, N times.)
-    auto later_apps = [&](const std::string& suffix) {
+    auto later_apps = [&](const std::string& suffix, double wait_before) {
         say("H. ticked app opens later" + suffix);
         wchar_t long_temp[MAX_PATH * 2];
         const DWORD long_len = GetLongPathNameW(fs::temp_directory_path().c_str(), long_temp, MAX_PATH * 2);
@@ -341,7 +343,7 @@ int e2e_music(const Args& args) {
         fs::copy_file(self_path(), fake, fs::copy_options::overwrite_existing, ec);
         music.set_semitones(2);
         music.start_apps({fake.wstring()});
-        sleep_s(1.0);
+        sleep_s(wait_before);
         const auto waiting = music.status();
         r.check("later_app_waits" + suffix,
                 waiting["state"] == "waiting" && waiting["apps"].size() == 1 && waiting["apps"][0]["running"] == false,
@@ -393,10 +395,14 @@ int e2e_music(const Args& args) {
         wait_music_state(music, "off", 5);
     };
 
+    // --only-later N: just H, N times. Each time it first waits 4 s, so the engine has put back the volume Windows
+    // remembered for the last FakePlayer (it quit while quiet) and the next one starts loud, as the first one in a
+    // full run does. --no-nudge turns off the engine's second write of the quiet volume (MusicPath::set_nudging).
     const int only_later = int(args.number(L"--only-later", 0));
     if (only_later > 0) {
         save_recordings = false;
-        for (int i = 1; i <= only_later; ++i) later_apps("_" + std::to_string(i));
+        music.set_nudging(!args.has(L"--no-nudge"));
+        for (int i = 1; i <= only_later; ++i) later_apps("_" + std::to_string(i), 4.0);
         restore_all((r.out() / L"restore.json").wstring());
         return r.finish("e2e_music.json");
     }
@@ -542,7 +548,7 @@ int e2e_music(const Args& args) {
     t2->kill();
     counts("E2");
 
-    later_apps("");
+    later_apps("", 1.0);
     player_logs.clear();
     counts("H");
 

@@ -14,6 +14,7 @@
 //   record --device "name" --seconds 5 --out file.wav [--channels 1]
 //   probe [--out folder]                     how app volume affects app recording
 //   e2e-music | e2e-advanced | e2e-voice | e2e-crash [--out folder]
+//   e2e-music --only-later N [--no-nudge]    only "a ticked app opens later", N times (to look for rare failures)
 //   make-song --out song.wav [--seconds 20]  a made-up song for checks (no sound devices needed)
 //   render-file IN OUT [--steps 8] [--advanced] [--steps-at "4:8,8:-5"]   shift a WAV file offline
 //   set-default <playback|recording> "name"   ("pitch-shift-feed" / "pitch-shift-mic" = our cable)
@@ -57,7 +58,7 @@ double Args::number(const wchar_t* flag, double fallback) const {
 
 std::wstring Args::positional(size_t index, const std::wstring& fallback) const {
     // Flags that stand alone (no value after them).
-    static const std::vector<std::wstring> switches = {L"--silent", L"--pulse", L"--spawn-child", L"--quick", L"--voice", L"--skip-vb-setup", L"--advanced"};
+    static const std::vector<std::wstring> switches = {L"--silent", L"--pulse", L"--spawn-child", L"--quick", L"--voice", L"--skip-vb-setup", L"--advanced", L"--no-nudge"};
     size_t seen = 0;
     for (size_t i = 1; i < items.size(); ++i) {
         if (items[i].rfind(L"--", 0) == 0) {

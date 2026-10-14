@@ -48,6 +48,9 @@ public:
 
     nlohmann::json status() const;
     void reset_counts();
+    // Checks only: turn off writing the quiet volume again when loud sound still arrives (see tick), to see how
+    // often it is needed.
+    void set_nudging(bool on) { nudging_ = on; }
 
     // Cushion sizes (same as the Mac app): start at 50 ms, never more than 150 ms.
     static constexpr double kStartMs = 50;
@@ -92,6 +95,7 @@ private:
     QuietKeeper keeper_;
     std::map<DWORD, std::chrono::steady_clock::time_point> retry_after_;
     uint64_t guarded_seen_ = 0;  // the booster's count at the last look (it steps in when sound wasn't quieted)
+    std::atomic<bool> nudging_{true};
     std::chrono::steady_clock::time_point nudged_at_{};
 
     // The sound chain. mix_lock_ guards streams_ and everything mix() uses.
