@@ -26,6 +26,10 @@ on:
           0 = the normal checks.
         type: number
         default: 0
+      music_args:
+        description: 'More e2e-music options for repeat runs (for example --only-later 40)'
+        type: string
+        default: ''
 
 concurrency:
   # Repeat runs get their own group, so several can run side by side (each on fresh runners).
@@ -228,7 +232,7 @@ jobs:
         run: ./windows/ci/prepare-audio.ps1 -Tool dist/PitchShiftTool.exe
 
       - name: What you hear (music path), ${{ inputs.repeat }} times
-        run: ./windows/ci/repeat-e2e.ps1 -Tool dist/PitchShiftTool.exe -Times ${{ inputs.repeat }} -Out repeat-out -Arch ${{ matrix.arch }}
+        run: ./windows/ci/repeat-e2e.ps1 -Tool dist/PitchShiftTool.exe -Times ${{ inputs.repeat }} -Out repeat-out -Arch ${{ matrix.arch }} -ExtraArgs '${{ inputs.music_args }}'
 
       - uses: actions/upload-artifact@v7
         if: always()

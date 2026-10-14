@@ -6,19 +6,21 @@ param(
     [Parameter(Mandatory)] [string]$Tool,
     [Parameter(Mandatory)] [int]$Times,
     [string]$Out = 'repeat-out',
-    [string]$Arch = ''
+    [string]$Arch = '',
+    [string]$ExtraArgs = ''  # more e2e-music options, like "--only-later 40"
 )
 $ErrorActionPreference = 'Continue'
 New-Item -ItemType Directory -Force $Out | Out-Null
 $passed = 0
 $failedChecks = @{}
 $runs = @()
+$extra = @($ExtraArgs -split ' ' | Where-Object { $_ })
 for ($i = 1; $i -le $Times; $i++) {
     $name = 'run-{0:D2}' -f $i
     $folder = Join-Path $Out $name
     Write-Host "::group::$name"
     $started = Get-Date
-    & $Tool e2e-music --out $folder 2>&1 | Tee-Object -FilePath (Join-Path $Out "$name.log") | Out-Host
+    & $Tool e2e-music --out $folder @extra 2>&1 | Tee-Object -FilePath (Join-Path $Out "$name.log") | Out-Host
     $code = $LASTEXITCODE
     Write-Host '::endgroup::'
     # A run that stopped early could leave test players playing; they would spoil the next run.

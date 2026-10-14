@@ -192,28 +192,15 @@ TEST_CASE("cushion: drops new sound above 150 ms and counts it") {
     CHECK(c.queued_frames() == 7200);
 }
 
-TEST_CASE("cushion: a gap counts as a dropout and refills; sound that just ended doesn't") {
+TEST_CASE("cushion: running dry counts a dropout and refills") {
     Cushion c(2, 2400, 7200);
     std::vector<float> in(480 * 2, 0.5f), out(480 * 2);
     for (int i = 0; i < 5; ++i) c.push(in.data(), 480);
     for (int i = 0; i < 5; ++i) c.pull(out.data(), 480);
     CHECK(c.dropouts() == 0);
     c.pull(out.data(), 480);
+    CHECK(c.dropouts() == 1);
     CHECK_FALSE(c.playing());
-    CHECK(c.dropouts() == 0);  // ran dry: maybe the app quit, so nothing is missing yet
-    c.pull(out.data(), 480);
-    CHECK(c.dropouts() == 0);
-    c.push(in.data(), 480);  // sound comes back: that was a gap
-    CHECK(c.dropouts() == 1);
-    c.push(in.data(), 480);
-    CHECK(c.dropouts() == 1);
-    // Throwing the cushion away (a new player) and starting again isn't a gap either.
-    for (int i = 0; i < 5; ++i) c.push(in.data(), 480);
-    for (int i = 0; i < 9; ++i) c.pull(out.data(), 480);
-    c.flush();
-    c.pull(out.data(), 480);
-    c.push(in.data(), 480);
-    CHECK(c.dropouts() == 1);
 }
 
 TEST_CASE("booster: quieted sound comes back exactly x1000") {

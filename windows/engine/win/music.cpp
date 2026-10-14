@@ -197,6 +197,15 @@ void MusicPath::tick() {
         return false;
     });
 
+    // How many sound sessions of each ticked app this look found (each was quieted above, or should have been).
+    for (auto& app : apps) {
+        const DWORD root = app["pid"].get<DWORD>();
+        int seen = 0;
+        for (const auto& s : sessions)
+            if (root && s.pid && s.state != AudioSessionStateExpired && snap.in_tree(s.pid, root)) ++seen;
+        app["sessions"] = seen;
+    }
+
     const auto now = std::chrono::steady_clock::now();
     std::string error;
     for (DWORD root : roots) {

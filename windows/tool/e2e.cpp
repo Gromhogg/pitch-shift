@@ -291,6 +291,7 @@ int e2e_music(const Args& args) {
     // was and what went wrong while it was recorded, if anything: the engine's own counters, packets lost on the way
     // to the recording, and the test players' own hiccups (their logs are in `player_logs`).
     std::vector<fs::path> player_logs;
+    bool save_recordings = true;
     auto hear = [&](const std::string& name, double seconds, double hz) {
         const json before = music.status();
         const uint64_t ear_gaps = ear.gaps();
@@ -315,7 +316,7 @@ int e2e_music(const Args& args) {
                                       {"recording_gaps", ear.gaps() - ear_gaps},
                                       {"player_hiccups", hiccups},
                                       {"cable_silent_ms", silences}});
-        r.wav("music_" + name, rec, 2);
+        if (save_recordings) r.wav("music_" + name, rec, 2);
         return left;
     };
     // The engine's counters so far (to see when something happened outside the listening windows).
@@ -326,6 +327,77 @@ int e2e_music(const Args& args) {
                                              {"quiet_failures", st["quiet_failures"]},
                                              {"slowest_tick_ms", round3(st["slowest_tick_ms"].get<double>())}});
     };
+
+    // ---- H. A ticked app that isn't open yet joins when it starts (and again after a restart).
+    // (`suffix` tells repeats apart: e2e-music --only-later N runs just this, N times.)
+    auto later_apps = [&](const std::string& suffix) {
+        say("H. ticked app opens later" + suffix);
+        wchar_t long_temp[MAX_PATH * 2];
+        const DWORD long_len = GetLongPathNameW(fs::temp_directory_path().c_str(), long_temp, MAX_PATH * 2);
+        const fs::path temp = long_len ? fs::path(std::wstring(long_temp, long_len)) : fs::temp_directory_path();
+        const fs::path fake = temp / L"FakePlayer.exe";
+        std::error_code ec;
+        fs::copy_file(self_path(), fake, fs::copy_options::overwrite_existing, ec);
+        music.set_semitones(2);
+        music.start_apps({fake.wstring()});
+        sleep_s(1.0);
+        const auto waiting = music.status();
+        r.check("later_app_waits" + suffix,
+                waiting["state"] == "waiting" && waiting["apps"].size() == 1 && waiting["apps"][0]["running"] == false,
+                waiting["state"], "a ticked app that isn't open is listed and waited for");
+        for (int round = 0; round < 2; ++round) {
+            const std::string name = (round == 0 ? "later_app_joins" : "later_app_rejoins_after_restart") + suffix;
+            music.reset_counts();  // (so slowest_tick_ms is this round's)
+            player_logs = {r.out() / ("player_" + name + ".txt")};
+            std::unique_ptr<ChildProcess> player;
+            try {
+                player = start_detached(fake.wstring(),
+                                        L"tonegen --freq 440 --amp 0.25 --seconds 900 --log \"" +
+                                            fs::absolute(player_logs[0]).wstring() + L"\"",
+                                        parent_pid_of(GetCurrentProcessId()));
+            } catch (const std::exception& e) {
+                r.note(e.what());
+                break;
+            }
+            wait_session(player->pid());
+            wait_music_state(music, "running", 10);
+            counts(name + "_running");
+            sleep_s(2.5);
+            const auto left = hear(name, 2.0, target);
+            const double hz = steady_hz(left, target), down = steady_db(left, target) - faint_db(left, 440.0);
+            const bool shifted = std::fabs(hz - target) < 0.5 && down >= 50;
+            r.check(name, shifted, json{{"hz", round3(hz)}, {"original_down_db", round3(down)}},
+                    "it is shifted as soon as it opens (493.9 Hz, the original 50+ dB quieter)");
+            if (!shifted && !save_recordings) r.wav("music_" + name, left, 1);
+            // What the engine and Windows say about the player (its sound sessions, any copy of FakePlayer).
+            json sessions = json::array();
+            for (const auto& session : list_sessions())
+                if (session.pid == player->pid() || lower(session.exe) == lower(fake.wstring()))
+                    sessions.push_back(session_json(session));
+            const auto st = music.status();
+            r.info(name + "_state", json{{"player_pid", player->pid()},
+                                         {"sessions", sessions},
+                                         {"apps", st["apps"]},
+                                         {"quieted", st["quieted"]},
+                                         {"quiet_failures", st["quiet_failures"]},
+                                         {"quiet_error", st["quiet_error"]},
+                                         {"slowest_tick_ms", round3(st["slowest_tick_ms"].get<double>())},
+                                         {"guarded", st["guarded"]}});
+            player->kill();
+            sleep_s(1.0);
+            counts(name + "_closed");
+        }
+        music.stop();
+        wait_music_state(music, "off", 5);
+    };
+
+    const int only_later = int(args.number(L"--only-later", 0));
+    if (only_later > 0) {
+        save_recordings = false;
+        for (int i = 1; i <= only_later; ++i) later_apps("_" + std::to_string(i));
+        restore_all((r.out() / L"restore.json").wstring());
+        return r.finish("e2e_music.json");
+    }
 
     // ---- A. One app, +2.
     say("A. one app, +2 half-steps");
@@ -468,66 +540,7 @@ int e2e_music(const Args& args) {
     t2->kill();
     counts("E2");
 
-    // ---- H. A ticked app that isn't open yet joins when it starts (and again after a restart).
-    say("H. ticked app opens later");
-    {
-        wchar_t long_temp[MAX_PATH * 2];
-        const DWORD long_len = GetLongPathNameW(fs::temp_directory_path().c_str(), long_temp, MAX_PATH * 2);
-        const fs::path temp = long_len ? fs::path(std::wstring(long_temp, long_len)) : fs::temp_directory_path();
-        const fs::path fake = temp / L"FakePlayer.exe";
-        std::error_code ec;
-        fs::copy_file(self_path(), fake, fs::copy_options::overwrite_existing, ec);
-        music.set_semitones(2);
-        music.start_apps({fake.wstring()});
-        sleep_s(1.0);
-        const auto waiting = music.status();
-        r.check("later_app_waits", waiting["state"] == "waiting" && waiting["apps"].size() == 1 &&
-                                       waiting["apps"][0]["running"] == false,
-                waiting["state"], "a ticked app that isn't open is listed and waited for");
-        for (int round = 0; round < 2; ++round) {
-            const std::string name = round == 0 ? "later_app_joins" : "later_app_rejoins_after_restart";
-            music.reset_counts();  // (so slowest_tick_ms is this round's)
-            player_logs = {r.out() / ("player_" + name + ".txt")};
-            std::unique_ptr<ChildProcess> player;
-            try {
-                player = start_detached(fake.wstring(),
-                                        L"tonegen --freq 440 --amp 0.25 --seconds 900 --log \"" +
-                                            fs::absolute(player_logs[0]).wstring() + L"\"",
-                                        parent_pid_of(GetCurrentProcessId()));
-            } catch (const std::exception& e) {
-                r.note(e.what());
-                break;
-            }
-            wait_session(player->pid());
-            wait_music_state(music, "running", 10);
-            counts(name + "_running");
-            sleep_s(2.5);
-            const auto left = hear(name, 2.0, target);
-            const double hz = steady_hz(left, target), down = steady_db(left, target) - faint_db(left, 440.0);
-            r.check(name, std::fabs(hz - target) < 0.5 && down >= 50,
-                    json{{"hz", round3(hz)}, {"original_down_db", round3(down)}},
-                    "it is shifted as soon as it opens (493.9 Hz, the original 50+ dB quieter)");
-            // What the engine and Windows say about the player (its sound sessions, any copy of FakePlayer).
-            json sessions = json::array();
-            for (const auto& session : list_sessions())
-                if (session.pid == player->pid() || lower(session.exe) == lower(fake.wstring()))
-                    sessions.push_back(session_json(session));
-            const auto st = music.status();
-            r.info(name + "_state", json{{"player_pid", player->pid()},
-                                         {"sessions", sessions},
-                                         {"apps", st["apps"]},
-                                         {"quieted", st["quieted"]},
-                                         {"quiet_failures", st["quiet_failures"]},
-                                         {"quiet_error", st["quiet_error"]},
-                                         {"slowest_tick_ms", round3(st["slowest_tick_ms"].get<double>())},
-                                         {"guarded", st["guarded"]}});
-            player->kill();
-            sleep_s(1.0);
-            counts(name + "_closed");
-        }
-        music.stop();
-        wait_music_state(music, "off", 5);
-    }
+    later_apps("");
     player_logs.clear();
     counts("H");
 
@@ -539,6 +552,9 @@ int e2e_music(const Args& args) {
     music.start_pid(beeper->pid());
     wait_music_state(music, "running", 10);
     sleep_s(2.0);
+    // (The counts so far include H, where closing a player while it is shifted lets the cushion run dry once: its
+    // sound simply ended. Start over, so status_while_beeping is about the beeps.)
+    music.reset_counts();
     {
         const auto rec = ear.listen(6.0);
         const auto left = left_of(rec);
