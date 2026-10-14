@@ -122,11 +122,13 @@ if args.contains("--test-voice") {
         sourceSamples = Array(UnsafeBufferPointer(start: converted.floatChannelData![0], count: Int(converted.frameLength)))
     }
     var phase = 0.0, position = 0
+    let toneStart = Int(rate)  // the tone starts 1 s in, once recording runs, so its delay can be measured
     voice.testSource = { buffer, frames in
         for i in 0..<frames {
             if let tone {
-                buffer[i] = Float(0.3 * sin(phase))
-                phase += 2 * .pi * tone / rate
+                buffer[i] = position < toneStart ? 0 : Float(0.3 * sin(phase))
+                if position >= toneStart { phase += 2 * .pi * tone / rate }
+                position += 1
             } else if !sourceSamples.isEmpty {
                 buffer[i] = sourceSamples[position % sourceSamples.count]
                 position += 1
@@ -144,8 +146,14 @@ if args.contains("--test-voice") {
         voice.stop()
         let peak = recorded.reduce(Float(0)) { max($0, abs($1)) }
         let firstSound = recorded.firstIndex { abs($0) > 0.02 }.map { Double($0) / recorder.sampleRate * 1000 }
-        var line = "voice test: mic=\(chain.micName) rate=\(Int(chain.sampleRate)) block=\(chain.blockSize) startDelay=\(Int(Double(chain.startDelay) / chain.sampleRate * 1000))ms "
+        var line = "voice test: mic=\(chain.micName) rate=\(Int(chain.sampleRate)) cushion=\(Int(Double(chain.cushion) / chain.sampleRate * 1000))ms "
         line += "recorded=\(recorded.count) peak=\(peak) firstSound=\(firstSound.map { "\(Int($0))ms" } ?? "none")"
+        if tone != nil, let heard = recorded.firstIndex(where: { abs($0) > 0.02 }), chain.firstInputTime > 0, recorder.firstInputTime > 0 {
+            // From the tone starting at the mic to it coming out of Pitch Shift Mic.
+            let toneAt = Double(AudioConvertHostTimeToNanos(chain.firstInputTime)) / 1e9 + Double(toneStart) / rate
+            let heardAt = Double(AudioConvertHostTimeToNanos(recorder.firstInputTime)) / 1e9 + Double(heard) / recorder.sampleRate
+            line += String(format: " delay=%.0fms", (heardAt - toneAt) * 1000)
+        }
         if let tone, recorded.count > Int(recorder.sampleRate) {
             let tail = Array(recorded.suffix(Int(recorder.sampleRate)))
             let sr = recorder.sampleRate
@@ -155,7 +163,7 @@ if args.contains("--test-voice") {
                 return 2 * sqrt(re * re + im * im) / Double(tail.count)
             }
             let expected = tone * pow(2, Double(steps) / 12)
-            let best = stride(from: tone * 0.5, through: tone * 2, by: 0.5).max { level($0) < level($1) }!
+            let best = stride(from: min(tone, expected) * 0.5, through: max(tone, expected) * 2, by: 0.5).max { level($0) < level($1) }!
             line += String(format: " | expected %.1f Hz, measured %.1f Hz, level %.3f, original left %.4f", expected, best, level(best), level(tone))
         }
         print(line)

@@ -1,5 +1,5 @@
-// "Your voice": takes a microphone, changes its pitch with Rubber Band's low-delay live shifter, and sends it into
-// "Pitch Shift Mic" (a virtual mic people pick in Discord, Zoom, ...). It only runs while some app is actually
+// "Your voice": takes a microphone, changes its pitch with Rubber Band (its newer engine, in live mode), and sends it
+// into "Pitch Shift Mic" (a virtual mic people pick in Discord, Zoom, ...). It only runs while some app is actually
 // listening to Pitch Shift Mic, so the real mic (and Bluetooth call mode) is only on when needed.
 import AppKit
 import AVFoundation
@@ -47,6 +47,19 @@ struct VoiceParams {
     var silent: Bool  // during Test playback, so the replay isn't sent into a live call
 }
 
+// Rubber Band settings for the voice (the Windows version uses the same ones).
+// Not the "live shifter" (rubberband_live_*): it only keeps the voice's shape (formants) up to about 10 kHz and
+// moves everything above that up like Cartoon, which put a loud hiss on every word in Natural ("buzzy", like a Z).
+// This keeps formants over the whole range, with about the same delay.
+func voiceShifterOptions(natural: Bool) -> Int32 {
+    Int32(RubberBandOptionProcessRealTime.rawValue | RubberBandOptionEngineFiner.rawValue | RubberBandOptionWindowShort.rawValue
+        | RubberBandOptionPitchHighConsistency.rawValue | formantOption(natural: natural))
+}
+
+func formantOption(natural: Bool) -> UInt32 {
+    natural ? RubberBandOptionFormantPreserved.rawValue : RubberBandOptionFormantShifted.rawValue
+}
+
 // One running voice chain: a private combined device of [real mic + hidden side of Pitch Shift Mic] with one
 // sound callback, so both run on the mic's clock (Core Audio corrects the tiny clock difference).
 final class VoiceChain {
@@ -54,24 +67,29 @@ final class VoiceChain {
     let micUID: String
     let devices: [AudioDeviceID]  // the mic and both sides of Pitch Shift Mic, as Core Audio numbered them
     let sampleRate: Double
-    let blockSize: Int
-    let startDelay: Int
+    let cushion: Int  // sound kept ready beyond what one callback needs (Rubber Band hands it back in uneven pieces)
     private var aggregate = AudioObjectID(kAudioObjectUnknown)
     private var proc: AudioDeviceIOProcID?
-    private let shifter: RubberBandLiveState
+    private let shifter: RubberBandState
     private let params: OSAllocatedUnfairLock<VoiceParams>
     private var applied: VoiceParams
     private let micOutputStreams: Int
     // Sound-thread buffers, made once up front (no memory is made on the sound thread).
-    private let inBlock: UnsafeMutablePointer<Float>
-    private let outBlock: UnsafeMutablePointer<Float>
-    private var inCount = 0
+    private let maxPiece = 4096  // the most Rubber Band is given or asked for at once
+    private let piece: UnsafeMutablePointer<Float>
     private let ring: UnsafeMutablePointer<Float>
     private let ringSize: Int
     private var ringRead = 0
     private var ringCount = 0
+    private var waiting = true      // filling the cushion before sound goes out
+    private var fresh = true        // just started: the first wait may overshoot, so trim it
+    private var lowest = Int.max    // least spare sound in the ring since the last check
+    private var sinceCheck = 0
+    private let checkEvery: Int
+    private let extraAllowed: Int
     // For the command-line test: replaces the mic with a made-up sound.
     var testSource: ((UnsafeMutablePointer<Float>, Int) -> Void)?
+    private(set) var firstInputTime: UInt64 = 0  // host time of the first mic sample (for the delay test)
 
     init(mic: AudioDeviceID, feed: AudioDeviceID, params: OSAllocatedUnfairLock<VoiceParams>) throws {
         micName = deviceName(mic)
@@ -90,17 +108,19 @@ final class VoiceChain {
         self.params = params
         let start = params.withLock { $0 }
         applied = start
-        let formant = start.natural ? RubberBandLiveOptionFormantPreserved.rawValue : RubberBandLiveOptionFormantShifted.rawValue
-        shifter = rubberband_live_new(UInt32(rate), 1, Int32(RubberBandLiveOptionWindowShort.rawValue | formant))
-        rubberband_live_set_pitch_scale(shifter, pow(2, Double(start.halfSteps) / 12))
-        blockSize = Int(rubberband_live_get_block_size(shifter))
-        startDelay = Int(rubberband_live_get_start_delay(shifter))
-        inBlock = .allocate(capacity: blockSize)
-        outBlock = .allocate(capacity: blockSize)
-        ringSize = blockSize * 8 + 16384
+        guard let made = rubberband_new(UInt32(rate), 1, voiceShifterOptions(natural: start.natural), 1, pow(2, Double(start.halfSteps) / 12)) else {
+            throw Problem(message: "Can't use \(micName).")
+        }
+        shifter = made
+        rubberband_set_max_process_size(shifter, UInt32(maxPiece))
+        // 20 ms is enough at every amount and callback size tried (16-96 kHz); more would only add delay.
+        cushion = Int(rate * 0.02)
+        extraAllowed = Int(rate * 0.005)
+        checkEvery = Int(rate * 0.5)
+        piece = .allocate(capacity: maxPiece)
+        ringSize = Int(rate) + maxPiece  // about a second; it never gets close to full
         ring = .allocate(capacity: ringSize)
         ring.initialize(repeating: 0, count: ringSize)
-        ringCount = blockSize  // start one block "ahead" so the output never runs dry
 
         let settings: [String: Any] = [
             kAudioAggregateDeviceNameKey: "Pitch Shift Voice",
@@ -115,7 +135,8 @@ final class VoiceChain {
         guard AudioHardwareCreateAggregateDevice(settings as CFDictionary, &aggregate) == noErr else {
             throw Problem(message: "Can't use \(micName).")  // deinit cleans up
         }
-        let status = AudioDeviceCreateIOProcIDWithBlock(&proc, aggregate, nil) { [unowned self] _, input, _, output, _ in
+        let status = AudioDeviceCreateIOProcIDWithBlock(&proc, aggregate, nil) { [unowned self] _, input, inputTime, output, _ in
+            if self.firstInputTime == 0 { self.firstInputTime = inputTime.pointee.mHostTime }
             self.render(input, output)
         }
         guard status == noErr, let proc else {
@@ -173,29 +194,19 @@ final class VoiceChain {
             for i in 0..<frames { source[i] = 0 }
         }
 
+        let shifting = applied.halfSteps != 0
+        if shifting { shift(source, frames) }
         for i in 0..<frames {
-            var value: Float
-            if applied.halfSteps == 0 {
+            var value: Float = 0
+            if !shifting {
                 value = source[i]
-            } else {
-                inBlock[inCount] = source[i]
-                inCount += 1
-                if inCount == blockSize {
-                    var inPointer: UnsafePointer<Float>? = UnsafePointer(inBlock)
-                    var outPointer: UnsafeMutablePointer<Float>? = outBlock
-                    rubberband_live_shift(shifter, &inPointer, &outPointer)
-                    for j in 0..<blockSize where ringCount < ringSize {
-                        ring[(ringRead + ringCount) % ringSize] = outBlock[j]
-                        ringCount += 1
-                    }
-                    inCount = 0
-                }
+            } else if !waiting {
                 if ringCount > 0 {
                     value = ring[ringRead]
                     ringRead = (ringRead + 1) % ringSize
                     ringCount -= 1
                 } else {
-                    value = 0
+                    waiting = true  // ran dry (only right after a big amount change): build the cushion again
                 }
             }
             if applied.silent { value = 0 }
@@ -206,6 +217,49 @@ final class VoiceChain {
                 for c in 0..<ch { d[i * ch + c] = value }
             }
         }
+    }
+
+    // Gives one callback's sound to Rubber Band and moves everything it has ready into the ring.
+    private func shift(_ source: UnsafeMutablePointer<Float>, _ frames: Int) {
+        var done = 0
+        while done < frames {
+            let count = min(maxPiece, frames - done)
+            var input: UnsafePointer<Float>? = UnsafePointer(source + done)
+            rubberband_process(shifter, &input, UInt32(count), 0)
+            done += count
+        }
+        while true {
+            let ready = min(Int(rubberband_available(shifter)), maxPiece)
+            if ready <= 0 { break }
+            var output: UnsafeMutablePointer<Float>? = piece
+            let got = Int(rubberband_retrieve(shifter, &output, UInt32(ready)))
+            for j in 0..<got where ringCount < ringSize {
+                ring[(ringRead + ringCount) % ringSize] = piece[j]
+                ringCount += 1
+            }
+        }
+        // Sound goes out once the ring holds this callback's worth plus the cushion.
+        if waiting && ringCount >= cushion + frames {
+            waiting = false
+            if fresh { skip(ringCount - cushion - frames) }  // the first piece can overshoot: don't keep that as delay
+            fresh = false
+            lowest = .max
+            sinceCheck = 0
+        }
+        // Twice a second: if the ring never got below the cushion (after the amount went up), skip the extra delay.
+        if !waiting { lowest = min(lowest, ringCount - frames) }
+        sinceCheck += frames
+        if sinceCheck >= checkEvery {
+            if !waiting && lowest != .max && lowest > cushion + extraAllowed { skip(lowest - cushion) }
+            lowest = .max
+            sinceCheck = 0
+        }
+    }
+
+    private func skip(_ count: Int) {
+        let n = max(0, min(count, ringCount))
+        ringRead = (ringRead + n) % ringSize
+        ringCount -= n
     }
 
     // A scratch buffer for one callback's worth of mic sound (made once, grown only if Core Audio asks for more).
@@ -222,18 +276,17 @@ final class VoiceChain {
 
     private func apply(_ latest: VoiceParams) {
         if latest.natural != applied.natural {
-            let formant = latest.natural ? RubberBandLiveOptionFormantPreserved.rawValue : RubberBandLiveOptionFormantShifted.rawValue
-            rubberband_live_set_formant_option(shifter, Int32(formant))
+            rubberband_set_formant_option(shifter, Int32(formantOption(natural: latest.natural)))
         }
         if latest.halfSteps != applied.halfSteps && latest.halfSteps != 0 {
             if applied.halfSteps == 0 {  // coming back from normal pitch: start fresh
-                rubberband_live_reset(shifter)
-                inCount = 0
+                rubberband_reset(shifter)
                 ringRead = 0
-                for j in 0..<blockSize { ring[j] = 0 }
-                ringCount = blockSize
+                ringCount = 0
+                waiting = true
+                fresh = true
             }
-            rubberband_live_set_pitch_scale(shifter, pow(2, Double(latest.halfSteps) / 12))
+            rubberband_set_pitch_scale(shifter, pow(2, Double(latest.halfSteps) / 12))
         }
         applied = latest
     }
@@ -249,9 +302,8 @@ final class VoiceChain {
     }
 
     private func cleanUp() {
-        rubberband_live_delete(shifter)
-        inBlock.deallocate()
-        outBlock.deallocate()
+        rubberband_delete(shifter)
+        piece.deallocate()
         ring.deallocate()
         scratch.deallocate()
     }
@@ -447,13 +499,15 @@ final class Recorder {
     private let samples: UnsafeMutablePointer<Float>
     private let capacity: Int
     private var count = 0
+    private(set) var firstInputTime: UInt64 = 0  // host time of the first recorded sample (for the delay test)
 
     init(device: AudioDeviceID, seconds: Double) throws {
         self.device = device
         sampleRate = nominalRate(device)
         capacity = Int(sampleRate * seconds)
         samples = .allocate(capacity: max(1, capacity))
-        let status = AudioDeviceCreateIOProcIDWithBlock(&proc, device, nil) { [unowned self] _, input, _, _, _ in
+        let status = AudioDeviceCreateIOProcIDWithBlock(&proc, device, nil) { [unowned self] _, input, inputTime, _, _ in
+            if self.firstInputTime == 0 { self.firstInputTime = inputTime.pointee.mHostTime }
             guard let first = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: input)).first,
                   let data = first.mData?.assumingMemoryBound(to: Float.self), first.mNumberChannels > 0 else { return }
             let ch = Int(first.mNumberChannels)
