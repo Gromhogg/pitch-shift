@@ -9,6 +9,7 @@
 #include <filesystem>
 #include <random>
 
+#include "dsp/advanced_shifter.h"
 #include "dsp/analysis.h"
 #include "dsp/booster.h"
 #include "dsp/cushion.h"
@@ -314,4 +315,84 @@ TEST_CASE("voice shifter: Natural keeps the voice's resonances, Cartoon moves th
     CHECK(f0[0] == doctest::Approx(expect_f0).epsilon(0.03));
     CHECK(centroid[1] / in_centroid == doctest::Approx(1.0).epsilon(0.08));
     CHECK(centroid[0] / in_centroid > 1.15);
+}
+
+TEST_CASE("test song: the same every time, peaks at -3 dBFS") {
+    const auto a = make_test_song(48000, 3.0), b = make_test_song(48000, 3.0);
+    REQUIRE(a.size() == size_t(48000) * 3 * 2);
+    CHECK(a == b);
+    float peak = 0;
+    for (float v : a) peak = std::max(peak, std::fabs(v));
+    CHECK(peak == doctest::Approx(0.7).epsilon(1e-4));
+}
+
+// ---------- Advanced processing (the Mac app's engine, shared) ----------
+
+namespace {
+// Runs a tone through Advanced processing in 480-frame pieces (like live) and returns the left channel.
+std::vector<float> advanced_run(double hz, double amp, double half_steps, bool full_range, double seconds,
+                                size_t* latency = nullptr) {
+    const int rate = 48000;
+    AdvancedShifter a(rate, 2, half_steps, full_range);
+    if (latency) *latency = a.latency_frames();
+    const auto in = make_tone(hz, amp, rate, 2, seconds);
+    std::vector<float> out(in.size());
+    for (size_t i = 0; i < in.size() / 2; i += 480) {
+        const size_t n = std::min<size_t>(480, in.size() / 2 - i);
+        a.process(in.data() + i * 2, out.data() + i * 2, n);
+    }
+    CHECK(a.info().underruns == 0);
+    return take_channel(out, 2, 0);
+}
+}  // namespace
+
+TEST_CASE("advanced: +8 turns 440 Hz into 698.5 Hz, with a fixed delay of about 140 ms") {
+    size_t latency = 0;
+    const auto left = advanced_run(440.0, 0.25, 8.0, false, 5.0, &latency);
+    const size_t n = 48000 * 3 / 2;
+    const auto m = measure_tone(left.data() + left.size() - n, n, 48000, 698.46);
+    MESSAGE("advanced +8: " << m.frequency << " Hz, level " << m.level_db << " dB, delay " << latency / 48.0 << " ms");
+    CHECK(m.frequency == doctest::Approx(440.0 * std::pow(2.0, 8.0 / 12)).epsilon(0.0005));
+    CHECK(latency / 48.0 > 120);
+    CHECK(latency / 48.0 < 160);
+}
+
+TEST_CASE("advanced: -5 and +15 (full range, more delay) land on the right pitch") {
+    for (double steps : {-5.0, 15.0}) {
+        size_t latency = 0;
+        const bool full = AdvancedShifter::needs_full_range(steps);
+        const auto left = advanced_run(440.0, 0.25, steps, full, 5.0, &latency);
+        const size_t n = 48000 * 3 / 2;
+        const double expect = 440.0 * std::pow(2.0, steps / 12);
+        const auto m = measure_tone(left.data() + left.size() - n, n, 48000, expect);
+        MESSAGE("advanced " << steps << ": " << m.frequency << " Hz (expected " << expect << "), delay "
+                            << latency / 48.0 << " ms");
+        CHECK(m.frequency == doctest::Approx(expect).epsilon(0.0005));
+        if (full) CHECK(latency / 48.0 > 200);
+    }
+}
+
+TEST_CASE("advanced: going up, a bass note lands an octave lower than a plain shift would put it") {
+    // E2 (82.4 Hz) at +8: a plain shift puts it at 130.8 Hz; the bass fold at 65.4 Hz (shifted by 8 - 12 = -4).
+    const auto left = advanced_run(82.41, 0.25, 8.0, false, 6.0);
+    const size_t n = 48000 * 2;
+    const float* tail = left.data() + left.size() - n;
+    const double fold = to_db(tone_amplitude(tail, n, 48000, 82.41 * std::pow(2.0, -4.0 / 12)));
+    const double plain = to_db(tone_amplitude(tail, n, 48000, 82.41 * std::pow(2.0, 8.0 / 12)));
+    MESSAGE("bass at +8: folded (65.4 Hz) " << fold << " dB, plain (130.8 Hz) " << plain << " dB");
+    CHECK(fold > plain + 10);
+    CHECK(fold > to_db(0.25) - 10);
+}
+
+TEST_CASE("advanced: loud sound stays under -0.3 dBFS, and 0 half-steps is the input, untouched") {
+    const auto loud = advanced_run(440.0, 0.99, 5.0, false, 4.0);
+    float peak = 0;
+    for (float v : loud) peak = std::max(peak, std::fabs(v));
+    MESSAGE("peak " << to_db(peak) << " dBFS");
+    CHECK(peak <= 0.9661f);
+
+    // At 0 the output is the input, delayed by exactly the reported delay (render_offline takes the delay out).
+    const auto in = make_tone(440.0, 0.5, 48000, 2, 2.0);
+    const auto out = render_offline(in, 2, 48000, 0.0, true);
+    CHECK(out == in);
 }

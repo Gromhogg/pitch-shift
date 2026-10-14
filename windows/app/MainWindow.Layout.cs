@@ -25,6 +25,10 @@ public partial class MainWindow
     {
         HearPicker.Height = ShiftCard.ControlHeight(s);
         HearPicker.FontSize = ShiftCard.ControlFont(s);
+        // "Advanced processing": a small label and a small switch, like the Mac.
+        AdvancedRow.Margin = new Thickness(0, Math.Round(12 * s), 0, 0);
+        AdvancedLabel.FontSize = 12 + (s - 1) * 2.5;
+        AdvancedSwitch.Size = ShiftCard.Large(s) ? new Size(40, 22) : new Size(34, 19);
     }
 
     void ScaleVoiceRows(double s)

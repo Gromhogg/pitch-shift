@@ -32,7 +32,8 @@ PS_API const char* ps_list_sources_json(void);
 /* JSON list of microphones (not the virtual cable): [{"id":..,"name":..,"default":true}, ...] */
 PS_API const char* ps_list_mics_json(void);
 /* JSON with what the engine is doing right now: "music" (state, apps, speaker = the speakers it plays to,
-   counts) and "voice" (state, in_use, mic, cable {present, restart_needed, mic_name}, test, counts). */
+   advanced = Advanced processing on, counts) and "voice" (state, in_use, mic, cable {present, restart_needed,
+   mic_name}, test, counts). */
 PS_API const char* ps_status_json(void);
 
 /* What you hear. mode 0 = process `pid` and everything it started, mode 1 = all sound. */
@@ -44,6 +45,10 @@ PS_API int ps_music_start_all(void);
 PS_API int ps_music_set_apps(const char* exe_paths_json);
 PS_API int ps_music_stop(void);
 PS_API int ps_music_set_semitones(double half_steps);
+/* What you hear: "Advanced processing" on (1) or off (0). Made for music: going up, the bass stays deep;
+   going down, the top stays bright. Switching makes a new player (a short pause). The status shows it as
+   music.advanced (and music.advanced_engine while it plays: range, latency_ms, heard, underruns, ...). */
+PS_API int ps_music_set_advanced(int on);
 
 /* Your voice. endpoint_id = a microphone id from ps_list_mics_json, or "" for the default.
    While it's on, Pitch Shift Mic is the Windows default microphone (given back when it's off). */

@@ -20,6 +20,7 @@ public sealed class SettingsTests : IDisposable
         Assert.True(s.HearAll);
         Assert.Empty(s.HearApps);
         Assert.Equal(2, s.HearSteps);
+        Assert.False(s.HearAdvanced);
         Assert.False(s.VoiceOn);
         Assert.Equal(3, s.VoiceSteps);
         Assert.True(s.VoiceNatural);
@@ -35,6 +36,7 @@ public sealed class SettingsTests : IDisposable
             HearOn = false,
             HearAll = false,
             HearSteps = -1.25,
+            HearAdvanced = true,
             VoiceOn = true,
             VoiceSteps = 7.5,
             VoiceNatural = false,
@@ -50,6 +52,7 @@ public sealed class SettingsTests : IDisposable
         Assert.False(back.HearOn);
         Assert.False(back.HearAll);
         Assert.Equal(-1.25, back.HearSteps);
+        Assert.True(back.HearAdvanced);
         Assert.True(back.VoiceOn);
         Assert.Equal(7.5, back.VoiceSteps);
         Assert.False(back.VoiceNatural);

@@ -3,6 +3,9 @@
 //   e2e-music: a 440 Hz test player shifted +2 comes out at 493.9 Hz, the original is 50+ dB
 //              quieter, the level stays within 1 dB; also 0 (bypass), stop, a child process,
 //              All sound with two tones, the total delay, and 60 s without dropouts.
+//   e2e-advanced: "Advanced processing": 440 Hz at +8, -5 and +15 lands on the right pitch, a bass note at +8
+//              lands an octave lower than a plain shift would put it, switching on and off, the total delay
+//              (at most 0.8 s), quick amount changes, and 60 s without dropouts.
 //   e2e-voice: a made-up voice through the voice path into the cable: pitch, Natural vs Cartoon,
 //              runs only while a "call app" records, and the Test button.
 //   e2e-crash: the app is ended suddenly while an app is quiet: the watchdog puts it back,
@@ -26,6 +29,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -466,6 +470,270 @@ int e2e_music(const Args& args) {
     steady->kill();
     restore_all((r.out() / L"restore.json").wstring());
     return r.finish("e2e_music.json");
+}
+
+// ---------------- e2e-advanced ----------------
+
+namespace {
+
+double cents(double hz, double expect) { return hz > 0 && expect > 0 ? 1200 * std::log2(hz / expect) : 9999; }
+
+std::string amount_name(double steps) {
+    return (steps < 0 ? "minus" : "plus") + std::to_string(int(std::lround(std::fabs(steps))));
+}
+
+std::string hz_text(double hz) {
+    char buf[32];
+    std::snprintf(buf, sizeof buf, "%.1f Hz", hz);
+    return buf;
+}
+
+// Waits until the status shows an Advanced player (on; range 12 or 24 if given) or a normal one (off).
+bool wait_advanced(MusicPath& music, bool on, double seconds, int range = 0) {
+    const auto end = std::chrono::steady_clock::now() + std::chrono::duration<double>(seconds);
+    while (std::chrono::steady_clock::now() < end) {
+        const auto e = music.status()["advanced_engine"];
+        if (on ? e.is_object() && (range == 0 || e["range"] == range) : e.is_null()) return true;
+        sleep_s(0.1);
+    }
+    return false;
+}
+
+json engine_value(MusicPath& music, const char* key) {
+    const auto e = music.status()["advanced_engine"];
+    return e.is_object() && e.contains(key) ? e[key] : json();
+}
+
+// From 440 Hz beeps (tonegen --pulse): how long after the quiet original reaches the cable the shifted copy
+// (at `out_hz`) arrives, for each beep (ms).
+std::vector<double> beep_delays(const std::vector<float>& left, double out_hz) {
+    std::vector<double> delays;
+    const size_t win = kRate / 50;
+    double from = 0;
+    for (int tries = 0; tries < 60 && delays.size() < 10; ++tries) {
+        const double t_in = onset_time(left.data(), left.size(), kRate, 440.0, -88.0, from);
+        if (t_in < 0) break;
+        // While the loud shifted copy plays, a little of it shows up near 440 Hz too: only count a start of the
+        // original when the shifted copy is quiet.
+        const size_t at = size_t(std::max(0.0, t_in - 0.01) * kRate);
+        if (at + win > left.size()) break;
+        if (to_db(tone_amplitude(left.data() + at, win, kRate, out_hz)) > -50) {
+            from = t_in + 0.02;
+            continue;
+        }
+        const double t_out = onset_time(left.data(), left.size(), kRate, out_hz, -40.0, t_in);
+        if (t_out > 0 && t_out - t_in > 0.05 && t_out - t_in < 0.9) delays.push_back((t_out - t_in) * 1000);
+        from = t_in + 0.8;
+    }
+    return delays;
+}
+
+double median_of(std::vector<double> v) {
+    if (v.empty()) return -1;
+    std::sort(v.begin(), v.end());
+    return v[v.size() / 2];
+}
+
+}  // namespace
+
+int e2e_advanced(const Args& args) {
+    ComScope com;
+    Report r(args.get(L"--out", L"e2e-out"));
+    const auto ids = cable_ids(r);
+    if (!ids) return r.finish("e2e_advanced.json") + 2;
+    const double long_seconds = args.number(L"--seconds", 60);
+    CableEar ear(ids->output, long_seconds + 5);
+    MusicPath music((r.out() / L"restore_advanced.json").wstring(), L"");
+
+    // ---- A. Pitch: 440 Hz at +8, -5 and +15 (past +12 a new player is made for the full range).
+    say("A. Advanced processing: 440 Hz at +8, -5 and +15");
+    auto a = start_player(L"--freq 440 --amp 0.25 --seconds 900", r);
+    if (!wait_session(a->pid())) r.note("the player's sound never showed up");
+    sleep_s(1.0);
+    const auto base_left = left_of(ear.listen(2.0));
+    const auto base = measure_tone(base_left.data(), base_left.size(), kRate, 440.0);
+    r.info("baseline_level_db", base.level_db, "the player's tone at the cable before shifting");
+    music.set_advanced(true);
+    music.set_semitones(8);
+    music.start_pid(a->pid());
+    r.check("running", wait_music_state(music, "running", 15), music.status()["state"],
+            "the path starts with Advanced processing on");
+    r.check("advanced_player_within_12", wait_advanced(music, true, 10, 12), music.status()["advanced_engine"],
+            "the status shows the Advanced player, made for -12..+12");
+    r.check("status_advanced", music.status()["advanced"] == true, music.status()["advanced"],
+            "music.advanced is true in the status");
+    r.info("engine_delay_ms_within_12", engine_value(music, "latency_ms"), "the Advanced engine's own delay");
+    for (double steps : {8.0, -5.0, 15.0}) {
+        const std::string name = amount_name(steps);
+        music.set_semitones(steps);
+        if (steps > 12)
+            r.check("full_range_player_past_12", wait_advanced(music, true, 10, 24), music.status()["advanced_engine"],
+                    "going past +12 makes a new player for the full range (more delay), like the Mac");
+        sleep_s(3.0);  // a new amount is heard 0.2-0.3 s later; then the slow tone control settles
+        const auto rec = ear.listen(3.0);
+        const auto left = left_of(rec);
+        const double expect = 440.0 * std::pow(2.0, steps / 12);
+        const auto m = measure_tone(left.data(), left.size(), kRate, expect);
+        r.check("pitch_" + name + "_cents", std::fabs(cents(m.frequency, expect)) < 2.0, cents(m.frequency, expect),
+                "440 Hz shifted by " + std::to_string(int(steps)) + " lands on " + hz_text(expect) + " (within 2 cents)");
+        r.info("pitch_" + name + "_hz", m.frequency);
+        r.info("level_" + name + "_change_db", m.level_db - base.level_db,
+               "the slow tone control may move a lone tone's level a little");
+        const double original = level_at(left, 440.0);
+        r.check("original_down_" + name + "_db", m.level_db - original >= 40, m.level_db - original,
+                "the original is at least 40 dB quieter than the shifted tone");
+        r.wav("advanced_" + name, rec, 2);
+    }
+    r.info("engine_delay_ms_full_range", engine_value(music, "latency_ms"));
+    r.check("underruns_A", engine_value(music, "underruns") == 0, engine_value(music, "underruns"),
+            "the engine's shifters were always ready in time");
+    music.stop();
+    wait_music_state(music, "off", 5);
+    a->kill();
+
+    // ---- B. The bass fold (a low note at +8), and switching off and on.
+    say("B. a bass note at +8; switching off and on");
+    auto bass = start_player(L"--freq 82.41 --amp 0.25 --seconds 900", r);
+    wait_session(bass->pid());
+    music.set_semitones(8);
+    music.start_pid(bass->pid());
+    wait_music_state(music, "running", 15);
+    r.check("new_start_within_12", wait_advanced(music, true, 10, 12), music.status()["advanced_engine"],
+            "starting again at +8 makes a -12..+12 player (less delay)");
+    sleep_s(4.0);
+    const double fold_hz = 82.41 * std::pow(2.0, -4.0 / 12), plain_hz = 82.41 * std::pow(2.0, 8.0 / 12);
+    {
+        const auto rec = ear.listen(3.0);
+        const auto left = left_of(rec);
+        const double fold = level_at(left, fold_hz), plain = level_at(left, plain_hz);
+        const auto m = measure_tone(left.data(), left.size(), kRate, fold_hz);
+        r.info("bass_fold_level_db", fold, "65.4 Hz: the bass shifted an octave less (by -4)");
+        r.info("bass_plain_level_db", plain, "130.8 Hz: where a plain +8 shift puts it");
+        r.check("bass_fold_db", fold - plain >= 10, fold - plain,
+                "E2 (82.4 Hz) at +8 lands at 65.4 Hz, an octave below a plain shift (130.8 Hz), 10+ dB stronger there");
+        r.check("bass_fold_pitch_cents", std::fabs(cents(m.frequency, fold_hz)) < 3.0, cents(m.frequency, fold_hz),
+                "the folded bass is in tune (within 3 cents)");
+        r.wav("advanced_bass_plus8", rec, 2);
+    }
+    music.set_advanced(false);
+    r.check("switch_off_reaches_engine", wait_advanced(music, false, 10), music.status()["advanced"],
+            "switching off makes a normal player");
+    sleep_s(2.5);
+    {
+        const auto rec = ear.listen(3.0);
+        const auto left = left_of(rec);
+        const double fold = level_at(left, fold_hz), plain = level_at(left, plain_hz);
+        r.check("normal_mode_bass_goes_up", plain - fold >= 10, plain - fold,
+                "without Advanced processing the bass goes up with everything else (130.8 Hz)");
+        r.wav("normal_bass_plus8", rec, 2);
+    }
+    music.set_advanced(true);
+    r.check("switch_on_again_reaches_engine", wait_advanced(music, true, 10), music.status()["advanced_engine"],
+            "switching on again makes an Advanced player");
+    r.info("player_rebuilds", music.status()["player_rebuilds"]);
+    music.stop();
+    wait_music_state(music, "off", 5);
+    bass->kill();
+
+    // ---- C. Total delay, measured with short beeps: within -12..+12 and in the full range.
+    say("C. total delay");
+    auto beeper = start_player(L"--freq 440 --amp 0.25 --seconds 900 --pulse", r);
+    wait_session(beeper->pid());
+    music.set_semitones(8);
+    music.start_pid(beeper->pid());
+    wait_music_state(music, "running", 15);
+    wait_advanced(music, true, 10, 12);
+    for (double steps : {8.0, 15.0}) {
+        const std::string name = steps > 12 ? "full_range" : "within_12";
+        music.set_semitones(steps);
+        if (steps > 12) wait_advanced(music, true, 10, 24);
+        sleep_s(3.0);
+        const auto rec = ear.listen(8.0);
+        const auto delays = beep_delays(left_of(rec), 440.0 * std::pow(2.0, steps / 12));
+        const double delay = median_of(delays);
+        r.info("delay_samples_ms_" + name, delays);
+        r.check("total_delay_ms_" + name, delay > 0 && delay <= 800, delay,
+                "from the app playing to the shifted sound, at most 0.8 s (" + amount_name(steps) + ")");
+        const auto st = music.status();
+        r.info("delay_parts_" + name, json{{"engine_ms", engine_value(music, "latency_ms")},
+                                           {"cushion_ms", st["queued_ms"]},
+                                           {"output_ms", st["output_ms"]},
+                                           {"estimate_ms", st["delay_estimate_ms"]}});
+        r.wav("advanced_delay_beeps_" + name, rec, 2);
+    }
+    music.stop();
+    wait_music_state(music, "off", 5);
+    beeper->kill();
+
+    // ---- D. Quick amount changes (like clicking - and + fast): no gaps, the shifters always ready.
+    say("D. quick amount changes");
+    auto steady = start_player(L"--freq 440 --amp 0.25 --seconds 900", r);
+    wait_session(steady->pid());
+    music.set_semitones(2);
+    music.start_pid(steady->pid());
+    wait_music_state(music, "running", 15);
+    wait_advanced(music, true, 10, 12);
+    sleep_s(2.0);
+    music.reset_counts();
+    const json under_before = engine_value(music, "underruns");
+    for (double v : {3.0, 4.0, 5.0, 8.0, 7.0, -2.0, -5.0, 0.0, 12.0, 10.0, 6.0, -12.0, 2.5, 9.0}) {
+        music.set_semitones(v);
+        sleep_s(0.6);
+    }
+    for (int i = 0; i < 10; ++i) {
+        music.set_semitones(i % 2 ? 5 : 6);
+        sleep_s(0.05);
+    }
+    music.set_semitones(8);
+    sleep_s(3.0);
+    {
+        const auto st = music.status();
+        const json under = engine_value(music, "underruns");
+        r.check("changes_dropouts", st["dropouts"] == 0, st["dropouts"], "the cushion never ran dry");
+        r.check("changes_skips", st["skips"] == 0, st["skips"], "nothing had to be skipped");
+        r.check("changes_underruns", under == under_before, under, "the shifters were always ready in time");
+        r.info("changes_switches", engine_value(music, "switches"), "amount changes faded in");
+        const auto left = left_of(ear.listen(2.0));
+        const double expect = 440.0 * std::pow(2.0, 8.0 / 12);
+        const auto m = measure_tone(left.data(), left.size(), kRate, expect);
+        r.check("changes_end_at_last_amount", std::fabs(cents(m.frequency, expect)) < 2.0, m.frequency,
+                "after quick changes it ends at the last amount (+8)");
+    }
+
+    // ---- E. A long run without dropouts.
+    say("E. " + std::to_string(int(long_seconds)) + " s without dropouts");
+    music.reset_counts();
+    {
+        const json under_before_long = engine_value(music, "underruns");
+        const auto rec = ear.listen(long_seconds);
+        const auto status = music.status();
+        r.info("long_run_status", status);
+        r.check("long_run_dropouts", status["dropouts"] == 0, status["dropouts"], "the cushion never ran dry");
+        r.check("long_run_skips", status["skips"] == 0, status["skips"], "nothing had to be skipped");
+        r.check("long_run_underruns", engine_value(music, "underruns") == under_before_long,
+                engine_value(music, "underruns"), "the shifters were always ready in time");
+        r.info("long_run_gaps", status["gaps"], "packets Windows marked as 'something was lost'");
+        const auto left = left_of(rec);
+        const double target = 440.0 * std::pow(2.0, 8.0 / 12);
+        const size_t piece = kRate / 20;
+        std::vector<double> levels;
+        for (size_t i = 0; i + piece <= left.size(); i += piece)
+            levels.push_back(to_db(tone_amplitude(left.data() + i, piece, kRate, target)));
+        std::vector<double> sorted = levels;
+        std::sort(sorted.begin(), sorted.end());
+        const double mid = sorted.empty() ? -200 : sorted[sorted.size() / 2];
+        const double lowest = sorted.empty() ? -200 : sorted.front();
+        r.info("long_run_seconds_recorded", double(left.size()) / kRate);
+        r.check("long_run_no_dips", !levels.empty() && lowest > mid - 3.0, lowest - mid,
+                "the shifted tone never dipped more than 3 dB (no audible gaps)");
+        const size_t keep = std::min(rec.size(), size_t(kRate) * 2 * 10);
+        r.wav("advanced_long_run_first10s", std::vector<float>(rec.begin(), rec.begin() + std::ptrdiff_t(keep)), 2);
+    }
+    music.stop();
+    wait_music_state(music, "off", 5);
+    steady->kill();
+    restore_all((r.out() / L"restore_advanced.json").wstring());
+    return r.finish("e2e_advanced.json");
 }
 
 // ---------------- e2e-voice ----------------

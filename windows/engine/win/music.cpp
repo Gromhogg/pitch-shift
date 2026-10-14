@@ -4,6 +4,8 @@
 #include "win/devices.h"
 #include "win/session_watch.h"
 
+#include <avrt.h>
+
 #include <algorithm>
 #include <iterator>
 #include <set>
@@ -23,15 +25,35 @@ MusicPath::MusicPath(std::wstring restore_list, std::wstring restore_command)
     : keeper_(std::move(restore_list), std::move(restore_command)),
       booster_(kChannels, 1.0f / kQuietLevel),
       cushion_(kChannels, ms_to_frames(kStartMs), ms_to_frames(kMaxMs)) {
+    // Room for the biggest pieces mix() handles, so it never makes memory while sound plays.
+    mixed_.reserve(2048 * kChannels);
+    piece_.reserve(2048 * kChannels);
+    shifted_.reserve(16384 * kChannels);
     wake_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    advanced_wake_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    advanced_thread_ = std::thread([this] { advanced_loop(); });
     thread_ = std::thread([this] { run(); });
 }
 
 MusicPath::~MusicPath() {
     quit_ = true;
     SetEvent(wake_);
-    if (thread_.joinable()) thread_.join();
+    if (thread_.joinable()) thread_.join();  // stops all recordings and the player
+    advanced_quit_ = true;
+    SetEvent(advanced_wake_);
+    if (advanced_thread_.joinable()) advanced_thread_.join();
+    CloseHandle(advanced_wake_);
     CloseHandle(wake_);
+}
+
+void MusicPath::set_semitones(double value) {
+    semitones_ = value;
+    // Advanced processing: past +-12 the manager may need to make a new player, so let it look now.
+    if (advanced_) SetEvent(wake_);
+}
+
+void MusicPath::set_advanced(bool on) {
+    if (advanced_.exchange(on) != on) SetEvent(wake_);
 }
 
 void MusicPath::start_all() {
@@ -211,6 +233,9 @@ void MusicPath::tick() {
         retry_after_[root] = now + std::chrono::milliseconds(500);
     }
 
+    // Advanced processing switched on or off, or an amount past +-12 for a -12..+12 player.
+    update_player();
+
     // Which speakers it plays to (the default; the stream follows it). Looked up every 2 s.
     if (now - speaker_checked_ > std::chrono::seconds(2)) {
         speaker_checked_ = now;
@@ -241,11 +266,64 @@ void MusicPath::tick() {
     output_ms_ = output_ms;
 }
 
+// The shifter for the current settings: normal (Rubber Band) or Advanced processing. Called with mix_lock_ held,
+// only when nothing is recording yet (so nobody is waiting to mix).
+void MusicPath::make_player_locked() {
+    const double steps = semitones_.load();
+    shifter_.reset();
+    advanced_shifter_.reset();
+    if (advanced_) advanced_shifter_ = std::make_unique<AdvancedShifter>(kRate, kChannels, steps, AdvancedShifter::needs_full_range(steps));
+    else shifter_ = std::make_unique<MusicShifter>(kRate, kChannels, steps);
+    player_changed_locked();
+}
+
+// Advanced processing switched on or off, or an amount past +-12 while the Advanced player is made for -12..+12:
+// make a new player (like the Mac app). The new one is made outside the lock (it takes a moment), then swapped in.
+void MusicPath::update_player() {
+    const bool want = advanced_.load();
+    const double steps = semitones_.load();
+    {
+        std::lock_guard<std::mutex> lock(mix_lock_);
+        if (!renderer_) return;
+        const bool have = advanced_shifter_ != nullptr;
+        const bool too_small = have && !advanced_shifter_->full_range() && AdvancedShifter::needs_full_range(steps);
+        if (want == have && !too_small) return;
+    }
+    std::unique_ptr<AdvancedShifter> advanced;
+    std::unique_ptr<MusicShifter> normal;
+    if (want) advanced = std::make_unique<AdvancedShifter>(kRate, kChannels, steps, AdvancedShifter::needs_full_range(steps));
+    else normal = std::make_unique<MusicShifter>(kRate, kChannels, steps);
+    {
+        std::lock_guard<std::mutex> lock(mix_lock_);
+        if (!renderer_) return;  // switched off meanwhile
+        std::swap(advanced_shifter_, advanced);
+        std::swap(shifter_, normal);
+        cushion_.flush();  // start the new player with a fresh cushion
+        player_changed_locked();
+        ++player_rebuilds_;
+    }
+    // The old player is let go here, outside the lock.
+}
+
+// Tells the sound side and the status which player is in use (mix_lock_ held).
+void MusicPath::player_changed_locked() {
+    const bool advanced = advanced_shifter_ != nullptr;
+    adv_on_ = advanced;
+    adv_full_range_ = advanced && advanced_shifter_->full_range();
+    adv_latency_ms_ = advanced ? double(advanced_shifter_->latency_frames()) * 1000.0 / kRate : 0.0;
+    adv_heard_ = advanced ? advanced_shifter_->half_steps() : 0.0;
+    adv_changing_ = false;
+    adv_underruns_ = 0;
+    adv_switches_ = 0;
+    adv_shifters_ = 0;
+    advanced_mixes_ = advanced;
+}
+
 void MusicPath::add_stream(DWORD root, bool include_tree) {
     {
         std::lock_guard<std::mutex> lock(mix_lock_);
         if (!renderer_) {
-            shifter_ = std::make_unique<MusicShifter>(kRate, kChannels, semitones_.load());
+            make_player_locked();
             booster_.set_boost(1.0f / kQuietLevel);
             cushion_.flush();
             renderer_ = Renderer::to_default([this](float* out, size_t frames) { cushion_.pull(out, frames); });
@@ -258,15 +336,18 @@ void MusicPath::add_stream(DWORD root, bool include_tree) {
             if (auto s = weak.lock()) {
                 if (s->ring.queued() + frames * kChannels < s->ring.capacity()) s->ring.write(data, frames * kChannels);
             }
-            mix();
+            on_sound();
         });
     } catch (...) {
         std::unique_ptr<Renderer> player;
+        std::unique_ptr<AdvancedShifter> advanced;
         {
             std::lock_guard<std::mutex> lock(mix_lock_);
             if (streams_.empty()) {
                 player = std::move(renderer_);
                 shifter_.reset();
+                advanced = std::move(advanced_shifter_);
+                player_changed_locked();
             }
         }
         throw;
@@ -287,11 +368,14 @@ void MusicPath::remove_stream(DWORD root) {
     gaps_ += gone->capture->stats().gaps;
     gone->capture.reset();  // stops its recording thread (outside the lock: that thread may be mixing)
     std::unique_ptr<Renderer> player;
+    std::unique_ptr<AdvancedShifter> advanced;
     {
         std::lock_guard<std::mutex> lock(mix_lock_);
         if (streams_.empty()) {
             player = std::move(renderer_);
             shifter_.reset();
+            advanced = std::move(advanced_shifter_);
+            player_changed_locked();
         }
     }
     player.reset();
@@ -306,12 +390,30 @@ void MusicPath::remove_all_streams() {
     for (DWORD root : roots) remove_stream(root);
 }
 
-// Called from the recording threads after new sound arrived. Mixes what all recordings have,
-// then boosts, shifts and queues it for the speakers.
+// Called from the recording threads after new sound arrived. Normal mode mixes right there. Advanced processing
+// does more work, so its own thread mixes (like on the Mac): the recording threads just wake it and go back to
+// recording, so they never miss a packet.
+void MusicPath::on_sound() {
+    if (advanced_mixes_) SetEvent(advanced_wake_);
+    else mix();
+}
+
+void MusicPath::advanced_loop() {
+    DWORD task_index = 0;
+    HANDLE task = AvSetMmThreadCharacteristicsW(L"Pro Audio", &task_index);
+    while (!advanced_quit_) {
+        WaitForSingleObject(advanced_wake_, 50);
+        if (advanced_quit_) break;
+        if (advanced_mixes_) mix();
+    }
+    if (task) AvRevertMmThreadCharacteristics(task);
+}
+
+// Mixes what all recordings have, then boosts, shifts and queues it for the speakers.
 void MusicPath::mix() {
     std::unique_lock<std::mutex> lock(mix_lock_, std::try_to_lock);
-    if (!lock.owns_lock()) return;  // another recording thread is mixing; it will take our sound too
-    if (streams_.empty() || !shifter_) return;
+    if (!lock.owns_lock()) return;  // another thread is mixing; it will take our sound too
+    if (streams_.empty() || (!shifter_ && !advanced_shifter_)) return;
     for (;;) {
         size_t lowest = SIZE_MAX, highest = 0;
         for (const auto& [root, s] : streams_) {
@@ -342,9 +444,23 @@ void MusicPath::mix() {
 void MusicPath::process_mixed(float* data, size_t frames) {
     booster_.process(data, frames);
     const double want = semitones_.load();
-    if (want != shifter_->half_steps()) shifter_->set_half_steps(want);
-    shifted_.clear();
-    shifter_->process(data, frames, shifted_);
+    if (advanced_shifter_) {
+        AdvancedShifter& a = *advanced_shifter_;
+        // A -12..+12 player keeps the old amount past +-12 until the manager has made a full range one.
+        if (a.full_range() || !AdvancedShifter::needs_full_range(want)) a.set_half_steps(want);
+        shifted_.resize(frames * kChannels);  // within the room made at the start: no new memory
+        a.process(data, shifted_.data(), frames);
+        const auto info = a.info();
+        adv_heard_ = info.heard;
+        adv_changing_ = info.changing;
+        adv_underruns_ = info.underruns;
+        adv_switches_ = info.switches;
+        adv_shifters_ = info.shifters;
+    } else {
+        if (want != shifter_->half_steps()) shifter_->set_half_steps(want);
+        shifted_.clear();
+        shifter_->process(data, frames, shifted_);
+    }
     clipped_ += limit(shifted_.data(), shifted_.size());
     cushion_.push(shifted_.data(), shifted_.size() / kChannels);
 }
@@ -365,12 +481,27 @@ nlohmann::json MusicPath::status() const {
         mode = mode_ == Mode::off ? "off" : mode_ == Mode::all ? "all" : mode_ == Mode::pids ? "pids" : "apps";
     }
     const double queued_ms = cushion_.queued_frames() * 1000.0 / kRate;
+    const bool adv = adv_on_;
+    // The shifting (Rubber Band about 115 ms, or the Advanced engine's fixed delay) + the cushion + Windows' output buffer.
+    const double shifter_ms = adv ? adv_latency_ms_.load() : 115.0;
+    nlohmann::json engine = nullptr;
+    if (adv)
+        engine = {{"range", adv_full_range_ ? 24 : 12},
+                  {"latency_ms", adv_latency_ms_.load()},
+                  {"heard", adv_heard_.load()},
+                  {"changing", adv_changing_.load()},
+                  {"underruns", adv_underruns_.load()},
+                  {"switches", adv_switches_.load()},
+                  {"shifters", adv_shifters_.load()}};
     return {{"state", state_},
             {"error", error_},
             {"mode", mode},
             {"apps", apps_},
             {"speaker", utf8(speaker_)},
             {"semitones", semitones_.load()},
+            {"advanced", advanced_.load()},
+            {"advanced_engine", engine},
+            {"player_rebuilds", player_rebuilds_.load()},
             {"quieted", quieted_},
             {"dropouts", cushion_.dropouts()},
             {"skips", cushion_.skips()},
@@ -380,8 +511,7 @@ nlohmann::json MusicPath::status() const {
             {"clipped", clipped_.load()},
             {"queued_ms", queued_ms},
             {"output_ms", output_ms_},
-            // Rubber Band (about 115 ms) + the cushion + Windows' output buffer.
-            {"delay_estimate_ms", state_ == "running" ? 115 + queued_ms + output_ms_ : 0}};
+            {"delay_estimate_ms", state_ == "running" ? shifter_ms + queued_ms + output_ms_ : 0}};
 }
 
 }  // namespace ps

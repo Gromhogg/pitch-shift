@@ -51,6 +51,8 @@ The window has two cards. Each has an on/off switch.
     Ticked apps that aren't open stay in the list (greyed) and are picked up again when they start.
     A small green dot marks apps playing sound right now.
 - When the number looks faded, the apps you picked aren't playing right now.
+- Turn on **Advanced processing** for music at bigger amounts: going up, the bass stays deep; going down, the top
+  stays bright. A new amount takes a moment longer to kick in.
 - Your speakers, headphones and volume keys work like normal.
 
 **Your voice**
@@ -118,7 +120,10 @@ the window app and installer in `.github/workflows/windows-app.yml`.
 - `engine/dsp/` – the sound math (Rubber Band pitch shifting, tone measuring, WAV files). No Windows code, so its tests also run on a Mac.
 - `engine/win/` – Windows sound: devices, app recording ("process loopback"), playing, app volumes.
 - `engine/api/` – the small C interface the window app calls (`PitchShiftEngine.dll`).
-- `tool/` – `PitchShiftTool.exe`: setup, repair and test commands (`diag`, `tonegen`, `probe`, `restore`, `selftest`).
+- `../Sources/Advanced/` – "Advanced processing": the Mac app's own engine, built straight in from there (shared, not
+  copied). On Windows it uses a small FFT inside the same file instead of Apple's. `engine/dsp/advanced_shifter.*` wraps it.
+- `tool/` – `PitchShiftTool.exe`: setup, repair and test commands (`diag`, `tonegen`, `probe`, `restore`, `selftest`,
+  `make-song`, `render-file`).
 - `tests/` – tests for the sound math.
 - `app/` – the window (C# / WPF, .NET 10, Windows 11 "Fluent" look).
 - `app.tests/` – tests for the window's logic (xUnit), the window checker (`uismoke/`, FlaUI) and picture scripts (`ci/`).
@@ -148,6 +153,10 @@ Mac (sound math and window logic tests only; needs `brew install cmake rubberban
 cmake -S windows -B build-mac && cmake --build build-mac && ./build-mac/dsp_tests
 dotnet test windows/app.tests/PitchShift.Tests.csproj
 ```
+
+Advanced processing offline, same code as live (compare with the Mac app's `--render-file`):
+`PitchShiftTool make-song --out song.wav`, then `PitchShiftTool render-file song.wav out.wav --steps 8 --advanced`.
+On the Mac, `-DPS_PORTABLE_FFT=ON` makes the tests use the Windows FFT too.
 
 The window app also builds on a Mac (to check for mistakes, not to run):
 `dotnet build windows/app/PitchShift.csproj -p:EnableWindowsTargeting=true`.

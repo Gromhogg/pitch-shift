@@ -9,6 +9,7 @@ on:
     branches: [v2, 'v2-windows*']
     paths:
       - 'windows/**'
+      - 'Sources/Advanced/**'
       - 'install.ps1'
       - '.github/workflows/windows-app.yml'
   workflow_dispatch:

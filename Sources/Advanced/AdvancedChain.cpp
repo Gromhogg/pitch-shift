@@ -11,10 +11,20 @@
 //   reset by a small helper thread, never by the sound thread. They are handed over with atomic flags (no locks).
 // - The EQ looks at the long-term spectrum. Its analysis (two big FFTs and a fit) is cut into 8 slices, one slice per
 //   256 samples, so no single call has to do all of it.
+// - The FFT: on the Mac, Apple's Accelerate (vDSP). Elsewhere (Windows), a small FFT written here (RealFFT below) that
+//   gives the same numbers as vDSP up to rounding. ADVANCED_PORTABLE_FFT uses the portable one on the Mac too (checks).
+#if defined(_MSC_VER) && !defined(_USE_MATH_DEFINES)
+#define _USE_MATH_DEFINES  // M_PI and M_SQRT1_2 on Windows
+#endif
 #include "AdvancedChain.h"
 #include "AdvancedTuning.h"
 #include <rubberband/RubberBandStretcher.h>
+#if defined(__APPLE__) && !defined(ADVANCED_PORTABLE_FFT)
+#define ADVANCED_VDSP 1
 #include <Accelerate/Accelerate.h>
+#else
+#define ADVANCED_VDSP 0
+#endif
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -98,6 +108,66 @@ struct Ring {
 
 size_t pow2above(size_t n) { size_t s = 1; while (s < n) s <<= 1; return s; }
 
+// ------------------------------------------------------------------------------------------------- portable FFT
+
+#if !ADVANCED_VDSP
+// FFT of n real samples (n a power of two) for the EQ's analysis, where Apple's Accelerate isn't there (Windows).
+// The result is laid out like vDSP_fft_zrip's: re[k], im[k] (k = 1 .. n/2-1) hold 2 x the spectrum at bin k,
+// re[0] holds 2 x bin 0 and im[0] holds 2 x bin n/2. Works in double precision. All tables are made in init, so
+// forward makes no memory.
+// How: the n real samples are read as n/2 complex ones (even samples real, odd samples imaginary), go through a plain
+// radix-2 FFT, and the result is untangled into the spectrum of the real samples.
+struct RealFFT {
+    int n = 0, m = 0;               // real size, complex size (n/2)
+    std::vector<int> rev;           // bit-reversed order for the m-point FFT
+    std::vector<double> wr, wi;     // e^(-2 pi i j/m), j < m/2
+    std::vector<double> ur, ui;     // e^(-2 pi i k/n), k < m (for untangling)
+    std::vector<double> zr, zi;     // work space
+
+    void init(int size) {
+        n = size; m = size / 2;
+        int bits = 0;
+        while ((1 << bits) < m) bits++;
+        rev.assign(m, 0);
+        for (int i = 0; i < m; i++) {
+            int r = 0;
+            for (int b = 0; b < bits; b++) if (i & (1 << b)) r |= 1 << (bits - 1 - b);
+            rev[i] = r;
+        }
+        wr.assign(m / 2, 0.0); wi.assign(m / 2, 0.0);
+        for (int j = 0; j < m / 2; j++) { wr[j] = cos(2 * M_PI * j / m); wi[j] = -sin(2 * M_PI * j / m); }
+        ur.assign(m, 0.0); ui.assign(m, 0.0);
+        for (int k = 0; k < m; k++) { ur[k] = cos(2 * M_PI * k / n); ui[k] = -sin(2 * M_PI * k / n); }
+        zr.assign(m, 0.0); zi.assign(m, 0.0);
+    }
+
+    void forward(const float *in, float *re, float *im) {
+        for (int i = 0; i < m; i++) { zr[rev[i]] = in[2 * i]; zi[rev[i]] = in[2 * i + 1]; }
+        for (int len = 2; len <= m; len <<= 1) {
+            int half = len / 2, step = m / len;
+            for (int s = 0; s < m; s += len)
+                for (int j = 0; j < half; j++) {
+                    double cr = wr[j * step], ci = wi[j * step];
+                    int a = s + j, b = a + half;
+                    double tr = zr[b] * cr - zi[b] * ci, ti = zr[b] * ci + zi[b] * cr;
+                    zr[b] = zr[a] - tr; zi[b] = zi[a] - ti;
+                    zr[a] += tr; zi[a] += ti;
+                }
+        }
+        // Untangle: X[k] = E + e^(-2 pi i k/n) O, with E = (Z[k] + conj Z[m-k]) / 2 and O = (Z[k] - conj Z[m-k]) / 2i.
+        re[0] = (float)(2 * (zr[0] + zi[0]));
+        im[0] = (float)(2 * (zr[0] - zi[0]));
+        for (int k = 1; k < m; k++) {
+            double ar = zr[k], ai = zi[k], br = zr[m - k], bi = -zi[m - k];
+            double er = 0.5 * (ar + br), ei = 0.5 * (ai + bi);
+            double orr = 0.5 * (ai - bi), oi = -0.5 * (ar - br);
+            re[k] = (float)(2 * (er + ur[k] * orr - ui[k] * oi));
+            im[k] = (float)(2 * (ei + ur[k] * oi + ui[k] * orr));
+        }
+    }
+};
+#endif
+
 // ------------------------------------------------------------------------------------------------- recipe
 
 // What feeds a path: a sum of up to 3 "terms"; each term is the input through up to 3 LR4 filters, times a gain.
@@ -179,7 +249,11 @@ struct TonalEQ {
     double sr = 48000, tau = 4, boost = 9, cut = 9, alpha = 1, lowcap = 6, midcap = 6, shelfLo = 44;
     double loF = 100, loCut = 15;        // balanced3: below 100 Hz the target is not smoothed and may cut up to 15 dB
     int smooth = 1, N = 16384, period = 2048;
+#if ADVANCED_VDSP
     FFTSetup setup = nullptr; int log2n = 14;
+#else
+    RealFFT fft; int log2n = 14;
+#endif
     std::vector<float> hann, tmp, re, im;
     std::vector<double> fcs, rbin, pref, pcur, pr, pc, pq, pqs, pcs, T, S, g, e;
     std::vector<int> b0, b1, bandOf;
@@ -199,7 +273,11 @@ struct TonalEQ {
         sr = rate;
         N = rate > 64000 ? 32768 : 16384;
         log2n = (int)lround(log2(N));
+#if ADVANCED_VDSP
         setup = vDSP_create_fftsetup(log2n, kFFTRadix2);
+#else
+        fft.init(N);
+#endif
         hann.resize(N); tmp.resize(N); re.resize(N / 2); im.resize(N / 2);
         for (int i = 0; i < N; i++) hann[i] = (float)(0.5 * (1 - cos(2 * M_PI * i / N)));
         for (int k = -16; k <= 12; k++) {
@@ -233,7 +311,9 @@ struct TonalEQ {
         M.assign(NEQ, std::vector<double>(nb, 0.0));
         for (int x = 0; x < NEQ; x++) for (size_t j = 0; j < nb; j++) for (int y = 0; y < NEQ; y++) M[x][j] += inv[x][y] * A[j][y];
     }
+#if ADVANCED_VDSP
     ~TonalEQ() { if (setup) vDSP_destroy_fftsetup(setup); }
+#endif
 
     void reset() {
         std::fill(rbin.begin(), rbin.end(), 0.0);
@@ -245,9 +325,13 @@ struct TonalEQ {
     // FFT of the last N samples of a ring ending at `end`; band powers into out (FFT left in re/im)
     void bandPowers(Ring &r, int64_t end, std::vector<double> &out) {
         for (int i = 0; i < N; i++) tmp[i] = r[end - N + i] * hann[i];
+#if ADVANCED_VDSP
         DSPSplitComplex s{re.data(), im.data()};
         vDSP_ctoz((const DSPComplex *)tmp.data(), 2, &s, 1, N / 2);
         vDSP_fft_zrip(setup, &s, 1, log2n, FFT_FORWARD);
+#else
+        fft.forward(tmp.data(), re.data(), im.data());
+#endif
         for (size_t j = 0; j < fcs.size(); j++) {
             double sum = 0;
             for (int k = b0[j]; k < b1[j] && k < N / 2; k++) sum += (double)re[k] * re[k] + (double)im[k] * im[k];

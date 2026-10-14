@@ -18,6 +18,7 @@ public sealed class Settings
     public bool HearAll { get; set; } = true;   // All sound (otherwise the ticked apps)
     public List<HearApp> HearApps { get; set; } = new();
     public double HearSteps { get; set; } = 2;
+    public bool HearAdvanced { get; set; }      // "Advanced processing" (made for music)
 
     public bool VoiceOn { get; set; }
     public double VoiceSteps { get; set; } = 3;

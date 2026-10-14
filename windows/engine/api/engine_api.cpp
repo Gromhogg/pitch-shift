@@ -188,6 +188,13 @@ PS_API int ps_music_set_semitones(double half_steps) {
     return 0;
 }
 
+PS_API int ps_music_set_advanced(int on) {
+    std::lock_guard<std::mutex> lock(g_lock);
+    if (!g_music) return -1;
+    g_music->set_advanced(on != 0);
+    return 0;
+}
+
 PS_API int ps_voice_start(const char* endpoint_id) {
     std::lock_guard<std::mutex> lock(g_lock);
     if (!g_voice) return -1;

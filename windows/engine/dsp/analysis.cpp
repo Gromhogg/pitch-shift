@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 
 namespace ps {
 
@@ -220,6 +221,84 @@ std::vector<float> make_vowel(double f0, double rate, double seconds, double amp
     for (size_t i = n / 4; i < n; ++i) peak = std::max(peak, std::fabs(x[i]));
     std::vector<float> out(n);
     for (size_t i = 0; i < n; ++i) out[i] = float(peak > 0 ? x[i] / peak * amplitude : 0);
+    return out;
+}
+
+std::vector<float> make_test_song(double rate, double seconds) {
+    const size_t n = size_t(rate * seconds);
+    std::vector<double> l(n, 0.0), r(n, 0.0);
+    const double beat = 0.5;  // 120 beats per minute
+    uint32_t seed = 12345;
+    auto noise = [&seed] {
+        seed = seed * 1664525u + 1013904223u;
+        return double(int32_t(seed)) / 2147483648.0;
+    };
+    auto pitch = [](int note) { return 440.0 * std::pow(2.0, (note - 69) / 12.0); };  // MIDI note -> Hz
+    const int roots[4] = {48, 45, 41, 43};  // chords C, Am, F, G (one per bar)
+    const int thirds[4] = {4, 3, 4, 4};
+    const int tune[16] = {72, 74, 76, 79, 76, 74, 72, 69, 72, 74, 76, 77, 79, 77, 76, 74};
+    double hat_last = 0, air_low = 0, tune_phase = 0;
+    for (size_t i = 0; i < n; ++i) {
+        const double t = double(i) / rate;
+        const int b = int(t / beat);               // which beat
+        const double since = t - b * beat;         // seconds since the beat
+        const double eighth = std::fmod(t, beat / 2);
+        const int bar = (b / 4) % 4;
+        double left = 0, right = 0;
+        // Kick on every beat: a sine falling from 120 to 45 Hz.
+        const double kick = 0.45 * std::exp(-since * 9) * std::sin(2 * kPi * (45 * since + 2.5 * (1 - std::exp(-since * 30))));
+        left += kick;
+        right += kick;
+        // Snare on beats 2 and 4: noise and a 185 Hz tone.
+        if (b % 2 == 1) {
+            const double snare = std::exp(-since * 18) * (0.18 * noise() + 0.12 * std::sin(2 * kPi * 185 * since));
+            left += snare;
+            right += snare;
+        }
+        // Hi-hat on every eighth: short, high-passed noise.
+        const double hiss = noise();
+        const double hat = 0.06 * std::exp(-eighth * 60) * (hiss - hat_last);
+        hat_last = hiss;
+        left += 0.8 * hat;
+        right += hat;
+        // Bass: the chord's root (a fifth up on the last beat) in eighths, with a few harmonics (44-98 Hz).
+        const double bass_hz = pitch(roots[bar] - 12 + (b % 4 == 3 ? 7 : 0));
+        double bass = 0;
+        for (int k = 1; k <= 5; ++k) bass += std::sin(2 * kPi * bass_hz * k * t) / k;
+        bass *= 0.16 * std::min(1.0, eighth * 200) * std::exp(-eighth * 3);
+        left += bass;
+        right += bass;
+        // Chords: three notes held for the bar, spread left and right.
+        for (int k = 0; k < 3; ++k) {
+            const double hz = pitch(roots[bar] + 12 + (k == 0 ? 0 : k == 1 ? thirds[bar] : 7));
+            double v = 0;
+            for (int h = 1; h <= 4; ++h) v += std::sin(2 * kPi * hz * h * t + k) / (h * h);
+            v *= 0.05;
+            left += v * (k == 1 ? 1.2 : k == 2 ? 0.8 : 1.0);
+            right += v * (k == 1 ? 0.8 : k == 2 ? 1.2 : 1.0);
+        }
+        // Tune: one note per beat with a little vibrato.
+        tune_phase += 2 * kPi * pitch(tune[b % 16]) * (1 + 0.003 * std::sin(2 * kPi * 5.5 * t)) / rate;
+        const double tone = 0.12 * std::min(1.0, since * 100) * std::exp(-since * 2) *
+                            (std::sin(tune_phase) + 0.3 * std::sin(2 * tune_phase));
+        left += 0.7 * tone;
+        right += tone;
+        // Air: very quiet hiss above about 7 kHz.
+        const double x = noise();
+        air_low += 0.6 * (x - air_low);
+        left += 0.012 * (x - air_low);
+        right += 0.012 * (x - air_low);
+        l[i] = left;
+        r[i] = right;
+    }
+    double peak = 0;
+    for (size_t i = 0; i < n; ++i) peak = std::max({peak, std::fabs(l[i]), std::fabs(r[i])});
+    const double gain = peak > 0 ? 0.7 / peak : 0;  // peaks at -3 dBFS
+    std::vector<float> out(n * 2);
+    for (size_t i = 0; i < n; ++i) {
+        out[2 * i] = float(l[i] * gain);
+        out[2 * i + 1] = float(r[i] * gain);
+    }
     return out;
 }
 

@@ -34,6 +34,11 @@ std::vector<float> make_tone(double hz, double amplitude, double rate, int chann
 // and 2600 Hz. Used to check that Natural keeps those resonances and Cartoon moves them.
 std::vector<float> make_vowel(double f0, double rate, double seconds, double amplitude = 0.3);
 
+// A made-up song (2 channels, interleaved) for checks that need music rather than a tone: kick, snare, hi-hat,
+// a bass line (44-98 Hz), chords, a tune and a little hiss above 7 kHz. 120 beats per minute, peaks at -3 dBFS,
+// exactly the same every time.
+std::vector<float> make_test_song(double rate, double seconds);
+
 // The "center of gravity" of the sound's spectrum between lo and hi Hz.
 double spectral_centroid(const float* samples, size_t count, double rate, double lo_hz, double hi_hz);
 

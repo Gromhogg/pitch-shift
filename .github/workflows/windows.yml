@@ -8,11 +8,13 @@ on:
     branches: [v2, 'v2-windows*']
     paths:
       - 'windows/**'
+      - 'Sources/Advanced/**'
       - '.github/workflows/windows.yml'
       - 'install.ps1'
   pull_request:
     paths:
       - 'windows/**'
+      - 'Sources/Advanced/**'
       - '.github/workflows/windows.yml'
       - 'install.ps1'
   workflow_dispatch:
@@ -58,6 +60,28 @@ jobs:
 
       - name: Rubber Band check (440 Hz shifted +2 should be 493.9 Hz)
         run: build/out/Release/PitchShiftTool.exe selftest
+
+      # Advanced processing without sound devices: a made-up song shifted with the same code as live, to compare
+      # with the Mac app's --render-file on the same file (download the render artifact).
+      - name: Advanced processing, offline (a made-up song at +8, -5 and +15)
+        run: |
+          $tool = 'build/out/Release/PitchShiftTool.exe'
+          New-Item -ItemType Directory -Force render-out | Out-Null
+          & $tool make-song --out render-out/song.wav --seconds 20
+          if ($LASTEXITCODE) { throw 'make-song failed' }
+          foreach ($s in 8, -5, 15) {
+            & $tool render-file render-out/song.wav "render-out/song-advanced$s.wav" --steps $s --advanced | Tee-Object -FilePath render-out/renders.txt -Append
+            if ($LASTEXITCODE) { throw "advanced render $s failed" }
+            & $tool render-file render-out/song.wav "render-out/song-normal$s.wav" --steps $s | Tee-Object -FilePath render-out/renders.txt -Append
+            if ($LASTEXITCODE) { throw "normal render $s failed" }
+          }
+          & $tool render-file render-out/song.wav render-out/song-advanced-changes.wav --steps 8 --advanced --steps-at '4:-5,8:12,12:3' | Tee-Object -FilePath render-out/renders.txt -Append
+          if ($LASTEXITCODE) { throw 'render with changes failed' }
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: render-${{ matrix.arch }}
+          path: render-out/
 
       - name: Collect the tool and engine
         run: |
@@ -140,6 +164,10 @@ jobs:
 
       - name: What you hear (music path)
         run: dist/PitchShiftTool.exe e2e-music --out e2e-out
+
+      - name: What you hear, Advanced processing
+        if: always()
+        run: dist/PitchShiftTool.exe e2e-advanced --out e2e-out
 
       - name: Your voice (voice path)
         if: always()

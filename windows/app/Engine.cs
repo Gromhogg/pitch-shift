@@ -20,6 +20,7 @@ static class Engine
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] static extern int ps_music_set_apps([MarshalAs(UnmanagedType.LPUTF8Str)] string exePathsJson);
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] static extern int ps_music_stop();
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] static extern int ps_music_set_semitones(double halfSteps);
+    [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] static extern int ps_music_set_advanced(int on);
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] static extern int ps_voice_start([MarshalAs(UnmanagedType.LPUTF8Str)] string endpointId);
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] static extern int ps_voice_stop();
     [DllImport(Dll, CallingConvention = CallingConvention.Cdecl)] static extern int ps_voice_set_semitones(double halfSteps);
@@ -79,6 +80,8 @@ static class Engine
     public static void HearApps(IEnumerable<string> exePaths) => Call(() => ps_music_set_apps(JsonSerializer.Serialize(exePaths.ToArray())));
     public static void HearStop() => Call(ps_music_stop);
     public static void HearSteps(double halfSteps) => Call(() => ps_music_set_semitones(halfSteps));
+    // "Advanced processing" (made for music): keeps the bass deep going up and the top bright going down.
+    public static void HearAdvanced(bool on) => Call(() => ps_music_set_advanced(on ? 1 : 0));
 
     public static void VoiceStart(string micId) => Call(() => ps_voice_start(micId ?? ""));
     public static void VoiceStop() => Call(ps_voice_stop);

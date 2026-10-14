@@ -13,7 +13,9 @@
 //   tonegen [--freq 440] [--amp 0.25] [--seconds 600] [--device "name"] [--pulse] [--spawn-child]
 //   record --device "name" --seconds 5 --out file.wav [--channels 1]
 //   probe [--out folder]                     how app volume affects app recording
-//   e2e-music | e2e-voice | e2e-crash [--out folder]
+//   e2e-music | e2e-advanced | e2e-voice | e2e-crash [--out folder]
+//   make-song --out song.wav [--seconds 20]  a made-up song for checks (no sound devices needed)
+//   render-file IN OUT [--steps 8] [--advanced] [--steps-at "4:8,8:-5"]   shift a WAV file offline
 //   set-default <playback|recording> "name"   ("pitch-shift-feed" / "pitch-shift-mic" = our cable)
 //   selftest                                 shift a made-up tone with Rubber Band and check the pitch
 #include "tool/tool.h"
@@ -55,7 +57,7 @@ double Args::number(const wchar_t* flag, double fallback) const {
 
 std::wstring Args::positional(size_t index, const std::wstring& fallback) const {
     // Flags that stand alone (no value after them).
-    static const std::vector<std::wstring> switches = {L"--silent", L"--pulse", L"--spawn-child", L"--quick", L"--voice", L"--skip-vb-setup"};
+    static const std::vector<std::wstring> switches = {L"--silent", L"--pulse", L"--spawn-child", L"--quick", L"--voice", L"--skip-vb-setup", L"--advanced"};
     size_t seen = 0;
     for (size_t i = 1; i < items.size(); ++i) {
         if (items[i].rfind(L"--", 0) == 0) {
@@ -131,6 +133,9 @@ int wmain(int argc, wchar_t** argv) {
         if (command == L"record") return record(args);
         if (command == L"probe") return probe(args);
         if (command == L"e2e-music") return e2e_music(args);
+        if (command == L"e2e-advanced") return e2e_advanced(args);
+        if (command == L"make-song") return make_song(args);
+        if (command == L"render-file") return render_file(args);
         if (command == L"e2e-voice") return e2e_voice(args);
         if (command == L"e2e-crash") return e2e_crash(args);
         if (command == L"host") return host(args);
@@ -141,6 +146,6 @@ int wmain(int argc, wchar_t** argv) {
         return 2;
     }
     say("Usage: PitchShiftTool <setup-mic|restore|restore-names|remove-cable|watch|diag|tonegen|record|probe|"
-        "e2e-music|e2e-voice|e2e-crash|set-default|selftest> [options]");
+        "e2e-music|e2e-advanced|e2e-voice|e2e-crash|make-song|render-file|set-default|selftest> [options]");
     return command.empty() ? 0 : 1;
 }

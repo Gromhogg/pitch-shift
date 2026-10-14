@@ -2,7 +2,11 @@
 // changes the pitch, and plays it to the default speakers. The apps' own sound is made very quiet
 // (see quiet.h) and the recording is boosted back up, so only the shifted copy is heard.
 // Several apps can be chosen: each is recorded on its own and the recordings are mixed.
+// "Advanced processing" (set_advanced) swaps Rubber Band alone for the Mac app's Advanced engine (made for music:
+// keeps the bass deep going up and the top bright going down). It runs on its own thread (like on the Mac), so the
+// recording threads only hand the sound over.
 #pragma once
+#include "dsp/advanced_shifter.h"
 #include "dsp/booster.h"
 #include "dsp/cushion.h"
 #include "dsp/music_shifter.h"
@@ -35,8 +39,12 @@ public:
     void start_pids(const std::vector<DWORD>& pids);      // processes and everything they started
     void start_pid(DWORD pid) { start_pids({pid}); }
     void stop();
-    void set_semitones(double value) { semitones_ = value; }
+    void set_semitones(double value);
     double semitones() const { return semitones_; }
+    // Advanced processing on or off. Switching makes a new player (the sound pauses for a moment, as on the Mac).
+    // Like the Mac: it's made for -12..+12 (less delay); going past that makes a new one with more delay.
+    void set_advanced(bool on);
+    bool advanced() const { return advanced_; }
 
     nlohmann::json status() const;
     void reset_counts();
@@ -61,8 +69,13 @@ private:
     void add_stream(DWORD root, bool include_tree);
     void remove_stream(DWORD root);
     void remove_all_streams();
+    void on_sound();
     void mix();
     void process_mixed(float* data, size_t frames);
+    void make_player_locked();
+    void update_player();
+    void player_changed_locked();
+    void advanced_loop();
 
     // Settings (set by the caller, read by the manager thread).
     mutable std::mutex settings_lock_;
@@ -70,6 +83,7 @@ private:
     std::vector<DWORD> target_pids_;
     std::vector<std::wstring> target_exes_;
     std::atomic<double> semitones_{0.0};
+    std::atomic<bool> advanced_{false};
 
     // Manager thread.
     HANDLE wake_;
@@ -83,10 +97,23 @@ private:
     std::map<DWORD, std::shared_ptr<Stream>> streams_;
     bool include_tree_ = true;
     std::unique_ptr<Renderer> renderer_;
-    std::unique_ptr<MusicShifter> shifter_;
+    std::unique_ptr<MusicShifter> shifter_;            // normal mode
+    std::unique_ptr<AdvancedShifter> advanced_shifter_;  // Advanced processing (only one of the two is there)
     Booster booster_;
     Cushion cushion_;
-    std::vector<float> mixed_, piece_, shifted_;
+    std::vector<float> mixed_, piece_, shifted_;  // room is made at the start, so mixing makes no memory
+
+    // Advanced processing runs on its own thread: the recording threads wake it (on_sound) and it mixes.
+    HANDLE advanced_wake_;
+    std::thread advanced_thread_;
+    std::atomic<bool> advanced_quit_{false}, advanced_mixes_{false};
+
+    // What the Advanced engine is doing (written by the sound side, read by status()).
+    std::atomic<bool> adv_on_{false}, adv_full_range_{false}, adv_changing_{false};
+    std::atomic<double> adv_latency_ms_{0}, adv_heard_{0};
+    std::atomic<int64_t> adv_underruns_{0}, adv_switches_{0};
+    std::atomic<int> adv_shifters_{0};
+    std::atomic<uint64_t> player_rebuilds_{0};
 
     // Status (read from any thread).
     mutable std::mutex status_lock_;

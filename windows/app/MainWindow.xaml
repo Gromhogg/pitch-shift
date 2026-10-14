@@ -32,7 +32,14 @@
                                    VerticalAlignment="Center" />
                     </DockPanel>
                 </Button>
-                <!-- Room below for a future "Advanced processing" switch row. -->
+                <!-- Advanced processing (made for music): going up the bass stays deep, going down the top stays bright. -->
+                <DockPanel x:Name="AdvancedRow" LastChildFill="True">
+                    <local:GradientSwitch x:Name="AdvancedSwitch" DockPanel.Dock="Right" VerticalAlignment="Center"
+                                          AutomationProperties.AutomationId="AdvancedSwitch"
+                                          AutomationProperties.Name="Advanced processing" />
+                    <TextBlock x:Name="AdvancedLabel" Text="Advanced processing" Foreground="{DynamicResource PsTextSecondary}"
+                               VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+                </DockPanel>
             </StackPanel>
         </local:ShiftCard>
 

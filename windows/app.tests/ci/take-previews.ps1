@@ -26,6 +26,9 @@ $states = [ordered]@{
     'menu'      = 'hear-on,voice-on,menu'
     'hover'     = 'hear-on,voice-on,hover'
     'listening' = 'hear-on,voice-on,listening,recording,waiting'
+    # "Advanced processing" switch on (the pictures above show it off), with the card on and off.
+    'advanced'          = 'hear-on,voice-on,cartoon,advanced'
+    'advanced-hear-off' = 'voice-on,advanced'
 }
 # Window sizes (inside the frame), like the Mac pictures: wide, largest, tall (cards stacked), narrow, wide and short.
 $sizes = [ordered]@{
@@ -51,6 +54,8 @@ foreach ($theme in 'light', 'dark') {
         $file = Join-Path $Out "size-$name-$theme.png"
         if (-not (Take $file @('--preview', 'hear-on,voice-on', '--theme', $theme, '--size', $sizes[$name]))) { $failed++ }
     }
+    # The biggest window with "Advanced processing" on (its row grows with everything else).
+    if (-not (Take (Join-Path $Out "size-largest-advanced-$theme.png") @('--preview', 'hear-on,voice-on,advanced', '--theme', $theme, '--size', $sizes['largest']))) { $failed++ }
 }
 $log = Join-Path $env:LOCALAPPDATA 'Pitch Shift\app-log.txt'
 if (Test-Path $log) { Write-Host '--- app log ---'; Get-Content $log | Write-Host }

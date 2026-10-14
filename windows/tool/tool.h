@@ -28,7 +28,12 @@ int tonegen(const Args& args);
 int record(const Args& args);
 int probe(const Args& args);
 int e2e_music(const Args& args);
+int e2e_advanced(const Args& args);
 int e2e_voice(const Args& args);
+
+// Offline (render.cpp)
+int make_song(const Args& args);
+int render_file(const Args& args);
 int e2e_crash(const Args& args);
 int host(const Args& args);
 int set_default(const Args& args);

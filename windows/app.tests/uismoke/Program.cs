@@ -152,6 +152,28 @@ sealed class Smoke(string appExe, string toolExe, string outDir, string sourceNa
         Check("hear switch on starts again", WaitFor(() => Status()?["music"]?["state"]?.GetValue<string>() is "running" or "waiting" ? "" : null, TimeSpan.FromSeconds(8)) is not null,
             Status()?["music"]?["state"]);
 
+        // ---------- What you hear: Advanced processing ----------
+        var advanced = WaitFor(() => Find(window, "AdvancedSwitch"), TimeSpan.FromSeconds(3));
+        Check("Advanced processing switch is there", advanced?.Name == "Advanced processing", advanced?.Name);
+        Check("Advanced processing starts off", advanced?.AsToggleButton().ToggleState == ToggleState.Off, advanced?.AsToggleButton().ToggleState);
+        Shot(window, "advanced-off");
+        Toggle(window, "AdvancedSwitch");
+        Check("Advanced processing on reaches the engine",
+            WaitFor(() => Status()?["music"]?["advanced"]?.GetValue<bool>() == true ? "" : null, TimeSpan.FromSeconds(5)) is not null,
+            Status()?["music"]?["advanced"]);
+        var engine = WaitFor(() => Status()?["music"]?["advanced_engine"] as JsonObject, TimeSpan.FromSeconds(10));
+        Check("the sound goes through Advanced processing", engine is not null, Status()?["music"]?.ToJsonString());
+        Shot(window, "advanced-on");
+        Toggle(window, "AdvancedSwitch");
+        Check("Advanced processing off reaches the engine",
+            WaitFor(() => Status()?["music"]?["advanced"]?.GetValue<bool>() == false && Status()?["music"]?["advanced_engine"] is null ? "" : null, TimeSpan.FromSeconds(10)) is not null,
+            Status()?["music"]?.ToJsonString());
+        // On again: it should be saved and come back after a restart (checked below).
+        Toggle(window, "AdvancedSwitch");
+        Check("Advanced processing on again",
+            WaitFor(() => Status()?["music"]?["advanced"]?.GetValue<bool>() == true ? "" : null, TimeSpan.FromSeconds(5)) is not null,
+            Status()?["music"]?["advanced"]);
+
         // ---------- Your voice ----------
         var micName = Find(window, "MicPicker")?.Properties.ItemStatus.ValueOrDefault ?? "";
         var hasMic = micName.Length > 0 && micName != "No microphone";
@@ -234,6 +256,7 @@ sealed class Smoke(string appExe, string toolExe, string outDir, string sourceNa
         var saved = File.Exists(settingsFile) ? JsonNode.Parse(File.ReadAllText(settingsFile)) : null;
         Check("settings saved: amount", saved?["hearSteps"]?.GetValue<double>() == -1.25, saved?["hearSteps"]);
         Check("settings saved: ticked app", saved?["hearApps"]?.AsArray().Count == 1 && saved?["hearAll"]?.GetValue<bool>() == false, saved?["hearApps"]?.ToJsonString());
+        Check("settings saved: Advanced processing", saved?["hearAdvanced"]?.GetValue<bool>() == true, saved?["hearAdvanced"]);
         if (hasMic) Check("settings saved: Cartoon", saved?["voiceNatural"]?.GetValue<bool>() == false, saved?["voiceNatural"]);
 
         // ---------- Quit puts everything back ----------
@@ -255,6 +278,11 @@ sealed class Smoke(string appExe, string toolExe, string outDir, string sourceNa
             Thread.Sleep(2500);
             Check("amount remembered", Find(window2, "HearAmount")?.Name == "−1.25", Find(window2, "HearAmount")?.Name);
             Check("ticked app remembered", Find(window2, "HearPicker")?.Name == sourceName, Find(window2, "HearPicker")?.Name);
+            Check("Advanced processing remembered", Find(window2, "AdvancedSwitch")?.AsToggleButton().ToggleState == ToggleState.On,
+                Find(window2, "AdvancedSwitch")?.AsToggleButton().ToggleState);
+            Check("Advanced processing given to the engine at start",
+                WaitFor(() => Status()?["music"]?["advanced"]?.GetValue<bool>() == true ? "" : null, TimeSpan.FromSeconds(5)) is not null,
+                Status()?["music"]?["advanced"]);
             Shot(window2, "dark");
         }
         Process.Start(appExe, "--quit").WaitForExit(30000);

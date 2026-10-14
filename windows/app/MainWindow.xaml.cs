@@ -63,6 +63,9 @@ public partial class MainWindow : Window
             Changed();
         };
         HearPicker.Click += (_, _) => OpenHearMenu();
+        // Checked/Unchecked (not Click), so screen readers and the UI checks can switch it too.
+        AdvancedSwitch.Checked += (_, _) => AdvancedPicked(true);
+        AdvancedSwitch.Unchecked += (_, _) => AdvancedPicked(false);
 
         VoiceCard.Toggled += on =>
         {
@@ -174,6 +177,7 @@ public partial class MainWindow : Window
     void ApplyHear()
     {
         if (preview is not null) return;
+        Engine.HearAdvanced(settings.HearAdvanced);
         if (!settings.HearOn)
         {
             Engine.HearStop();
@@ -217,6 +221,7 @@ public partial class MainWindow : Window
 
         var waiting = s.HearOn && st.MusicState == "waiting";
         HearCard.Show(on: s.HearOn, value: s.HearSteps, active: s.HearOn, waiting: waiting);
+        if (AdvancedSwitch.IsChecked != s.HearAdvanced) AdvancedSwitch.IsChecked = s.HearAdvanced;
         HearCard.Amount.Hint = st.MusicState == "error" ? st.MusicError
             : waiting ? WaitingTip()
             : s.HearOn && st.MusicState == "running" && st.MusicSpeaker.Length > 0 ? "Playing to " + st.MusicSpeaker
@@ -375,6 +380,15 @@ public partial class MainWindow : Window
         AutomationProperties.SetName(item, name);
         if (playing) AutomationProperties.SetHelpText(item, "Playing now");
         return item;
+    }
+
+    // "Advanced processing" (made for music). Switching makes a new player in the engine.
+    void AdvancedPicked(bool on)
+    {
+        if (settings.HearAdvanced == on) return;  // shown from the settings, not a click
+        settings.HearAdvanced = on;
+        if (preview is null) Engine.HearAdvanced(on);
+        Changed();
     }
 
     void HearSourceChanged()

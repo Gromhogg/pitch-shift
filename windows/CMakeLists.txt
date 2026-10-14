@@ -65,9 +65,31 @@ file(DOWNLOAD https://github.com/nlohmann/json/releases/download/v3.12.0/json.hp
   ${PS_THIRD_PARTY}/nlohmann/json.hpp
   EXPECTED_HASH SHA256=aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63)
 
+# ---------- Advanced processing: the Mac app's own engine, shared (not copied) ----------
+
+# ../Sources/Advanced is the same C++ the Mac app uses. On the Mac it uses Apple's Accelerate for its FFT;
+# elsewhere a small FFT inside the same file (see AdvancedChain.cpp).
+set(PS_ADVANCED_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../Sources/Advanced)
+add_library(ps_advanced STATIC ${PS_ADVANCED_DIR}/AdvancedChain.cpp)
+target_include_directories(ps_advanced PUBLIC ${PS_ADVANCED_DIR})
+target_link_libraries(ps_advanced PUBLIC rubberband)
+if(MSVC)
+  # The Mac code mixes float and double freely; these warnings (number type changes) are expected there.
+  target_compile_options(ps_advanced PRIVATE /wd4244 /wd4267 /wd4305)
+endif()
+if(APPLE)
+  target_link_libraries(ps_advanced PUBLIC "-framework Accelerate")
+endif()
+# Checks on the Mac: -DPS_PORTABLE_FFT=ON uses the Windows FFT path there too.
+option(PS_PORTABLE_FFT "Use the portable FFT in Advanced processing on the Mac too" OFF)
+if(PS_PORTABLE_FFT)
+  target_compile_definitions(ps_advanced PRIVATE ADVANCED_PORTABLE_FFT)
+endif()
+
 # ---------- Sound math (no Windows code) ----------
 
 add_library(ps_dsp STATIC
+  engine/dsp/advanced_shifter.cpp
   engine/dsp/analysis.cpp
   engine/dsp/booster.cpp
   engine/dsp/cushion.cpp
@@ -76,7 +98,7 @@ add_library(ps_dsp STATIC
   engine/dsp/voice_shifter.cpp
   engine/dsp/wav.cpp)
 target_include_directories(ps_dsp PUBLIC engine)
-target_link_libraries(ps_dsp PUBLIC rubberband)
+target_link_libraries(ps_dsp PUBLIC rubberband ps_advanced)
 
 add_executable(dsp_tests tests/dsp_tests.cpp)
 target_include_directories(dsp_tests PRIVATE ${PS_THIRD_PARTY})
@@ -114,6 +136,7 @@ if(WIN32)
     tool/main.cpp
     tool/probe.cpp
     tool/record.cpp
+    tool/render.cpp
     tool/setup.cpp
     tool/tonegen.cpp
     tool/tool.rc)
