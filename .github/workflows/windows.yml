@@ -1,0 +1,233 @@
+# Pitch Shift for Windows (beta): build and test on GitHub's Windows computers (x64 and ARM64).
+# There's no Windows PC to test on, so these checks do the listening: recordings (WAV) and
+# window pictures are uploaded as "artifacts" on each run.
+name: Windows
+
+on:
+  push:
+    branches: [v2-windows]
+    paths:
+      - 'windows/**'
+      - '.github/workflows/windows.yml'
+      - 'install.ps1'
+  pull_request:
+    paths:
+      - 'windows/**'
+      - '.github/workflows/windows.yml'
+      - 'install.ps1'
+  workflow_dispatch:
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  build:
+    name: build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2025
+            cmake_arch: x64
+            rid: win-x64
+          - arch: arm64
+            runner: windows-11-arm
+            cmake_arch: ARM64
+            rid: win-arm64
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build the sound engine, tool and tests
+        run: |
+          cmake --version
+          cmake -S windows -B build -A ${{ matrix.cmake_arch }}
+          cmake --build build --config Release --parallel
+
+      - name: Sound math tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Rubber Band check (440 Hz shifted +2 should be 493.9 Hz)
+        run: build/out/Release/PitchShiftTool.exe selftest
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Build the window app
+        run: |
+          dotnet publish windows/app/PitchShift.csproj -c Release -r ${{ matrix.rid }} `
+            -p:EngineDir="${{ github.workspace }}\build\out\Release" -o dist
+          Copy-Item build/out/Release/PitchShiftTool.exe dist/
+          Get-ChildItem dist | Format-Table Name, Length
+
+      - name: Window pictures
+        continue-on-error: true
+        run: |
+          New-Item -ItemType Directory -Force shots | Out-Null
+          $p = Start-Process -FilePath dist/PitchShift.exe -ArgumentList '--screenshot', "$PWD\shots\window-${{ matrix.arch }}.png" -PassThru
+          if (-not $p.WaitForExit(60000)) { $p.Kill(); throw 'The window app did not finish its picture in time.' }
+          ./windows/ci/screenshot.ps1 -Exe dist/PitchShift.exe -Out "$PWD\shots\desktop-${{ matrix.arch }}.png"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pitchshift-${{ matrix.arch }}
+          path: dist/
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: screenshots-${{ matrix.arch }}
+          path: shots/
+          if-no-files-found: ignore
+
+  probe:
+    name: probe (${{ matrix.arch }})
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2025
+          - arch: arm64
+            runner: windows-11-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: pitchshift-${{ matrix.arch }}
+          path: dist
+
+      - name: Get sound ready (VB-CABLE, microphone access)
+        run: ./windows/ci/prepare-audio.ps1 -Tool dist/PitchShiftTool.exe
+
+      - name: Sound setup before
+        run: |
+          New-Item -ItemType Directory -Force probe-out | Out-Null
+          dist/PitchShiftTool.exe diag | Tee-Object -FilePath probe-out/diag-before.json
+
+      - name: Probe (how app volume affects app recording)
+        run: dist/PitchShiftTool.exe probe --out probe-out
+
+      - name: Sound setup after
+        if: always()
+        run: dist/PitchShiftTool.exe diag | Tee-Object -FilePath probe-out/diag-after.json
+
+      - name: Summary
+        if: always()
+        run: ./windows/ci/summary.ps1 -Folder probe-out -Title 'Probe (${{ matrix.arch }})'
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: probe-${{ matrix.arch }}
+          path: probe-out/
+
+  audio-e2e:
+    name: audio e2e (${{ matrix.arch }})
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2025
+          - arch: arm64
+            runner: windows-11-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: pitchshift-${{ matrix.arch }}
+          path: dist
+
+      - name: Get sound ready (VB-CABLE, microphone access)
+        run: ./windows/ci/prepare-audio.ps1 -Tool dist/PitchShiftTool.exe
+
+      - name: What you hear (music path)
+        run: dist/PitchShiftTool.exe e2e-music --out e2e-out
+
+      - name: Your voice (voice path)
+        if: always()
+        run: dist/PitchShiftTool.exe e2e-voice --out e2e-out
+
+      - name: Crash recovery
+        if: always()
+        run: dist/PitchShiftTool.exe e2e-crash --out e2e-out
+
+      - name: Sound setup after
+        if: always()
+        run: dist/PitchShiftTool.exe diag | Tee-Object -FilePath e2e-out/diag-after.json
+
+      - name: Summary
+        if: always()
+        run: ./windows/ci/summary.ps1 -Folder e2e-out -Title 'Audio checks (${{ matrix.arch }})'
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: e2e-${{ matrix.arch }}
+          path: e2e-out/
+
+  mic-setup:
+    name: mic setup (${{ matrix.arch }})
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2025
+          - arch: arm64
+            runner: windows-11-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: pitchshift-${{ matrix.arch }}
+          path: dist
+
+      - name: Before (no virtual cable yet)
+        run: |
+          New-Item -ItemType Directory -Force mic-out | Out-Null
+          foreach ($s in 'AudioEndpointBuilder', 'Audiosrv') { Set-Service $s -StartupType Automatic; Start-Service $s }
+          dist/PitchShiftTool.exe diag | Out-File mic-out/diag-before.json -Encoding utf8
+
+      - name: Set up Pitch Shift Mic (downloads VB-CABLE, installs it silently, names it)
+        run: dist/PitchShiftTool.exe setup-mic --silent | Tee-Object -FilePath mic-out/setup.json
+
+      - name: Check the names
+        run: ./windows/ci/check-mic-setup.ps1 -Tool dist/PitchShiftTool.exe -Expect named -Out mic-out/diag-named.json
+
+      - name: Give VB-CABLE its own names back
+        run: |
+          dist/PitchShiftTool.exe restore-names
+          ./windows/ci/check-mic-setup.ps1 -Tool dist/PitchShiftTool.exe -Expect original -Out mic-out/diag-original.json
+
+      - name: Remove VB-CABLE
+        run: |
+          dist/PitchShiftTool.exe remove-cable
+          Start-Sleep -Seconds 5
+          ./windows/ci/check-mic-setup.ps1 -Tool dist/PitchShiftTool.exe -Expect removed -Out mic-out/diag-removed.json
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: mic-setup-${{ matrix.arch }}
+          path: mic-out/
