@@ -1,0 +1,309 @@
+# Pitch Shift for Windows (beta): build and test on GitHub's Windows computers (x64 and ARM64).
+# There's no Windows PC to test on, so these checks do the listening: recordings (WAV)
+# are uploaded as "artifacts" on each run. (The window app's checks are in windows-app.yml.)
+name: Windows
+
+on:
+  push:
+    branches: [v2, 'v2-windows*']
+    paths:
+      - 'windows/**'
+      - 'Sources/Advanced/**'
+      - '.github/workflows/windows.yml'
+      - 'install.ps1'
+  pull_request:
+    paths:
+      - 'windows/**'
+      - 'Sources/Advanced/**'
+      - '.github/workflows/windows.yml'
+      - 'install.ps1'
+  workflow_dispatch:
+    inputs:
+      repeat:
+        description: >-
+          Run only "What you hear" (e2e-music) this many times on each processor type, to see if its checks are
+          steady. The run always ends green; the pass counts and logs are in the repeat-* artifacts.
+          0 = the normal checks.
+        type: number
+        default: 0
+      music_args:
+        description: 'More e2e-music options for repeat runs (for example --only-later 30 --no-nudge)'
+        type: string
+        default: ''
+
+concurrency:
+  # Repeat runs get their own group, so several can run side by side (each on fresh runners).
+  group: windows-${{ github.ref }}-${{ inputs.repeat > 0 && github.run_id || 'checks' }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  build:
+    name: build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2025
+            cmake_arch: x64
+            rid: win-x64
+          - arch: arm64
+            runner: windows-11-arm
+            cmake_arch: ARM64
+            rid: win-arm64
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Build the sound engine, tool and tests
+        run: |
+          cmake --version
+          cmake -S windows -B build -A ${{ matrix.cmake_arch }}
+          cmake --build build --config Release --parallel
+
+      - name: Sound math tests
+        run: ctest --test-dir build -C Release --output-on-failure
+
+      - name: Rubber Band check (440 Hz shifted +2 should be 493.9 Hz)
+        run: build/out/Release/PitchShiftTool.exe selftest
+
+      # Advanced processing without sound devices: a made-up song shifted with the same code as live, to compare
+      # with the Mac app's --render-file on the same file (download the render artifact).
+      - name: Advanced processing, offline (a made-up song at +8, -5 and +15)
+        if: ${{ !(inputs.repeat > 0) }}
+        run: |
+          $tool = 'build/out/Release/PitchShiftTool.exe'
+          New-Item -ItemType Directory -Force render-out | Out-Null
+          & $tool make-song --out render-out/song.wav --seconds 20
+          if ($LASTEXITCODE) { throw 'make-song failed' }
+          foreach ($s in 8, -5, 15) {
+            & $tool render-file render-out/song.wav "render-out/song-advanced$s.wav" --steps $s --advanced | Tee-Object -FilePath render-out/renders.txt -Append
+            if ($LASTEXITCODE) { throw "advanced render $s failed" }
+            & $tool render-file render-out/song.wav "render-out/song-normal$s.wav" --steps $s | Tee-Object -FilePath render-out/renders.txt -Append
+            if ($LASTEXITCODE) { throw "normal render $s failed" }
+          }
+          & $tool render-file render-out/song.wav render-out/song-advanced-changes.wav --steps 8 --advanced --steps-at '4:-5,8:12,12:3' | Tee-Object -FilePath render-out/renders.txt -Append
+          if ($LASTEXITCODE) { throw 'render with changes failed' }
+
+      - uses: actions/upload-artifact@v7
+        if: ${{ !(inputs.repeat > 0) }}
+        with:
+          name: render-${{ matrix.arch }}
+          path: render-out/
+
+      - name: Collect the tool and engine
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item build/out/Release/*.exe, build/out/Release/*.dll dist/ -ErrorAction SilentlyContinue
+          Get-ChildItem dist | Format-Table Name, Length
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pitchshift-${{ matrix.arch }}
+          path: dist/
+
+  probe:
+    name: probe (${{ matrix.arch }})
+    needs: build
+    if: ${{ !(inputs.repeat > 0) }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2025
+          - arch: arm64
+            runner: windows-11-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: pitchshift-${{ matrix.arch }}
+          path: dist
+
+      - name: Get sound ready (VB-CABLE, microphone access)
+        run: ./windows/ci/prepare-audio.ps1 -Tool dist/PitchShiftTool.exe
+
+      - name: Sound setup before
+        run: |
+          New-Item -ItemType Directory -Force probe-out | Out-Null
+          dist/PitchShiftTool.exe diag | Tee-Object -FilePath probe-out/diag-before.json
+
+      - name: Probe (how app volume affects app recording)
+        run: dist/PitchShiftTool.exe probe --out probe-out
+
+      - name: Sound setup after
+        if: always()
+        run: dist/PitchShiftTool.exe diag | Tee-Object -FilePath probe-out/diag-after.json
+
+      - name: Summary
+        if: always()
+        run: ./windows/ci/summary.ps1 -Folder probe-out -Title 'Probe (${{ matrix.arch }})'
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: probe-${{ matrix.arch }}
+          path: probe-out/
+
+  audio-e2e:
+    name: audio e2e (${{ matrix.arch }})
+    needs: build
+    if: ${{ !(inputs.repeat > 0) }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2025
+          - arch: arm64
+            runner: windows-11-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: pitchshift-${{ matrix.arch }}
+          path: dist
+
+      - name: Get sound ready (VB-CABLE, microphone access)
+        run: ./windows/ci/prepare-audio.ps1 -Tool dist/PitchShiftTool.exe
+
+      - name: What you hear (music path)
+        run: dist/PitchShiftTool.exe e2e-music --out e2e-out
+
+      - name: What you hear, Advanced processing
+        if: always()
+        run: dist/PitchShiftTool.exe e2e-advanced --out e2e-out
+
+      - name: Your voice (voice path)
+        if: always()
+        run: dist/PitchShiftTool.exe e2e-voice --out e2e-out
+
+      - name: Crash recovery
+        if: always()
+        run: dist/PitchShiftTool.exe e2e-crash --out e2e-out
+
+      - name: Sound setup after
+        if: always()
+        run: dist/PitchShiftTool.exe diag | Tee-Object -FilePath e2e-out/diag-after.json
+
+      - name: Summary
+        if: always()
+        run: ./windows/ci/summary.ps1 -Folder e2e-out -Title 'Audio checks (${{ matrix.arch }})'
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: e2e-${{ matrix.arch }}
+          path: e2e-out/
+
+  # Manual runs only (Run workflow, with "repeat" above 0): e2e-music many times in one job; always ends green.
+  audio-e2e-repeat:
+    name: audio e2e x${{ inputs.repeat }} (${{ matrix.arch }})
+    needs: build
+    if: ${{ inputs.repeat > 0 }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2025
+          - arch: arm64
+            runner: windows-11-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: pitchshift-${{ matrix.arch }}
+          path: dist
+
+      - name: Get sound ready (VB-CABLE, microphone access)
+        run: ./windows/ci/prepare-audio.ps1 -Tool dist/PitchShiftTool.exe
+
+      - name: What you hear (music path), ${{ inputs.repeat }} times
+        run: ./windows/ci/repeat-e2e.ps1 -Tool dist/PitchShiftTool.exe -Times ${{ inputs.repeat }} -Out repeat-out -Arch ${{ matrix.arch }} -ExtraArgs '${{ inputs.music_args }}'
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: repeat-${{ matrix.arch }}
+          path: repeat-out/
+
+  mic-setup:
+    name: mic setup (${{ matrix.arch }})
+    needs: build
+    if: ${{ !(inputs.repeat > 0) }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2025
+          - arch: arm64
+            runner: windows-11-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: pitchshift-${{ matrix.arch }}
+          path: dist
+
+      - name: Before (no virtual cable yet)
+        run: |
+          New-Item -ItemType Directory -Force mic-out | Out-Null
+          foreach ($s in 'AudioEndpointBuilder', 'Audiosrv') { Set-Service $s -StartupType Automatic; Start-Service $s }
+          dist/PitchShiftTool.exe diag | Out-File mic-out/diag-before.json -Encoding utf8
+
+      - name: Closing VB-Audio's window without installing means "not installed", not "restart"
+        run: |
+          # A leftover flag from an older version must not make it say "restart" either.
+          New-Item -Path 'HKLM:\SOFTWARE\Pitch Shift' -Force | Out-Null
+          New-ItemProperty -Path 'HKLM:\SOFTWARE\Pitch Shift' -Name RestartNeeded -Value 1 -PropertyType DWord -Force | Out-Null
+          dist/PitchShiftTool.exe setup-mic --skip-vb-setup | Tee-Object -FilePath mic-out/setup-cancelled.json
+          $code = $LASTEXITCODE
+          $key = Get-ItemProperty -Path 'HKLM:\SOFTWARE\Pitch Shift' -ErrorAction SilentlyContinue
+          $diag = ((dist/PitchShiftTool.exe diag) -join "`n") | ConvertFrom-Json
+          Write-Host "exit code $code, RestartNeeded=$($key.RestartNeeded), InstalledByPitchShift=$($key.InstalledByPitchShift), engine restart_needed=$($diag.cable.restart_needed)"
+          if ($code -ne 1223) { throw "expected 1223 (not installed), got $code" }
+          if ($key.RestartNeeded -eq 1) { throw 'RestartNeeded should not be set' }
+          if ($key.InstalledByPitchShift -eq 1) { throw 'InstalledByPitchShift should not be set' }
+          if ($diag.cable.restart_needed) { throw 'the engine should not say "restart needed"' }
+          $global:LASTEXITCODE = 0
+
+      - name: Set up Pitch Shift Mic (downloads VB-CABLE, installs it silently, names it)
+        run: dist/PitchShiftTool.exe setup-mic --silent | Tee-Object -FilePath mic-out/setup.json
+
+      - name: Check the names
+        run: ./windows/ci/check-mic-setup.ps1 -Tool dist/PitchShiftTool.exe -Expect named -Out mic-out/diag-named.json
+
+      - name: Give VB-CABLE its own names back
+        run: |
+          dist/PitchShiftTool.exe restore-names
+          ./windows/ci/check-mic-setup.ps1 -Tool dist/PitchShiftTool.exe -Expect original -Out mic-out/diag-original.json
+
+      - name: Remove VB-CABLE
+        run: |
+          dist/PitchShiftTool.exe remove-cable
+          Start-Sleep -Seconds 5
+          ./windows/ci/check-mic-setup.ps1 -Tool dist/PitchShiftTool.exe -Expect removed -Out mic-out/diag-removed.json
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: mic-setup-${{ matrix.arch }}
+          path: mic-out/

@@ -1,16 +1,10 @@
 #!/bin/bash
-# Installs Pitch Shift: downloads the latest version and puts it on your Desktop.
+# Installs Pitch Shift on a Mac: downloads the installer package and runs it (asks for your Mac password once).
 # Use: curl -fsSL https://raw.githubusercontent.com/Gromhogg/pitch-shift/main/install.sh | bash
 set -euo pipefail
 
 repo="Gromhogg/pitch-shift"
-dest="${PITCH_SHIFT_DIR:-$HOME/Desktop}"
-app="$dest/Pitch Shift.app"
 
-if [ "$(uname -m)" != "arm64" ]; then
-  echo "Sorry, Pitch Shift needs a Mac with Apple silicon (M1 or newer)."
-  exit 1
-fi
 version="$(sw_vers -productVersion)"
 major="${version%%.*}"
 rest="${version#*.}"
@@ -20,20 +14,21 @@ if [ "$major" -lt 14 ] || { [ "$major" -eq 14 ] && [ "$minor" -lt 4 ]; }; then
   exit 1
 fi
 
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
-echo "Downloading Pitch Shift..."
-curl -fsSL "https://github.com/$repo/releases/latest/download/PitchShift.zip" -o "$tmp/PitchShift.zip"
-ditto -x -k "$tmp/PitchShift.zip" "$tmp"
-
-# Replacing an old copy: close it first if it's open.
-if [ -e "$app" ]; then
-  if pkill -x PitchShift 2>/dev/null; then sleep 1; fi
-  rm -rf "$app"
+pkg="${PITCH_SHIFT_PKG:-}"  # for testing: a local PitchShift.pkg
+if [ -z "$pkg" ]; then
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  echo "Downloading Pitch Shift..."
+  curl -fsSL "https://github.com/$repo/releases/latest/download/PitchShift.pkg" -o "$tmp/PitchShift.pkg"
+  pkg="$tmp/PitchShift.pkg"
 fi
-mkdir -p "$dest"
-mv "$tmp/Pitch Shift.app" "$app"
-xattr -dr com.apple.quarantine "$app" 2>/dev/null || true
 
-echo "Installed Pitch Shift: $app"
-if [ -z "${PITCH_SHIFT_NO_OPEN:-}" ]; then open "$app"; fi
+echo "Type your Mac password to install Pitch Shift and Pitch Shift Mic (nothing shows while you type)."
+sudo installer -pkg "$pkg" -target / >/dev/null
+
+# A shortcut on the Desktop (replacing an old copy of version 1 there).
+desktop="$HOME/Desktop/Pitch Shift.app"
+if [ -e "$desktop" ] && [ ! -L "$desktop" ]; then rm -rf "$desktop"; fi
+ln -sfn "/Applications/Pitch Shift.app" "$desktop" 2>/dev/null || true
+echo "Installed Pitch Shift. It's in Applications and on your Desktop."
+if [ -z "${PITCH_SHIFT_NO_OPEN:-}" ]; then open "/Applications/Pitch Shift.app"; fi

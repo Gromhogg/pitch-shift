@@ -1,0 +1,238 @@
+# Pitch Shift for Windows (beta): the window app, the installer and the one-line installer.
+# There's no Windows PC to test on, so these checks click through the window and install/uninstall
+# on GitHub's Windows computers (x64 and ARM64). Pictures of the window are uploaded as "artifacts".
+# (The sound engine's own checks are in windows.yml.)
+name: Windows app
+
+on:
+  push:
+    branches: [v2, 'v2-windows*']
+    paths:
+      - 'windows/**'
+      - 'Sources/Advanced/**'
+      - 'install.ps1'
+      - '.github/workflows/windows-app.yml'
+  workflow_dispatch:
+  release:
+    types: [published]
+
+concurrency:
+  group: windows-app-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'release' }}
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: pwsh
+
+env:
+  DOTNET_NOLOGO: 'true'
+  DOTNET_CLI_TELEMETRY_OPTOUT: 'true'
+
+jobs:
+  build:
+    name: build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2025
+            cmake_arch: x64
+            rid: win-x64
+          - arch: arm64
+            runner: windows-11-arm
+            cmake_arch: ARM64
+            rid: win-arm64
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Version number
+        run: ./windows/installer/ci/version.ps1
+
+      - name: Build the sound engine and tool
+        run: |
+          cmake -S windows -B build -A ${{ matrix.cmake_arch }}
+          cmake --build build --config Release --parallel --target PitchShiftEngine PitchShiftTool
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Window logic tests (number, settings, pickers)
+        run: dotnet test windows/app.tests/PitchShift.Tests.csproj -c Release --logger "console;verbosity=normal"
+
+      - name: Build the window app
+        run: |
+          dotnet publish windows/app/PitchShift.csproj -c Release -r ${{ matrix.rid }} `
+            -p:EngineDir="${{ github.workspace }}\build\out\Release" `
+            -p:InformationalVersion=$env:PS_VERSION -p:FileVersion=$env:PS_NUMERIC_VERSION -o dist
+          Copy-Item build/out/Release/PitchShiftTool.exe dist/
+          Get-ChildItem dist | Format-Table Name, Length
+
+      - name: Window pictures (light and dark, many states)
+        run: ./windows/app.tests/ci/take-previews.ps1 -Exe dist/PitchShift.exe -Out shots
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: app-${{ matrix.arch }}
+          path: dist/
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: app-pictures-${{ matrix.arch }}
+          path: shots/
+          if-no-files-found: ignore
+
+  ui:
+    name: window checks (${{ matrix.arch }})
+    needs: build
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            runner: windows-2025
+          - arch: arm64
+            runner: windows-11-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: app-${{ matrix.arch }}
+          path: dist
+
+      - uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Build the window checker (FlaUI)
+        run: dotnet build windows/app.tests/uismoke/UiSmoke.csproj -c Release -o uismoke
+
+      - name: Get the screen ready (Windows' first sign-in privacy screen)
+        continue-on-error: true
+        run: |
+          New-Item -ItemType Directory -Force ui-out | Out-Null
+          uismoke/UiSmoke.exe desktop --out ui-out/00-desktop-start.png
+          uismoke/UiSmoke.exe dismiss-privacy --out ui-out/00-desktop-ready.png
+
+      - name: Get sound ready (VB-CABLE, microphone access)
+        run: ./windows/ci/prepare-audio.ps1 -Tool dist/PitchShiftTool.exe
+
+      - name: Play a quiet tone from another app (something to pick in "What you hear")
+        run: |
+          $tone = Join-Path $env:RUNNER_TEMP 'tone'
+          New-Item -ItemType Directory -Force $tone | Out-Null
+          Copy-Item dist/PitchShiftTool.exe $tone
+          Start-Process -FilePath (Join-Path $tone 'PitchShiftTool.exe') -ArgumentList 'tonegen', '--amp', '0.05', '--seconds', '1200' -WindowStyle Hidden
+          Start-Sleep -Seconds 3
+
+      - name: Click through the window
+        run: uismoke/UiSmoke.exe run --app dist/PitchShift.exe --tool dist/PitchShiftTool.exe --out ui-out --source 'Pitch Shift helper'
+
+      - name: Screen at the end
+        if: always()
+        continue-on-error: true
+        run: |
+          uismoke/UiSmoke.exe desktop --out ui-out/99-desktop-end.png
+          $log = Join-Path $env:LOCALAPPDATA 'Pitch Shift\app-log.txt'
+          if (Test-Path $log) { Copy-Item $log ui-out/ }
+          dist/PitchShiftTool.exe diag | Out-File ui-out/diag-end.json
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: ui-${{ matrix.arch }}
+          path: ui-out/
+          if-no-files-found: ignore
+
+  installer:
+    name: installer
+    needs: build
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Version number
+        run: ./windows/installer/ci/version.ps1
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: app-x64
+          path: dist-x64
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: app-arm64
+          path: dist-arm64
+
+      - name: Build PitchShift-Setup.exe (Inno Setup)
+        run: ./windows/installer/ci/build-installer.ps1 -DistX64 dist-x64 -DistArm64 dist-arm64 -Version $env:PS_VERSION -NumericVersion $env:PS_NUMERIC_VERSION -Out installer-out
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: installer
+          path: installer-out/
+
+  installer-test:
+    name: install test (${{ matrix.arch }})
+    needs: installer
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # x64: the one-line installer (install.ps1), then uninstall removing everything.
+          - arch: x64
+            runner: windows-2025
+            options: -ViaScript -RemoveCable
+          # ARM64: the installer directly, then uninstall keeping VB-CABLE and settings.
+          - arch: arm64
+            runner: windows-11-arm
+            options: ''
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: installer
+          path: installer
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: app-${{ matrix.arch }}
+          path: dist
+
+      - name: Install, use, update and uninstall
+        run: ./windows/installer/ci/test-install.ps1 -Setup installer/PitchShift-Setup.exe -Tool dist/PitchShiftTool.exe -Out install-out ${{ matrix.options }}
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: install-test-${{ matrix.arch }}
+          path: install-out/
+          if-no-files-found: ignore
+
+  release:
+    name: attach to the release
+    if: github.event_name == 'release'
+    needs: [installer, installer-test]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: installer
+          path: installer
+
+      - name: Upload PitchShift-Setup.exe to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" installer/PitchShift-Setup.exe installer/PitchShift-Setup.exe.sha256 --clobber --repo "${{ github.repository }}"
