@@ -5,10 +5,6 @@ set -euo pipefail
 
 repo="Gromhogg/pitch-shift"
 
-if [ "$(uname -m)" != "arm64" ]; then
-  echo "Sorry, Pitch Shift needs a Mac with Apple silicon (M1 or newer)."
-  exit 1
-fi
 version="$(sw_vers -productVersion)"
 major="${version%%.*}"
 rest="${version#*.}"
