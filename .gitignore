@@ -1,0 +1,4 @@
+build/
+CLAUDE.md
+*.zip
+.DS_Store
