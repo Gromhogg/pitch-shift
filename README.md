@@ -51,4 +51,4 @@ Pitch Shift uses a macOS audio tap (macOS 14.4+) to grab the Music app's sound a
 
 ## License
 
-GPL-2.0-or-later, because Pitch Shift includes Rubber Band, which uses the GPL. See [LICENSE](LICENSE).
+GPL-3.0-or-later. Pitch Shift includes Rubber Band (GPL) and, for its virtual mic, BlackHole (GPL-3). See [LICENSE](LICENSE).
