@@ -76,6 +76,9 @@ public:
 
     int quieted() const;
     const std::wstring& list_path() const { return path_; }
+    // How often an app that should be quiet could not be made quiet, and why the last time (empty: never).
+    int failures() const;
+    std::string last_failure() const;
 
 private:
     void sync_sign_in_entry();
@@ -84,6 +87,8 @@ private:
     mutable std::mutex lock_;
     std::map<std::wstring, Session> ours_;  // by session instance id
     std::map<std::wstring, std::chrono::steady_clock::time_point> gone_;  // quieted, then the app quit
+    int failures_ = 0;
+    std::string last_failure_;
 };
 
 }  // namespace ps

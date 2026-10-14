@@ -2,6 +2,8 @@
 // Mac app: start playing once 50 ms is waiting; if more than 150 ms would be waiting, drop the new
 // sound (we've fallen behind); if it runs dry, go quiet and wait for 50 ms again.
 // One thread puts sound in (push), another takes it out for the speakers (pull).
+// Running dry counts as a dropout only when sound comes back afterwards (a gap). When the app playing just quit,
+// the sound has ended: nothing is missing, so that isn't counted.
 #pragma once
 #include "dsp/ring.h"
 
@@ -23,16 +25,16 @@ public:
 
     size_t queued_frames() const { return ring_.queued() / size_t(channels_); }
     bool playing() const { return playing_; }
-    uint64_t dropouts() const { return dropouts_; }   // ran dry while playing
+    uint64_t dropouts() const { return dropouts_; }   // ran dry while playing, then sound came back
     uint64_t skips() const { return skips_; }         // pieces dropped because too much was waiting
     uint64_t skipped_frames() const { return skipped_frames_; }
-    void reset_counts() { dropouts_ = 0; skips_ = 0; skipped_frames_ = 0; }
+    void reset_counts() { dropouts_ = 0; skips_ = 0; skipped_frames_ = 0; ran_dry_ = false; }
 
 private:
     int channels_;
     size_t start_frames_, max_frames_;
     SampleRing ring_;
-    std::atomic<bool> playing_{false}, flush_{false};
+    std::atomic<bool> playing_{false}, flush_{false}, ran_dry_{false};
     std::atomic<uint64_t> dropouts_{0}, skips_{0}, skipped_frames_{0};
 };
 

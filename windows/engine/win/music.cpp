@@ -109,7 +109,11 @@ void MusicPath::run() {
                 last_refresh = now;
             }
             try {
+                const auto started = std::chrono::steady_clock::now();
                 tick();
+                const double ms =
+                    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+                if (ms > slowest_tick_ms_) slowest_tick_ms_ = ms;
             } catch (const std::exception& e) {
                 remove_all_streams();
                 std::lock_guard<std::mutex> lock(status_lock_);
@@ -264,6 +268,8 @@ void MusicPath::tick() {
     error_ = error;
     apps_ = apps;
     quieted_ = keeper_.quieted();
+    quiet_failures_ = keeper_.failures();
+    quiet_error_ = keeper_.last_failure();
     output_ms_ = output_ms;
 }
 
@@ -479,6 +485,7 @@ void MusicPath::reset_counts() {
     clipped_ = 0;
     gaps_ = 0;
     starved_reset_ = starved_gone_ + starved_now_;
+    slowest_tick_ms_ = 0;
     std::lock_guard<std::mutex> lock(status_lock_);
     current_gaps_ = 0;
 }
@@ -514,6 +521,9 @@ nlohmann::json MusicPath::status() const {
             {"advanced_engine", engine},
             {"player_rebuilds", player_rebuilds_.load()},
             {"quieted", quieted_},
+            {"quiet_failures", quiet_failures_},
+            {"quiet_error", quiet_error_},
+            {"slowest_tick_ms", slowest_tick_ms_.load()},
             {"dropouts", cushion_.dropouts()},
             {"skips", cushion_.skips()},
             {"skipped_ms", cushion_.skipped_frames() * 1000.0 / kRate},

@@ -42,6 +42,10 @@ SteadyLevel steady_level(const float* samples, size_t count, double rate, double
 // Finds the tone near `expected_hz` (within about -20% / +25%) and measures it.
 ToneMeasure measure_tone(const float* samples, size_t count, double rate, double expected_hz);
 
+// The pitch of a steady tone near `expected_hz`: the middle value of measure_tone's pitch in `piece_seconds` pieces.
+// A one-off hiccup only throws off its own piece (over a whole recording it can move the pitch by up to 1 Hz).
+double steady_frequency(const float* samples, size_t count, double rate, double expected_hz, double piece_seconds = 0.5);
+
 // Takes one channel out of interleaved sound (left = 0).
 std::vector<float> take_channel(const std::vector<float>& interleaved, int channels, int which);
 

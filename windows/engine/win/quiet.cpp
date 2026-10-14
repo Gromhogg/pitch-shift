@@ -258,6 +258,16 @@ int QuietKeeper::quieted() const {
     return int(ours_.size());
 }
 
+int QuietKeeper::failures() const {
+    std::lock_guard<std::mutex> lock(lock_);
+    return failures_;
+}
+
+std::string QuietKeeper::last_failure() const {
+    std::lock_guard<std::mutex> lock(lock_);
+    return last_failure_;
+}
+
 void QuietKeeper::update(const std::vector<Session>& sessions, const std::function<bool(const Session&)>& wanted) {
     std::lock_guard<std::mutex> lock(lock_);
     std::set<std::wstring> alive;
@@ -271,7 +281,14 @@ void QuietKeeper::update(const std::vector<Session>& sessions, const std::functi
         const bool is_ours = ours_.count(s.instance_id) > 0;
         if (wanted(s)) {
             if (!is_ours || !is_quiet(levels, kQuietLevel)) {
-                if (SUCCEEDED(quiet_session(s, kQuietLevel, path_))) ours_[s.instance_id] = s;
+                const HRESULT hr = quiet_session(s, kQuietLevel, path_);
+                if (SUCCEEDED(hr)) {
+                    ours_[s.instance_id] = s;
+                } else {
+                    ++failures_;
+                    last_failure_ = "could not quiet " + utf8(file_name_of(s.exe)) + " (pid " + std::to_string(s.pid) +
+                                    "): " + hr_text(hr);
+                }
             }
             continue;
         }

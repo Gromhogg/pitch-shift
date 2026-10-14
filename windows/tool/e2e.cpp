@@ -119,6 +119,11 @@ double steady_db(const std::vector<float>& mono, double hz) {
     return steady_level(mono.data(), mono.size(), kRate, hz).level_db;
 }
 
+// The pitch of a steady tone near `expected` (the middle of its 0.5 s pieces; see steady_frequency).
+double steady_hz(const std::vector<float>& mono, double expected) {
+    return steady_frequency(mono.data(), mono.size(), kRate, expected);
+}
+
 // The level of a faint tone next to a loud one (the quieted original next to the shifted copy): the middle of its
 // level in 0.5 s pieces, each with a smooth window. 0.5 s is long enough to keep a loud tone 54 Hz away out; taking
 // the middle keeps a one-off hiccup out (its click spreads over all pitches, also onto the faint one).
@@ -142,6 +147,33 @@ std::vector<std::pair<size_t, size_t>> cable_silences(const std::vector<float>& 
         run = 0;
     }
     return out;
+}
+
+// The long runs' "no audible gaps" check: the shifted tone's level in 50 ms pieces never dips more than 3 dB.
+// Pieces where the whole cable went silent (see cable_silences: not a gap of Pitch Shift's) are listed on their own.
+// The quiet original must be playing to the cable too, or a gap of Pitch Shift's would look the same.
+void check_no_dips(Report& r, const std::vector<float>& left, double hz) {
+    const size_t piece = kRate / 20;
+    const auto silences = cable_silences(left);
+    std::vector<double> levels;
+    json cable_gaps = json::array();
+    for (size_t i = 0; i + piece <= left.size(); i += piece) {
+        const double db = to_db(tone_amplitude(left.data() + i, piece, kRate, hz));
+        bool cable_silent = false;
+        for (const auto& [at, length] : silences) cable_silent = cable_silent || (at < i + piece && at + length > i);
+        if (cable_silent) cable_gaps.push_back(json{{"at_s", round3(double(i) / kRate)}, {"level_db", round3(db)}});
+        else levels.push_back(db);
+    }
+    std::vector<double> sorted = levels;
+    std::sort(sorted.begin(), sorted.end());
+    const double median = sorted.empty() ? -200 : sorted[sorted.size() / 2];
+    const double lowest = sorted.empty() ? -200 : sorted.front();
+    r.info("long_run_seconds_recorded", double(left.size()) / kRate);
+    r.info("long_run_cable_silences", cable_gaps,
+           "pieces where nothing at all reached the cable, not even the quiet original (a hiccup of Windows, the "
+           "cable or the recording, not of Pitch Shift)");
+    r.check("long_run_no_dips", !levels.empty() && lowest > median - 3.0, lowest - median,
+            "the shifted tone never dipped more than 3 dB (no audible gaps)");
 }
 
 int64_t now_ms() {
@@ -290,7 +322,9 @@ int e2e_music(const Args& args) {
     auto counts = [&](const std::string& after) {
         const json st = music.status();
         r.info("counts_after_" + after, json{{"dropouts", st["dropouts"]}, {"skips", st["skips"]},
-                                             {"output_starved", st["output_starved"]}, {"guarded", st["guarded"]}});
+                                             {"output_starved", st["output_starved"]}, {"guarded", st["guarded"]},
+                                             {"quiet_failures", st["quiet_failures"]},
+                                             {"slowest_tick_ms", round3(st["slowest_tick_ms"].get<double>())}});
     };
 
     // ---- A. One app, +2.
@@ -309,8 +343,8 @@ int e2e_music(const Args& args) {
     {
         const auto left = hear("app_plus2", 3.0, target);
         const auto m = measure_tone(left.data(), left.size(), kRate, target);
-        const double level = steady_db(left, target);
-        r.check("app_pitch_hz", std::fabs(m.frequency - target) < 0.5, m.frequency, "440 Hz +2 = 493.9 Hz");
+        const double hz = steady_hz(left, target), level = steady_db(left, target);
+        r.check("app_pitch_hz", std::fabs(hz - target) < 0.5, hz, "440 Hz +2 = 493.9 Hz");
         r.check("app_level_change_db", std::fabs(level - base) <= 1.0, level - base,
                 "shifted tone is as loud as the original (within 1 dB)");
         r.check("app_original_down_db", level - faint_db(left, 440.0) >= 50, level - faint_db(left, 440.0),
@@ -330,9 +364,8 @@ int e2e_music(const Args& args) {
     sleep_s(1.5);
     {
         const auto left = hear("zero", 2.0, 440.0);
-        const auto m = measure_tone(left.data(), left.size(), kRate, 440.0);
-        const double level = steady_db(left, 440.0);
-        r.check("zero_pitch_hz", std::fabs(m.frequency - 440.0) < 0.5, m.frequency, "at 0 the pitch is unchanged");
+        const double hz = steady_hz(left, 440.0), level = steady_db(left, 440.0);
+        r.check("zero_pitch_hz", std::fabs(hz - 440.0) < 0.5, hz, "at 0 the pitch is unchanged");
         r.check("zero_level_change_db", std::fabs(level - base) <= 0.5, level - base, "at 0 the level is unchanged");
     }
     counts("B");
@@ -367,9 +400,8 @@ int e2e_music(const Args& args) {
     sleep_s(2.0);
     {
         const auto left = hear("child_plus2", 3.0, target);
-        const auto m = measure_tone(left.data(), left.size(), kRate, target);
-        const double level = steady_db(left, target);
-        r.check("child_pitch_hz", std::fabs(m.frequency - target) < 0.5, m.frequency, "the child's sound is shifted");
+        const double hz = steady_hz(left, target), level = steady_db(left, target);
+        r.check("child_pitch_hz", std::fabs(hz - target) < 0.5, hz, "the child's sound is shifted");
         r.check("child_level_change_db", std::fabs(level - base) <= 1.0, level - base, "same level");
         r.check("child_original_down_db", level - faint_db(left, 440.0) >= 50, level - faint_db(left, 440.0),
                 "the child's original is 50+ dB quieter");
@@ -398,12 +430,11 @@ int e2e_music(const Args& args) {
     // Two shifted tones and the two quiet originals, measured the same way for "All sound" and for two ticked apps.
     auto check_two = [&](const std::string& prefix, const std::vector<float>& left, const std::string& what1,
                          const std::string& what2) {
-        const auto m1 = measure_tone(left.data(), left.size(), kRate, target);
-        const auto m2 = measure_tone(left.data(), left.size(), kRate, target2);
+        const double hz1 = steady_hz(left, target), hz2 = steady_hz(left, target2);
         const double l1 = steady_db(left, target), l2 = steady_db(left, target2);
         const double o1 = faint_db(left, 440.0), o2 = faint_db(left, 660.0);
-        r.check(prefix + "pitch1_hz", std::fabs(m1.frequency - target) < 0.5, m1.frequency, what1 + "440 -> 493.9 Hz");
-        r.check(prefix + "pitch2_hz", std::fabs(m2.frequency - target2) < 0.5, m2.frequency, what2 + "660 -> 740.0 Hz");
+        r.check(prefix + "pitch1_hz", std::fabs(hz1 - target) < 0.5, hz1, what1 + "440 -> 493.9 Hz");
+        r.check(prefix + "pitch2_hz", std::fabs(hz2 - target2) < 0.5, hz2, what2 + "660 -> 740.0 Hz");
         r.check(prefix + "level1_change_db", std::fabs(l1 - base) <= 1.0, l1 - base, "");
         r.check(prefix + "level2_change_db", std::fabs(l2 - base) <= 1.0, l2 - base, "");
         r.check(prefix + "original1_down_db", l1 - o1 >= 45, l1 - o1,
@@ -455,6 +486,7 @@ int e2e_music(const Args& args) {
                 waiting["state"], "a ticked app that isn't open is listed and waited for");
         for (int round = 0; round < 2; ++round) {
             const std::string name = round == 0 ? "later_app_joins" : "later_app_rejoins_after_restart";
+            music.reset_counts();  // (so slowest_tick_ms is this round's)
             player_logs = {r.out() / ("player_" + name + ".txt")};
             std::unique_ptr<ChildProcess> player;
             try {
@@ -471,11 +503,24 @@ int e2e_music(const Args& args) {
             counts(name + "_running");
             sleep_s(2.5);
             const auto left = hear(name, 2.0, target);
-            const auto m = measure_tone(left.data(), left.size(), kRate, target);
-            const double down = steady_db(left, target) - faint_db(left, 440.0);
-            r.check(name, std::fabs(m.frequency - target) < 0.5 && down >= 50,
-                    json{{"hz", round3(m.frequency)}, {"original_down_db", round3(down)}},
+            const double hz = steady_hz(left, target), down = steady_db(left, target) - faint_db(left, 440.0);
+            r.check(name, std::fabs(hz - target) < 0.5 && down >= 50,
+                    json{{"hz", round3(hz)}, {"original_down_db", round3(down)}},
                     "it is shifted as soon as it opens (493.9 Hz, the original 50+ dB quieter)");
+            // What the engine and Windows say about the player (its sound sessions, any copy of FakePlayer).
+            json sessions = json::array();
+            for (const auto& session : list_sessions())
+                if (session.pid == player->pid() || lower(session.exe) == lower(fake.wstring()))
+                    sessions.push_back(session_json(session));
+            const auto st = music.status();
+            r.info(name + "_state", json{{"player_pid", player->pid()},
+                                         {"sessions", sessions},
+                                         {"apps", st["apps"]},
+                                         {"quieted", st["quieted"]},
+                                         {"quiet_failures", st["quiet_failures"]},
+                                         {"quiet_error", st["quiet_error"]},
+                                         {"slowest_tick_ms", round3(st["slowest_tick_ms"].get<double>())},
+                                         {"guarded", st["guarded"]}});
             player->kill();
             sleep_s(1.0);
             counts(name + "_closed");
@@ -535,30 +580,7 @@ int e2e_music(const Args& args) {
         r.check("long_run_dropouts", status["dropouts"] == 0, status["dropouts"], "the cushion never ran dry");
         r.check("long_run_skips", status["skips"] == 0, status["skips"], "nothing had to be skipped");
         r.info("long_run_gaps", status["gaps"], "packets Windows marked as 'something was lost'");
-        // Listen for gaps: the shifted tone's level in 50 ms pieces should never dip. Pieces where the whole cable
-        // went silent (see cable_silences: not Pitch Shift's gap) are counted on their own.
-        const auto left = left_of(rec);
-        const size_t piece = kRate / 20;
-        const auto silences = cable_silences(left);
-        std::vector<double> levels;
-        json cable_gaps = json::array();
-        for (size_t i = 0; i + piece <= left.size(); i += piece) {
-            const double db = to_db(tone_amplitude(left.data() + i, piece, kRate, target));
-            bool cable_silent = false;
-            for (const auto& [at, length] : silences) cable_silent = cable_silent || (at < i + piece && at + length > i);
-            if (cable_silent) cable_gaps.push_back(json{{"at_s", round3(double(i) / kRate)}, {"level_db", round3(db)}});
-            else levels.push_back(db);
-        }
-        std::vector<double> sorted = levels;
-        std::sort(sorted.begin(), sorted.end());
-        const double median = sorted.empty() ? -200 : sorted[sorted.size() / 2];
-        const double lowest = sorted.empty() ? -200 : sorted.front();
-        r.info("long_run_seconds_recorded", double(left.size()) / kRate);
-        r.info("long_run_cable_silences", cable_gaps,
-               "pieces where nothing at all reached the cable, not even the quiet original (a hiccup of Windows, the "
-               "cable or the recording, not of Pitch Shift)");
-        r.check("long_run_no_dips", !levels.empty() && lowest > median - 3.0, lowest - median,
-                "the shifted tone never dipped more than 3 dB (no audible gaps)");
+        check_no_dips(r, left_of(rec), target);
         const size_t keep = std::min(rec.size(), size_t(kRate) * 2 * 10);
         r.wav("music_long_run_first10s", std::vector<float>(rec.begin(), rec.begin() + std::ptrdiff_t(keep)), 2);
     }
@@ -824,19 +846,7 @@ int e2e_advanced(const Args& args) {
         r.check("long_run_underruns", engine_value(music, "underruns") == under_before_long,
                 engine_value(music, "underruns"), "the shifters were always ready in time");
         r.info("long_run_gaps", status["gaps"], "packets Windows marked as 'something was lost'");
-        const auto left = left_of(rec);
-        const double target = 440.0 * std::pow(2.0, 8.0 / 12);
-        const size_t piece = kRate / 20;
-        std::vector<double> levels;
-        for (size_t i = 0; i + piece <= left.size(); i += piece)
-            levels.push_back(to_db(tone_amplitude(left.data() + i, piece, kRate, target)));
-        std::vector<double> sorted = levels;
-        std::sort(sorted.begin(), sorted.end());
-        const double mid = sorted.empty() ? -200 : sorted[sorted.size() / 2];
-        const double lowest = sorted.empty() ? -200 : sorted.front();
-        r.info("long_run_seconds_recorded", double(left.size()) / kRate);
-        r.check("long_run_no_dips", !levels.empty() && lowest > mid - 3.0, lowest - mid,
-                "the shifted tone never dipped more than 3 dB (no audible gaps)");
+        check_no_dips(r, left_of(rec), 440.0 * std::pow(2.0, 8.0 / 12));
         const size_t keep = std::min(rec.size(), size_t(kRate) * 2 * 10);
         r.wav("advanced_long_run_first10s", std::vector<float>(rec.begin(), rec.begin() + std::ptrdiff_t(keep)), 2);
     }

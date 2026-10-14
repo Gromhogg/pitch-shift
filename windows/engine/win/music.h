@@ -120,10 +120,13 @@ private:
     std::string state_ = "off", error_;
     nlohmann::json apps_ = nlohmann::json::array();
     int quieted_ = 0;
+    int quiet_failures_ = 0;   // apps that could not be made quiet (see QuietKeeper::failures)
+    std::string quiet_error_;  // why, the last time
     std::atomic<uint64_t> clipped_{0}, gaps_{0};
     // How often the speaker stream ran empty (the playing thread came back too late): players already closed, the
     // current one (as of the last look), and the total at the last reset_counts().
     std::atomic<uint64_t> starved_gone_{0}, starved_now_{0}, starved_reset_{0};
+    std::atomic<double> slowest_tick_ms_{0};  // the manager's slowest look (quieting new apps waits for it)
     double output_ms_ = 0;
     uint64_t current_gaps_ = 0;
     std::wstring speaker_;

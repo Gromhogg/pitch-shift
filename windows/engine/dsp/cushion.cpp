@@ -13,6 +13,7 @@ Cushion::Cushion(int channels, size_t start_frames, size_t max_frames)
 
 void Cushion::push(const float* data, size_t frames) {
     if (frames == 0) return;
+    if (ran_dry_.exchange(false)) ++dropouts_;  // sound came back after running dry: that was a gap
     if (queued_frames() + frames > max_frames_) {  // falling behind: skip a bit to catch up
         ++skips_;
         skipped_frames_ += frames;
@@ -26,6 +27,7 @@ void Cushion::pull(float* out, size_t frames) {
     if (flush_.exchange(false)) {
         ring_.clear();
         playing_ = false;
+        ran_dry_ = false;
     }
     const size_t queued = queued_frames();
     if (!playing_) {
@@ -40,7 +42,7 @@ void Cushion::pull(float* out, size_t frames) {
     if (take < frames) {  // ran dry: go quiet and refill the cushion
         std::memset(out + take * ch, 0, (frames - take) * ch * sizeof(float));
         playing_ = false;
-        ++dropouts_;
+        ran_dry_ = true;  // a dropout once sound comes back (see push)
     }
 }
 

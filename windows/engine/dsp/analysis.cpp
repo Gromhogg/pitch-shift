@@ -196,6 +196,17 @@ ToneMeasure measure_tone(const float* x, size_t n, double rate, double expected_
     return m;
 }
 
+double steady_frequency(const float* samples, size_t count, double rate, double expected_hz, double piece_seconds) {
+    const size_t piece = size_t(rate * piece_seconds);
+    if (piece < 256) return 0;
+    std::vector<double> found;
+    for (size_t at = 0; at + piece <= count; at += piece)
+        found.push_back(measure_tone(samples + at, piece, rate, expected_hz).frequency);
+    if (found.empty()) return measure_tone(samples, count, rate, expected_hz).frequency;
+    std::sort(found.begin(), found.end());
+    return found[found.size() / 2];
+}
+
 std::vector<float> take_channel(const std::vector<float>& interleaved, int channels, int which) {
     std::vector<float> out;
     if (channels <= 0 || which < 0 || which >= channels) return out;
