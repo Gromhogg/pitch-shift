@@ -14,6 +14,8 @@ func arg(_ name: String) -> String? {
     guard let i = args.firstIndex(of: name), i + 1 < args.count else { return nil }
     return args[i + 1]
 }
+// --preview STATES: show the window in a state for screenshots, without touching any sound.
+let preview = arg("--preview")
 
 var signalSources: [DispatchSourceSignal] = []
 func onQuitSignals(_ handler: @escaping () -> Void) {

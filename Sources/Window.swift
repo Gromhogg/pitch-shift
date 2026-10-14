@@ -3,10 +3,96 @@
 import AppKit
 import AVFoundation
 
+// The icon's colors: purple to pink.
+enum Theme {
+    static let purple = NSColor(red: 0.45, green: 0.25, blue: 0.95, alpha: 1)
+    static let pink = NSColor(red: 0.95, green: 0.3, blue: 0.6, alpha: 1)
+    static let mid = purple.blended(withFraction: 0.5, of: pink)!
+    static let gradient = NSGradient(starting: purple, ending: pink)!
+}
+
+// An on/off switch in the icon's colors (the standard switch can't be recolored).
+final class GradientSwitch: NSView {
+    var onChange: (Bool) -> Void = { _ in }
+    var isEnabled = true { didSet { needsDisplay = true } }
+    var isOn = false {
+        didSet {
+            guard oldValue != isOn else { return }
+            setAccessibilityValue(isOn ? 1 : 0)
+            slide()
+        }
+    }
+    private var knob: CGFloat = 0  // 0 = off (left), 1 = on (right)
+    private var animation: Timer?
+
+    init() {
+        super.init(frame: NSRect(x: 0, y: 0, width: 38, height: 22))
+        setAccessibilityElement(true)
+        setAccessibilityRole(.checkBox)
+        setAccessibilityValue(0)
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override var intrinsicContentSize: NSSize { NSSize(width: 38, height: 22) }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let alpha: CGFloat = isEnabled ? 1 : 0.4
+        let track = bounds.insetBy(dx: 1, dy: 1)
+        let shape = NSBezierPath(roundedRect: track, xRadius: track.height / 2, yRadius: track.height / 2)
+        NSColor.quaternaryLabelColor.withAlphaComponent(0.25 * alpha + 0.1).setFill()
+        shape.fill()
+        if knob > 0 {
+            NSGraphicsContext.current?.cgContext.setAlpha(knob * alpha)
+            Theme.gradient.draw(in: shape, angle: 0)
+            NSGraphicsContext.current?.cgContext.setAlpha(1)
+        }
+        let size = track.height - 4
+        let circle = NSRect(x: track.minX + 2 + knob * (track.width - size - 4), y: track.minY + 2, width: size, height: size)
+        NSGraphicsContext.saveGraphicsState()
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(0.3)
+        shadow.shadowBlurRadius = 2
+        shadow.shadowOffset = NSSize(width: 0, height: -1)
+        shadow.set()
+        NSColor.white.withAlphaComponent(isEnabled ? 1 : 0.7).setFill()
+        NSBezierPath(ovalIn: circle).fill()
+        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard isEnabled else { return }
+        isOn.toggle()
+        onChange(isOn)
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        guard isEnabled else { return false }
+        isOn.toggle()
+        onChange(isOn)
+        return true
+    }
+
+    // Slides the knob over about 0.15 s.
+    private func slide() {
+        animation?.invalidate()
+        let target: CGFloat = isOn ? 1 : 0
+        guard window != nil else { knob = target; needsDisplay = true; return }
+        animation = Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { [weak self] timer in
+            guard let self else { timer.invalidate(); return }
+            let step: CGFloat = 1.0 / 9
+            self.knob = target > self.knob ? min(target, self.knob + step) : max(target, self.knob - step)
+            self.needsDisplay = true
+            if self.knob == target { timer.invalidate() }
+        }
+    }
+}
+
 // The big number. Shows "+2" / "−1.5" / "0"; click it to type any amount from −24 to 24, Return to apply, Esc to cancel.
 final class AmountField: NSTextField, NSTextFieldDelegate {
     var onCommit: (Float) -> Void = { _ in }
     var value: Float = 0 { didSet { if !editing { stringValue = Self.display(value) } } }
+    var gradientStrength: CGFloat = 1 { didSet { needsDisplay = true } }  // lower = lighter (chosen app not running)
     private var editing = false
     private var cancelled = false
 
@@ -47,12 +133,32 @@ final class AmountField: NSTextField, NSTextFieldDelegate {
         return (min(24, max(-24, number)) * 100).rounded() / 100
     }
 
+    // Draws the number, then paints the icon's gradient over just the text.
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard !editing, let context = NSGraphicsContext.current?.cgContext, let font else { return }
+        let size = (stringValue as NSString).size(withAttributes: [.font: font])
+        let textRect = NSRect(x: bounds.midX - size.width / 2, y: bounds.minY, width: size.width, height: bounds.height)
+        context.saveGState()
+        context.setBlendMode(.sourceAtop)
+        context.setAlpha(gradientStrength)
+        Theme.gradient.draw(in: textRect, angle: 0)
+        context.restoreGState()
+    }
+
     override func becomeFirstResponder() -> Bool {
         editing = true
         cancelled = false
         stringValue = Self.plain(value)
         let ok = super.becomeFirstResponder()
-        if ok { DispatchQueue.main.async { self.currentEditor()?.selectAll(nil) } } else { editing = false }
+        if ok {
+            DispatchQueue.main.async {
+                (self.currentEditor() as? NSTextView)?.insertionPointColor = Theme.mid
+                self.currentEditor()?.selectAll(nil)
+            }
+        } else {
+            editing = false
+        }
         return ok
     }
 
@@ -71,6 +177,7 @@ final class AmountField: NSTextField, NSTextFieldDelegate {
 
     func controlTextDidEndEditing(_ obj: Notification) {
         editing = false
+        needsDisplay = true
         if !cancelled {
             if let number = Self.parse(stringValue) {
                 value = number
@@ -90,7 +197,7 @@ final class BackgroundView: NSView {
 
 // One card: title + switch, big number, − 0 +, a picker, and any extra rows.
 final class ShiftCard: NSBox {
-    let toggle = NSSwitch()
+    let toggle = GradientSwitch()
     let amount = AmountField()
     let minus = NSButton()
     let zero = NSButton(title: "0", target: nil, action: nil)
@@ -112,15 +219,16 @@ final class ShiftCard: NSBox {
 
         let titleLabel = NSTextField(labelWithString: title)
         titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-        toggle.controlSize = .small
-        toggle.target = self
-        toggle.action = #selector(toggled)
+        toggle.onChange = { [weak self] in self?.onToggle($0) }
         let header = NSStackView(views: [titleLabel, NSView(), toggle])
         header.distribution = .fill
 
         amount.onCommit = { [weak self] in self?.onAmount($0) }
-        minus.image = NSImage(systemSymbolName: "minus", accessibilityDescription: "Lower")
-        plus.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "Higher")
+        // − 0 + in the icon's middle color (plain tinting doesn't apply to these buttons).
+        let tint = NSImage.SymbolConfiguration(paletteColors: [Theme.mid])
+        minus.image = NSImage(systemSymbolName: "minus", accessibilityDescription: "Lower")?.withSymbolConfiguration(tint)
+        plus.image = NSImage(systemSymbolName: "plus", accessibilityDescription: "Higher")?.withSymbolConfiguration(tint)
+        zero.attributedTitle = NSAttributedString(string: "0", attributes: [.foregroundColor: Theme.mid, .font: NSFont.systemFont(ofSize: NSFont.systemFontSize, weight: .medium)])
         for (button, action) in [(minus, #selector(lower)), (zero, #selector(reset)), (plus, #selector(higher))] {
             button.bezelStyle = .rounded
             button.target = self
@@ -158,18 +266,17 @@ final class ShiftCard: NSBox {
     required init?(coder: NSCoder) { fatalError() }
 
     // Updates the number and buttons; `active` dims everything when the card is switched off.
-    func show(on: Bool, value: Float, active: Bool, numberColor: NSColor = .labelColor) {
-        toggle.state = on ? .on : .off
+    func show(on: Bool, value: Float, active: Bool, waiting: Bool = false) {
+        toggle.isOn = on
         amount.value = value
         amount.isEnabled = active
-        amount.textColor = numberColor
+        amount.gradientStrength = waiting ? 0.45 : 1
         amount.alphaValue = active ? 1 : 0.35
         minus.isEnabled = active && value > -24
         plus.isEnabled = active && value < 24
         zero.isEnabled = active && value != 0
     }
 
-    @objc private func toggled() { onToggle(toggle.state == .on) }
     @objc private func lower() { onAmount(max(-24, ((amount.value - 1) * 100).rounded() / 100)) }
     @objc private func higher() { onAmount(min(24, ((amount.value + 1) * 100).rounded() / 100)) }
     @objc private func reset() { onAmount(0) }
@@ -209,6 +316,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         test.onChange = { [weak self] in self?.refresh() }
         refresh()
         showWindow()
+        if preview != nil { showPreview(); return }
         // Show the window first: the first time, macOS asks for permission to grab sound and waits for an answer.
         DispatchQueue.main.async { [self] in
             if defaults.object(forKey: Keys.hearOn) as? Bool ?? true { hear.start() }
@@ -286,8 +394,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         style.target = self
         style.action = #selector(stylePicked)
+        style.selectedSegmentBezelColor = Theme.mid
         style.widthAnchor.constraint(equalToConstant: 152).isActive = true
         testButton.bezelStyle = .rounded
+        testButton.bezelColor = Theme.purple
         testButton.target = self
         testButton.action = #selector(testClicked)
         testButton.widthAnchor.constraint(equalToConstant: 72).isActive = true
@@ -475,10 +585,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     // MARK: Showing state
 
+    // For screenshots (--preview hear-on,voice-on,waiting,typing,recording,playing,light): shows a state, no sound.
+    func showPreview() {
+        guard let preview else { return }
+        if preview.contains("light") { window.appearance = NSAppearance(named: .aqua) }
+        refresh()
+        if preview.contains("typing") {
+            window.makeFirstResponder(hearCard.amount)
+            DispatchQueue.main.async { self.hearCard.amount.currentEditor()?.string = "2.5" }
+        }
+    }
+
     func refresh() {
         guard hearCard != nil else { return }
-        let waiting = hear.state == .waiting
-        hearCard.show(on: hear.isOn, value: hear.halfSteps, active: hear.isOn, numberColor: waiting ? .secondaryLabelColor : .labelColor)
+        let hearOn = preview.map { $0.contains("hear-on") } ?? hear.isOn
+        let voiceOn = preview.map { $0.contains("voice-on") } ?? voice.isOn
+        let waiting = preview.map { $0.contains("waiting") } ?? (hear.state == .waiting)
+        hearCard.show(on: hearOn, value: hear.halfSteps, active: hearOn, waiting: waiting)
         switch hear.state {
         case .playing(let speakers): hearCard.amount.toolTip = "Playing to \(speakers)"
         case .problem(let message): hearCard.amount.toolTip = message
@@ -487,22 +610,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let installed = Mics.driverInstalled
         let hasMic = !Mics.list().isEmpty
-        voiceCard.show(on: voice.isOn, value: voice.halfSteps, active: voice.isOn && installed && hasMic)
+        voiceCard.show(on: voiceOn, value: voice.halfSteps, active: voiceOn && installed && hasMic)
         voiceCard.toggle.isEnabled = installed && hasMic
         voiceCard.picker.isEnabled = installed && hasMic
         style.selectedSegment = voice.natural ? 0 : 1
-        style.isEnabled = voice.isOn && installed
+        style.isEnabled = voiceOn && installed
         if case .problem(let message) = voice.state { voiceCard.amount.toolTip = message } else { voiceCard.amount.toolTip = nil }
 
         dot.isHidden = !installed
         micName.isHidden = !installed
         installButton.isHidden = installed
-        dot.textColor = voice.isOn && voice.listening ? .systemGreen : .tertiaryLabelColor
+        dot.textColor = voiceOn && voice.listening ? .systemGreen : .tertiaryLabelColor
 
-        switch test.phase {
+        var phase = test.phase
+        if let preview, preview.contains("recording") { phase = .recording(3) }
+        if let preview, preview.contains("playing") { phase = .playing }
+        switch phase {
         case .idle:
             testButton.attributedTitle = NSAttributedString(string: "Test")
-            testButton.isEnabled = voice.isOn && installed && hasMic
+            testButton.isEnabled = voiceOn && installed && hasMic
         case .recording(let left):
             testButton.attributedTitle = NSAttributedString(string: "⏺ \(left)", attributes: [.foregroundColor: NSColor.systemRed])
             testButton.isEnabled = true
