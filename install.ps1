@@ -90,7 +90,10 @@ function Install-PitchShift {
     $setupArgs = @('/SILENT', '/SUPPRESSMSGBOXES', '/NORESTART')
     if ($env:PITCHSHIFT_SETUP_ARGS) { $setupArgs += $env:PITCHSHIFT_SETUP_ARGS -split ' ' }  # GitHub checks only
     try {
-        $p = Start-Process -FilePath $setup -ArgumentList $setupArgs -Wait -PassThru
+        # Not "-Wait": that would also wait for Pitch Shift itself, which Setup opens at the end.
+        $p = Start-Process -FilePath $setup -ArgumentList $setupArgs -PassThru
+        $null = $p.Handle  # keeps the exit code readable
+        $p.WaitForExit()
     } catch {
         Write-Host "Setup didn't start. ($($_.Exception.Message))" -ForegroundColor Red
         return

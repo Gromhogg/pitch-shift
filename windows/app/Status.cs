@@ -171,10 +171,10 @@ public static class PickerText
         _ => "",
     };
 
-    // The Test button: "Test", then a red "⏺ 5…1" while recording, then "■ Stop" while playing back.
+    // The Test button: "Test", then a red "● 5…1" while recording, then "■ Stop" while playing back.
     public static string TestTitle(string testState, int secondsLeft) => testState switch
     {
-        "recording" => $"⏺ {Math.Max(1, secondsLeft)}",
+        "recording" => $"● {Math.Max(1, secondsLeft)}",
         "playing" => "■ Stop",
         _ => "Test",
     };

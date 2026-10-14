@@ -50,8 +50,8 @@ public class PickerTests
     public void TestButtonTitle()
     {
         Assert.Equal("Test", PickerText.TestTitle("idle", 0));
-        Assert.Equal("\u23FA 5", PickerText.TestTitle("recording", 5));
-        Assert.Equal("\u23FA 1", PickerText.TestTitle("recording", 0));
+        Assert.Equal("\u25CF 5", PickerText.TestTitle("recording", 5));
+        Assert.Equal("\u25CF 1", PickerText.TestTitle("recording", 0));
         Assert.Equal("\u25A0 Stop", PickerText.TestTitle("playing", 2));
     }
 }

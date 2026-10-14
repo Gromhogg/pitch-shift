@@ -164,7 +164,7 @@ sealed class Smoke(string appExe, string toolExe, string outDir, string sourceNa
             Find(window, "StyleCartoon")?.Patterns.SelectionItem.Pattern.Select();
             Check("Cartoon reaches the engine", WaitFor(() => Status()?["voice"]?["natural"]?.GetValue<bool>() == false ? "" : null, TimeSpan.FromSeconds(3)) is not null);
             Find(window, "TestButton")?.AsButton().Invoke();
-            var recording = WaitFor(() => Find(window, "TestButton")?.Name is string n && n.StartsWith("⏺") ? n : null, TimeSpan.FromSeconds(3));
+            var recording = WaitFor(() => Find(window, "TestButton")?.Name is string n && n.StartsWith("●") ? n : null, TimeSpan.FromSeconds(3));
             Check("Test shows the red countdown", recording is not null, Find(window, "TestButton")?.Name);
             Shot(window, "voice-test");
             Find(window, "TestButton")?.AsButton().Invoke();
@@ -468,6 +468,11 @@ static class Privacy
                 try { p.Kill(); } catch (Exception e) { Console.WriteLine(e.Message); }
             }
         Thread.Sleep(2000);
+        // Clicking through it can leave the Start menu open, which would catch typed keys. Close it.
+        Keyboard.Type(VirtualKeyShort.ESCAPE);
+        Thread.Sleep(500);
+        Keyboard.Type(VirtualKeyShort.ESCAPE);
+        Thread.Sleep(500);
         if (picture is not null) Pictures.Desktop(picture);
         Console.WriteLine($"Privacy screen: clicked {clicked} button(s)");
         return 0;
