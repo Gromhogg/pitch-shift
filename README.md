@@ -18,7 +18,7 @@ Change the pitch of **what you hear** (any app, like Spotify, Apple Music or You
 curl -fsSL https://raw.githubusercontent.com/Gromhogg/pitch-shift/main/install.sh | bash
 ```
 
-Run either one again any time to update. Needs a Mac with Apple silicon (M1 or newer) and macOS 14.4 or newer.
+Run either one again any time to update. Works on Macs with Apple silicon or Intel and macOS 14.4 or newer. Nothing else to install: Pitch Shift Mic comes with it.
 
 ## Install on Windows (beta)
 
@@ -74,14 +74,14 @@ brew install rubberband
 ./build.sh
 ```
 
-`build.sh` builds `Pitch Shift.app` (with Pitch Shift Mic inside), puts it in Applications and puts a shortcut on your Desktop. `packaging/make-pkg.sh` makes the installer, and `./release.sh 1.2.3` posts a new version.
+`build.sh` builds `Pitch Shift.app` for Apple silicon and Intel (with Pitch Shift Mic inside), puts it in Applications and puts a shortcut on your Desktop. The first time, it downloads the source of Rubber Band and libsamplerate to build the Intel part (`libs/build.sh`). `packaging/make-pkg.sh` makes the installer, and `./release.sh 1.2.3` posts a new version.
 
 ## How it works
 
 - **What you hear:** a macOS audio tap grabs the app's sound and mutes the original. [Rubber Band](https://breakfastquay.com/rubberband/) changes the pitch, and the result plays on your current speakers or headphones. It never changes your Mac's sound settings.
 - **Advanced processing:** going up, the bass is shifted an octave less so it stays bass; going down, the song's very top is kept; and a slow tone control keeps the song's overall balance like the original's. Details: [notes/advanced-processing-research.md](notes/advanced-processing-research.md).
-- **Your voice:** your mic goes through Rubber Band's low-delay live shifter into "Pitch Shift Mic", a virtual mic built from [BlackHole](https://github.com/ExistentialAudio/BlackHole). It only runs while an app is listening to Pitch Shift Mic.
+- **Your voice:** your mic goes through Rubber Band's low-delay live shifter into "Pitch Shift Mic", a virtual mic built from [BlackHole](https://github.com/ExistentialAudio/BlackHole) that comes with Pitch Shift (you don't need to install BlackHole). It only runs while an app is listening to Pitch Shift Mic.
 
 ## Credits and license
 
-GPL-3.0-or-later. See [LICENSE](LICENSE). Pitch Shift uses Rubber Band by Breakfast Quay (GPL), and on Mac, BlackHole by Existential Audio (GPL-3) for Pitch Shift Mic.
+GPL-3.0-or-later. See [LICENSE](LICENSE). Pitch Shift uses Rubber Band by Breakfast Quay (GPL). On Mac it also uses libsamplerate by Erik de Castro Lopo (BSD-2-Clause), and BlackHole by Existential Audio (GPL-3) for Pitch Shift Mic.

@@ -3,10 +3,8 @@
 # with a shortcut on the Desktop. Use ./build.sh --no-install to only build.
 set -e
 cd "${0:A:h}"
-if [[ ! -f /opt/homebrew/lib/librubberband.a ]]; then
-  echo "Needs Rubber Band first: brew install rubberband"
-  exit 1
-fi
+# Rubber Band and libsamplerate for Apple silicon and Intel (needs brew install rubberband).
+./libs/build.sh
 app=build/"Pitch Shift.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/Contents/PlugIns"
@@ -14,25 +12,29 @@ mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$app/Contents/PlugIns"
 ./driver/build.sh
 ditto build/PitchShiftMic.driver "$app/Contents/PlugIns/PitchShiftMic.driver"
 
-# The C and C++ parts: the sound ring and the Advanced processing engine (Sources/Advanced).
+# The app is built twice, for Apple silicon (arm64) and Intel (x86_64), both for macOS 14.4 or newer,
+# and joined into one file.
 rm -rf build/obj
-mkdir -p build/obj
-clang -O2 -c Sources/AudioRing.c -o build/obj/AudioRing.o
-for f in Sources/Advanced/*.cpp; do
-  clang++ -O2 -std=c++17 -I/opt/homebrew/include -c "$f" -o "build/obj/${f:t:r}.o"
+for arch in arm64 x86_64; do
+  obj=build/obj/$arch
+  mkdir -p $obj
+  # The C and C++ parts: the sound ring and the Advanced processing engine (Sources/Advanced).
+  clang -arch $arch -mmacosx-version-min=14.4 -O2 -c Sources/AudioRing.c -o $obj/AudioRing.o
+  for f in Sources/Advanced/*.cpp; do
+    clang++ -arch $arch -mmacosx-version-min=14.4 -O2 -std=c++17 -Ibuild/libs/include -c "$f" -o "$obj/${f:t:r}.o"
+  done
+  # Rubber Band is built into the app, so the app works on its own.
+  swiftc -target $arch-apple-macos14.4 -O -swift-version 5 Sources/*.swift $obj/*.o -o $obj/PitchShift \
+    -import-objc-header Sources/Bridging.h -Ibuild/libs/include \
+    -Xlinker build/libs/lib/librubberband.a -Xlinker build/libs/lib/libsamplerate.a -lc++ -framework Accelerate
 done
-
-# Rubber Band (brew install rubberband) is built into the app, so the app works on its own.
-swiftc -O -swift-version 5 Sources/*.swift build/obj/*.o -o "$app/Contents/MacOS/PitchShift" \
-  -import-objc-header Sources/Bridging.h -I/opt/homebrew/include \
-  -Xlinker /opt/homebrew/lib/librubberband.a -Xlinker /opt/homebrew/opt/libsamplerate/lib/libsamplerate.a \
-  -lc++ -framework Accelerate
+lipo -create build/obj/arm64/PitchShift build/obj/x86_64/PitchShift -output "$app/Contents/MacOS/PitchShift"
 
 if [[ ! -f AppIcon.icns ]]; then
   swift make-icon.swift build/AppIcon.iconset && iconutil -c icns build/AppIcon.iconset -o AppIcon.icns
 fi
 cp Info.plist "$app/Contents/Info.plist"
-cp AppIcon.icns LICENSE packaging/install-driver.sh "$app/Contents/Resources/"
+cp AppIcon.icns LICENSE packaging/install-driver.sh build/libs/lib/libsamplerate-COPYING "$app/Contents/Resources/"
 codesign --force --sign - "$app"
 codesign --verify --deep --strict "$app"
 echo "Built $app"
