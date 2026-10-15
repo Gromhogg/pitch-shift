@@ -65,13 +65,18 @@ func arg(_ name: String) -> String? {
     guard let i = args.firstIndex(of: name), i + 1 < args.count else { return nil }
     return args[i + 1]
 }
-// --preview STATES [--size 800x400] [--cartoon-amount 0.5] [--tone-amount -0.4]: show the window in a state for
-// screenshots, without touching any sound or settings, and without switching apps (states: hear-on, voice-on, waiting,
-// typing, recording, playing, listening, hover, menu, roll, resize, no-driver, advanced-alert, sounds, rename, volume,
-// drop, light, tone, slow; --cartoon-amount sets the voice style slider; sounds opens the Soundboard with example
-// names, rename shows the first name being changed, volume the first sound's volume slider and drop files being
-// dragged over it; "tone" shows Advanced processing on, and --tone-amount sets the Bass ↔ Treble slider; slow turns
-// on "Deeper when slow").
+// --preview STATES [--size 800x400] [--cartoon-amount 0.5] [--tone-amount -0.4] [--strength 0.6]: show the window in
+// a state for screenshots, without touching any sound or settings, and without switching apps (states: hear-on,
+// voice-on, waiting, typing, recording, playing, listening, hover, menu, roll, resize, no-driver, advanced-alert,
+// sounds, rename, volume, drop, light, tone, slow, changer, changer-man, changer-realistic, changer-loading,
+// changer-fallback, changer-alert, changer-intel; --cartoon-amount sets the voice style slider; sounds opens the
+// Soundboard with example names, rename shows the first name being changed, volume the first sound's volume slider
+// and drop files being dragged over it; "tone" shows Advanced processing on, and --tone-amount sets the
+// Bass ↔ Treble slider; slow turns on "Deeper when slow"; changer turns on the Voice changer (and Your voice) with
+// Woman, changer-man with Man, --strength sets its Strength slider, changer-realistic/-loading/-fallback show
+// Realistic on and working/getting ready/standing in with Natural, changer-alert the alert for turning Realistic on,
+// changer-intel the card as on an Intel Mac (no Realistic); resize drags the window's corner through the three
+// layouts).
 let preview = arg("--preview")
 
 var signalSources: [DispatchSourceSignal] = []

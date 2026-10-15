@@ -1,6 +1,7 @@
-// The window: two cards ("What you hear" and "Your voice"), each with an on/off switch, a big number you can
-// click and type into, − 0 + buttons, and a picker. No extra text. The window can be resized: the cards sit side
-// by side (or one above the other in a tall, narrow window) and everything grows with the window.
+// The window: three cards ("What you hear", "Your voice" and "Voice changer"), each with an on/off switch and a
+// picker; the first two also have a big number you can click and type into, and − 0 + buttons. No extra text. The
+// window can be resized: the cards sit in a row, in two columns, or one above the other, and everything grows with
+// the window.
 import AppKit
 import AVFoundation
 import CoreAudio
@@ -705,7 +706,8 @@ final class CardRow: NSStackView {
     var onScale: (CGFloat) -> Void = { _ in }
 }
 
-// One card: title + switch, big number, − 0 +, a picker, and any extra rows below (see addRow).
+// One card: title + switch, big number, − 0 +, a picker, and any extra rows below (see addRow). A card made with
+// `showsAmount: false` (the Voice changer) has no big number and no − 0 +.
 final class ShiftCard: NSView {
     static let baseWidth: CGFloat = 266  // card width in the smallest window
     let toggle = GradientSwitch()
@@ -714,9 +716,17 @@ final class ShiftCard: NSView {
     let zero = NSButton(title: "0", target: nil, action: nil)
     let plus = NSButton()
     let picker = NSPopUpButton(frame: .zero, pullsDown: false)
+    let showsAmount: Bool
     var onToggle: (Bool) -> Void = { _ in }
     var onAmount: (Float) -> Void = { _ in }
-    var keyViews: [NSView] { [toggle, amount, minus, zero, plus, picker] }
+    var keyViews: [NSView] { showsAmount ? [toggle, amount, minus, zero, plus, picker] : [toggle, picker] }
+    // A tooltip for − 0 + in place of their own (for example while the Voice changer sets the pitch).
+    var buttonsTip: String? {
+        didSet {
+            guard oldValue != buttonsTip else { return }
+            for (button, tip) in zip([minus, zero, plus], ["Down 1", "Back to 0", "Up 1"]) { button.toolTip = buttonsTip ?? tip }
+        }
+    }
     private(set) var scale: CGFloat = 0
     // The purple-pink edge shown while the card is on.
     @objc dynamic var glow: CGFloat = 0 { didSet { needsDisplay = true } }
@@ -731,11 +741,13 @@ final class ShiftCard: NSView {
     private var heights: [Int: CGFloat] = [:]  // height needed at each scale
     private var column: CGFloat = 232          // width of the rows
     private var active: Bool?
+    private var numberActive: Bool?
 
-    init(title text: String, extraRows: [NSView] = []) {
+    init(title text: String, extraRows: [NSView] = [], showsAmount: Bool = true) {
         title = NSTextField(labelWithString: text)
         header = NSStackView(views: [title, toggle])
         buttons = NSStackView(views: [minus, zero, plus])
+        self.showsAmount = showsAmount
         super.init(frame: NSRect(x: 0, y: 0, width: Self.baseWidth, height: 260))
         wantsLayer = true
         setAccessibilityElement(true)
@@ -760,8 +772,8 @@ final class ShiftCard: NSView {
 
         stack.orientation = .vertical
         stack.alignment = .centerX
-        for view in [header, amount, buttons, picker] { stack.addArrangedSubview(view) }
-        for view in [header, amount, picker] { widen(view) }
+        for view in showsAmount ? [header, amount, buttons, picker] : [header, picker] { stack.addArrangedSubview(view) }
+        for view in showsAmount ? [header, amount, picker] : [header, picker] { widen(view) }
         addSubview(stack)
         stack.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
@@ -799,13 +811,15 @@ final class ShiftCard: NSView {
     }
 
     // A row with a label on the left and a small switch on the right, for settings like "Advanced processing".
-    // The label dims while the switch can't be used.
-    static func switchRow(_ text: String, _ toggle: GradientSwitch) -> CardRow {
+    // The label dims while the switch can't be used. `notes`: small views right after the label (shown when needed).
+    static func switchRow(_ text: String, _ toggle: GradientSwitch, notes: [NSView] = []) -> CardRow {
         let label = NSTextField(labelWithString: text)
         label.textColor = toggle.isEnabled ? .secondaryLabelColor : .tertiaryLabelColor
         toggle.onEnabled = { label.textColor = $0 ? .secondaryLabelColor : .tertiaryLabelColor }
         toggle.setAccessibilityLabel(text)
-        let row = CardRow(views: [label, toggle])
+        let left = NSStackView(views: [label] + notes)
+        left.spacing = 5
+        let row = CardRow(views: [notes.isEmpty ? label : left, toggle])
         row.distribution = .equalSpacing
         row.onScale = { scale in
             label.font = .systemFont(ofSize: 12 + (scale - 1) * 2.5)
@@ -840,7 +854,7 @@ final class ShiftCard: NSView {
             picker.useSize(size)
             stack.edgeInsets = NSEdgeInsets(top: (14 * s).rounded(), left: 0, bottom: (16 * s).rounded(), right: 0)
             stack.spacing = (12 * s).rounded()
-            stack.setCustomSpacing((8 * s).rounded(), after: amount)
+            if showsAmount { stack.setCustomSpacing((8 * s).rounded(), after: amount) }
             tightAfter.forEach { stack.setCustomSpacing((6 * s).rounded(), after: $0) }
             rows.forEach { ($0 as? CardRow)?.onScale(s) }
             needsDisplay = true
@@ -855,8 +869,10 @@ final class ShiftCard: NSView {
     }
 
     // Extra height first makes the number bigger (while the widest number, "−23.75", still fits), then the rest
-    // goes above the number and below the − 0 + buttons, so a tall card stays balanced.
+    // goes above the number and below the − 0 + buttons, so a tall card stays balanced. A card without the number
+    // keeps its rows at the top.
     func spread(_ extra: CGFloat) {
+        guard showsAmount else { return }
         let base = 48 * scale
         amount.setFontSize(base)
         let baseHeight = amount.intrinsicContentSize.height
@@ -883,21 +899,32 @@ final class ShiftCard: NSView {
     func forgetHeights() { heights = [:] }
 
     // Updates the number and buttons; `active` dims everything when the card is off, `waiting` fades just the
-    // number (on, but the chosen app isn't making sound).
-    func show(on: Bool, value: Float, active: Bool, waiting: Bool = false) {
-        toggle.isOn = on
+    // number (on, but the chosen app isn't making sound), `amountActive: false` dims just the number and − 0 +
+    // (the Voice changer sets the pitch instead).
+    func show(on: Bool, value: Float, active: Bool, waiting: Bool = false, amountActive: Bool? = nil) {
+        let faded = self.active != nil && active != self.active  // everything crossfades
+        show(on: on, active: active)
         amount.value = value
-        if active != self.active {
-            if self.active != nil { ([amount, buttons, picker] + rows).forEach { Theme.crossfade($0, 0.25) } }
-            self.active = active
-            let target: CGFloat = active ? 1 : 0
-            if isShowing { Theme.animate(0.25) { animator().glow = target } } else { glow = target }
+        let numberActive = amountActive ?? active
+        if numberActive != self.numberActive {
+            if self.numberActive != nil && !faded { Theme.crossfade(buttons, 0.25) }
+            self.numberActive = numberActive
         }
-        amount.isEnabled = active
-        amount.strength = active ? (waiting ? 0.5 : 1) : 0.4
-        minus.isEnabled = active && value > -24
-        plus.isEnabled = active && value < 24
-        zero.isEnabled = active && value != 0
+        amount.isEnabled = numberActive
+        amount.strength = numberActive ? (waiting ? 0.5 : 1) : 0.4
+        minus.isEnabled = numberActive && value > -24
+        plus.isEnabled = numberActive && value < 24
+        zero.isEnabled = numberActive && value != 0
+    }
+
+    // The switch and the purple-pink edge, for a card without the number (`active` dims it when it's off).
+    func show(on: Bool, active: Bool) {
+        toggle.isOn = on
+        guard active != self.active else { return }
+        if self.active != nil { ((showsAmount ? [amount, buttons, picker] : [picker]) + rows).forEach { Theme.crossfade($0, 0.25) } }
+        self.active = active
+        let target: CGFloat = active ? 1 : 0
+        if isShowing { Theme.animate(0.25) { animator().glow = target } } else { glow = target }
     }
 
     // The card: rounded, a soft shadow, and the purple-pink edge while on.
@@ -969,6 +996,10 @@ enum Keys {
     static let voiceCartoon = "voiceCartoon"  // voice style, 0 (Natural) to 1 (Cartoon)
     static let voiceNatural = "voiceNatural"  // the old Natural/Cartoon switch (version 2.0), read once to carry over
     static let voiceSlowDeeper = "voiceSlowDeeper"  // "Deeper when slow"
+    // The Voice changer: on/off, the voice's id ("woman", "man", or an added voice), Strength 0 (light) ... 1 (full),
+    // "natural" or "realistic", and "Don't show again" ticked on the Realistic alert.
+    static let changerOn = "changerOn", changerVoice = "changerVoice", changerStrength = "changerStrength"
+    static let changerQuality = "changerQuality", hideChangerAlert = "hideChangerAlert"
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
@@ -1014,9 +1045,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         return tones
     }
 
+    // The Voice changer as saved (before the voice starts). Pictures show Woman (Man with changer-man), Strength 1 (or
+    // --strength), Realistic with changer-realistic/-loading/-fallback, and save nothing.
+    func restoreChanger() {
+        if let preview {
+            voice.changer.on = preview.contains("changer")
+            voice.changer.voiceID = preview.contains("changer-man") ? "man" : "woman"
+            voice.changer.strength = arg("--strength").flatMap(Float.init).map { max(0, min(1, $0)) } ?? 1
+            voice.changer.realistic = realisticOffered
+                && ["changer-realistic", "changer-loading", "changer-fallback"].contains { preview.contains($0) }
+            return
+        }
+        voice.changer.on = defaults.bool(forKey: Keys.changerOn)
+        // A voice that was removed: Woman is used, and the saved choice is kept.
+        let saved = defaults.string(forKey: Keys.changerVoice) ?? "woman"
+        voice.changer.voiceID = VoiceLibrary.shared.voice(saved)?.id ?? "woman"
+        let strength = (defaults.object(forKey: Keys.changerStrength) as? NSNumber)?.floatValue ?? 1
+        voice.changer.strength = strength.isFinite ? max(0, min(1, strength)) : 1
+        voice.changer.realistic = realisticOffered && defaults.string(forKey: Keys.changerQuality) == "realistic"
+    }
+
+    // Realistic voices need Apple silicon (the Intel half of the app has no AI). Pictures: changer-intel hides it.
+    var realisticOffered: Bool {
+        #if arch(arm64)
+        return preview?.contains("changer-intel") != true
+        #else
+        return false
+        #endif
+    }
+
     var window: NSWindow!
     var hearCard: ShiftCard!
     var voiceCard: ShiftCard!
+    var changerCard: ShiftCard!
+    // The Voice changer's Strength (0 = light, 1 = full) and its "Realistic" switch (the AI voice, Apple silicon).
+    let strength = GradientSlider(left: "Light", right: "Full", name: "Strength") { value in
+        value <= 0 ? "Light" : value >= 1 ? "Full" : "\(Int((value * 100).rounded())) percent"
+    }
+    let realisticSwitch = GradientSwitch()
+    let realisticLoading = NSProgressIndicator()  // while the realistic voice is being prepared
+    let realisticWarning = NSImageView()          // it fell behind, or can't run (the tooltip says why)
+    var realisticRow: CardRow!
     let advancedSwitch = GradientSwitch()
     let style = GradientSlider(left: "Natural", right: "Cartoon", name: "Voice style") { value in
         value <= 0 ? "Natural" : value >= 1 ? "Cartoon" : "\(Int((value * 100).rounded())) percent Cartoon"
@@ -1047,6 +1116,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             NSApp.applicationIconImage = icon
         }
         buildMenu()
+        restoreChanger()
         buildWindow()
         // The tone slider shows the setting of the speakers or headphones playing now, and follows a change.
         outputListener = Listener(system, kAudioHardwarePropertyDefaultOutputDevice) { [weak self] in self?.outputMoved() }
@@ -1225,14 +1295,45 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             self?.refresh()
         }
 
+        // The Voice changer: a voice (Woman, Man, then added voices), how strong, and Natural or Realistic.
+        strength.onChange = { [weak self] value in self?.strengthPicked(value) }
+        let strengthRow = CardRow(views: [strength])
+        strengthRow.onScale = { [unowned self] scale in
+            strength.scale = scale
+            strength.rowHeight = Theme.controlSize(scale) == .large ? 22 : 19  // like the Realistic switch
+        }
+        realisticSwitch.onChange = { [weak self] on in self?.realisticPicked(on) }
+        realisticLoading.style = .spinning
+        realisticLoading.controlSize = .small
+        realisticLoading.isDisplayedWhenStopped = false
+        realisticLoading.isHidden = true
+        realisticLoading.setAccessibilityLabel("Getting the realistic voice ready")
+        realisticWarning.isHidden = true
+        realisticRow = ShiftCard.switchRow("Realistic", realisticSwitch, notes: [realisticLoading, realisticWarning])
+        let sizeRow = realisticRow.onScale  // the label and switch sizes (switchRow)
+        realisticRow.onScale = { [unowned self] scale in
+            sizeRow(scale)
+            let points = 11 + (scale - 1) * 2.5
+            realisticWarning.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Natural for now")?
+                .withSymbolConfiguration(.init(pointSize: points, weight: .regular).applying(.init(paletteColors: [.secondaryLabelColor])))
+        }
+        realisticRow.isHidden = !realisticOffered
+        changerCard = ShiftCard(title: "Voice changer", extraRows: [strengthRow, realisticRow], showsAmount: false)
+        changerCard.picker.menu?.delegate = self
+        changerCard.picker.target = self
+        changerCard.picker.action = #selector(changerVoicePicked)
+        changerCard.picker.setAccessibilityLabel("Voice")
+        changerCard.onToggle = { [weak self] on in self?.setChanger(on) }
+
         let background = BackgroundView()
         background.wantsLayer = true
         background.addSubview(hearCard)
         background.addSubview(voiceCard)
+        background.addSubview(changerCard)
 
-        // Tab goes through one card, then the other.
+        // Tab goes through one card, then the next.
         let order = hearCard.keyViews + [advancedSwitch, tone] + voiceCard.keyViews
-            + [style, testButton, slowSwitch, installButton, soundsButton]
+            + [style, testButton, slowSwitch, installButton, soundsButton] + changerCard.keyViews + [strength, realisticSwitch]
         background.nextKeyView = order[0]
         for (view, next) in zip(order, order.dropFirst() + [order[0]]) { view.nextKeyView = next }
 
@@ -1244,67 +1345,96 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         window.autorecalculatesKeyViewLoop = false
         window.contentView = background
         showDriverState()
-        window.setContentSize(minSide)
+        window.setContentSize(minimums[.split] ?? NSSize(width: 588, height: 575))
         window.center()
         if let size = arg("--size")?.split(separator: "x").compactMap({ Double($0) }), size.count == 2 {
-            window.setContentSize(allowed(NSSize(width: size[0], height: size[1]), narrow: size[0] < minSide.width))
+            window.setContentSize(allowed(NSSize(width: size[0], height: size[1]), from: nil))
             window.center()
         } else if preview == nil {
             window.setFrameAutosaveName("Pitch Shift")  // remembers size and place (not for screenshots)
-            let size = background.bounds.size
-            window.setContentSize(allowed(size, narrow: size.width < minSide.width))
+            window.setContentSize(allowed(background.bounds.size, from: nil))  // an old 588×369 window opens as 588×575
         }
         window.delegate = self
         arrange()
         rebuildHearMenu()
         rebuildMicMenu()
+        rebuildChangerMenu()
     }
 
     // MARK: Layout
 
+    // How the three cards sit: in a row; in two columns (What you hear on the left, Your voice above Voice changer on
+    // the right); or all in one column.
+    enum Layout: CaseIterable { case row, split, stack }
+
     private let margin: CGFloat = 20, gap: CGFloat = 16, maxScale: CGFloat = 1.8
-    private var minSide = NSSize.zero     // smallest window with the cards side by side
-    private var minStacked = NSSize.zero  // smallest window with one card above the other
-    private var stacked = false
+    private var layout = Layout.split
+    private var minimums: [Layout: NSSize] = [:]  // the smallest window for each layout (no stack if it can't fit the screen)
+    private var cards: [ShiftCard] { [hearCard, voiceCard, changerCard] }
 
     // Works out the smallest window sizes (call again when a row is shown or hidden).
     private func measure() {
-        hearCard.forgetHeights()
-        voiceCard.forgetHeights()
-        let hearHeight = hearCard.neededHeight(at: 1), voiceHeight = voiceCard.neededHeight(at: 1)
-        minSide = NSSize(width: 2 * ShiftCard.baseWidth + gap + 2 * margin, height: max(hearHeight, voiceHeight) + 2 * margin)
-        minStacked = NSSize(width: ShiftCard.baseWidth + 2 * margin, height: hearHeight + voiceHeight + gap + 2 * margin)
-        window.contentMinSize = NSSize(width: minStacked.width, height: minSide.height)
-        window.contentMaxSize = NSSize(width: 1000, height: 640)
+        cards.forEach { $0.forgetHeights() }
+        let width = ShiftCard.baseWidth
+        var sizes: [Layout: NSSize] = [:]
+        for layout in Layout.allCases {
+            let columns: CGFloat = layout == .row ? 3 : layout == .split ? 2 : 1
+            sizes[layout] = NSSize(width: columns * width + (columns - 1) * gap + 2 * margin, height: neededHeight(layout, at: 1) + 2 * margin)
+        }
+        let screen = (window.screen ?? NSScreen.main).map { window.contentRect(forFrameRect: $0.visibleFrame).size }
+            ?? NSSize(width: 1300, height: 1000)
+        let biggest = NSSize(width: min(1300, screen.width), height: min(max(640, sizes[.stack]!.height + 96), screen.height))
+        if sizes[.stack]!.height > biggest.height { sizes[.stack] = nil }  // a short screen: two or three columns only
+        minimums = sizes
+        window.contentMinSize = NSSize(width: sizes.values.map(\.width).min()!, height: sizes.values.map(\.height).min()!)
+        window.contentMaxSize = biggest
     }
 
-    // A window can be small and wide (cards side by side) or narrow and tall (one above the other), not both.
-    private func allowed(_ size: NSSize, narrow: Bool) -> NSSize {
-        var size = size
-        size.width = min(max(size.width, minStacked.width), window.contentMaxSize.width)
-        size.height = min(max(size.height, minSide.height), window.contentMaxSize.height)
-        if size.width < minSide.width && size.height < minStacked.height {
-            if narrow { size.height = minStacked.height } else { size.width = minSide.width }
+    // The height the cards need at a scale (not counting the margins).
+    private func neededHeight(_ layout: Layout, at s: CGFloat) -> CGFloat {
+        let hear = hearCard.neededHeight(at: s), voice = voiceCard.neededHeight(at: s), changer = changerCard.neededHeight(at: s)
+        switch layout {
+        case .row: return max(hear, voice, changer)
+        case .split: return max(hear, voice + gap + changer)
+        case .stack: return hear + voice + changer + 2 * gap
         }
-        return size
+    }
+
+    // A size where at least one layout fits. Otherwise the window grows to the closest one, preferring a layout the
+    // window fits now (`current`), so a drag doesn't flip between them.
+    private func allowed(_ size: NSSize, from current: NSSize?) -> NSSize {
+        let biggest = window.contentMaxSize
+        let size = NSSize(width: min(size.width, biggest.width), height: min(size.height, biggest.height))
+        func fits(_ size: NSSize, _ layout: Layout) -> Bool {
+            guard let least = minimums[layout] else { return false }
+            return size.width >= least.width && size.height >= least.height
+        }
+        if Layout.allCases.contains(where: { fits(size, $0) }) { return size }
+        var choices = ([layout] + Layout.allCases).filter { minimums[$0] != nil }  // the arranged layout first
+        if let current, choices.contains(where: { fits(current, $0) }) { choices = choices.filter { fits(current, $0) } }
+        let grown = choices.map { NSSize(width: max(size.width, minimums[$0]!.width), height: max(size.height, minimums[$0]!.height)) }
+        return grown.min { $0.width + $0.height < $1.width + $1.height } ?? size
     }
 
     func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
         let size = sender.contentRect(forFrameRect: NSRect(origin: .zero, size: frameSize)).size
-        let narrow = (sender.contentView?.bounds.width ?? 0) < minSide.width
-        return sender.frameRect(forContentRect: NSRect(origin: .zero, size: allowed(size, narrow: narrow))).size
+        let fixed = allowed(size, from: sender.contentView?.bounds.size)
+        return sender.frameRect(forContentRect: NSRect(origin: .zero, size: fixed)).size
     }
 
     func windowDidResize(_ notification: Notification) { arrange() }
 
-    // The biggest scale at which the cards fit: limited by the card width, then shrunk until they fit the height.
-    private func bestScale(_ size: NSSize, stacked: Bool) -> CGFloat {
-        let width = stacked ? size.width - 2 * margin : (size.width - 2 * margin - gap) / 2
-        let height = size.height - 2 * margin - (stacked ? gap : 0)
-        func fits(_ s: CGFloat) -> Bool {
-            let hearHeight = hearCard.neededHeight(at: s), voiceHeight = voiceCard.neededHeight(at: s)
-            return (stacked ? hearHeight + voiceHeight : max(hearHeight, voiceHeight)) <= height
+    // The biggest scale at which the cards fit a layout: limited by the card width, then shrunk until they fit the
+    // height.
+    private func bestScale(_ size: NSSize, _ layout: Layout) -> CGFloat {
+        let width: CGFloat
+        switch layout {
+        case .row: width = (size.width - 2 * margin - 2 * gap) / 3
+        case .split: width = (size.width - 2 * margin - gap) / 2
+        case .stack: width = size.width - 2 * margin
         }
+        let height = size.height - 2 * margin
+        func fits(_ s: CGFloat) -> Bool { neededHeight(layout, at: s) <= height }
         let widest = ((min(maxScale, width / ShiftCard.baseWidth)) * 100).rounded(.down) / 100
         if widest <= 1 || fits(widest) { return max(1, widest) }
         var low: CGFloat = 1, high = widest
@@ -1316,46 +1446,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         return low
     }
 
-    // Places the cards: side by side, or one above the other when that lets everything be bigger.
+    // Places the cards in the layout that lets everything be biggest. It keeps the current layout unless another one
+    // is clearly bigger (so it doesn't flip back and forth).
     func arrange() {
-        guard minSide != .zero, let size = window.contentView?.bounds.size else { return }
-        let canSide = size.width >= minSide.width, canStack = size.height >= minStacked.height
-        var useStack = !canSide
-        var scale: CGFloat
-        if canSide && canStack {
-            let side = bestScale(size, stacked: false), stack = bestScale(size, stacked: true)
-            useStack = stack > side + (stacked ? -0.05 : 0.05)  // a little stickiness so it doesn't flip back and forth
-            scale = useStack ? stack : side
-        } else {
-            scale = bestScale(size, stacked: useStack)
+        guard !minimums.isEmpty, let size = window.contentView?.bounds.size else { return }
+        var fitting = Layout.allCases.filter { layout in
+            minimums[layout].map { size.width >= $0.width && size.height >= $0.height } ?? false
         }
-        let moved = useStack != stacked && voiceCard.frame.width > 0
-        stacked = useStack
+        if fitting.isEmpty { fitting = [closestLayout(size)] }
+        var pick = layout, scale: CGFloat = 0
+        if fitting.contains(layout) { scale = bestScale(size, layout) } else { pick = fitting[0]; scale = bestScale(size, pick) }
+        for other in fitting where other != pick {
+            let s = bestScale(size, other)
+            if s > scale + (pick == layout ? 0.05 : 0) { pick = other; scale = s }
+        }
+        let moved = pick != layout && voiceCard.frame.width > 0
+        layout = pick
 
         let area = NSRect(origin: .zero, size: size).insetBy(dx: margin, dy: margin)
-        let hearHeight = hearCard.neededHeight(at: scale), voiceHeight = voiceCard.neededHeight(at: scale)
-        if stacked {
-            let extra = max(0, (area.height - gap - hearHeight - voiceHeight) / 2)
-            let top = (hearHeight + extra).rounded()
-            hearCard.frame = NSRect(x: area.minX, y: area.maxY - top, width: area.width, height: top)
-            voiceCard.frame = NSRect(x: area.minX, y: area.minY, width: area.width, height: area.height - top - gap)
-            for card in [hearCard!, voiceCard!] {
-                card.apply(scale: scale)
-                card.place(width: area.width)
-                card.spread(extra)
-            }
-        } else {
+        let hear = hearCard.neededHeight(at: scale), voice = voiceCard.neededHeight(at: scale)
+        let changer = changerCard.neededHeight(at: scale)
+        // Each card: its place, and the extra height it shares out (a bigger number first, see ShiftCard.spread).
+        var places: [(ShiftCard, NSRect, CGFloat)]
+        switch layout {
+        case .row:
+            let width = ((area.width - 2 * gap) / 3).rounded(.down)
+            let extra = max(0, area.height - max(hear, voice, changer))
+            places = [
+                (hearCard, NSRect(x: area.minX, y: area.minY, width: width, height: area.height), extra),
+                (voiceCard, NSRect(x: (area.midX - width / 2).rounded(), y: area.minY, width: width, height: area.height), extra),
+                (changerCard, NSRect(x: area.maxX - width, y: area.minY, width: width, height: area.height), extra),
+            ]
+        case .split:
             let width = ((area.width - gap) / 2).rounded(.down)
-            let extra = max(0, area.height - max(hearHeight, voiceHeight))
-            hearCard.frame = NSRect(x: area.minX, y: area.minY, width: width, height: area.height)
-            voiceCard.frame = NSRect(x: area.maxX - width, y: area.minY, width: width, height: area.height)
-            for card in [hearCard!, voiceCard!] {
-                card.apply(scale: scale)
-                card.place(width: width)
-                card.spread(extra)
-            }
+            let right = area.maxX - width
+            let changerHeight = changer.rounded(.up)
+            places = [
+                (hearCard, NSRect(x: area.minX, y: area.minY, width: width, height: area.height), max(0, area.height - hear)),
+                (voiceCard, NSRect(x: right, y: area.minY + changerHeight + gap, width: width, height: area.height - changerHeight - gap),
+                 max(0, area.height - changerHeight - gap - voice)),
+                (changerCard, NSRect(x: right, y: area.minY, width: width, height: changerHeight), 0),
+            ]
+        case .stack:
+            let extra = max(0, (area.height - 2 * gap - hear - voice - changer) / 2)
+            let top = (hear + extra).rounded(), bottom = changer.rounded(.up)
+            places = [
+                (hearCard, NSRect(x: area.minX, y: area.maxY - top, width: area.width, height: top), extra),
+                (voiceCard, NSRect(x: area.minX, y: area.minY + bottom + gap, width: area.width, height: area.height - top - bottom - 2 * gap), extra),
+                (changerCard, NSRect(x: area.minX, y: area.minY, width: area.width, height: bottom), 0),
+            ]
         }
-        if moved { settle(voiceCard, from: stacked ? NSPoint(x: 0, y: -24) : NSPoint(x: 24, y: 0)) }
+        for (card, frame, extra) in places {
+            card.frame = frame
+            card.apply(scale: scale)
+            card.place(width: frame.width)
+            card.spread(extra)
+        }
+        if moved {
+            let offset = layout == .row ? NSPoint(x: 24, y: 0) : NSPoint(x: 0, y: -24)
+            settle(voiceCard, from: offset)
+            settle(changerCard, from: offset)
+        }
+    }
+
+    // The layout the window is closest to fitting (for a size where none fits).
+    private func closestLayout(_ size: NSSize) -> Layout {
+        let short = { (layout: Layout) -> CGFloat in
+            guard let least = self.minimums[layout] else { return .infinity }
+            return max(0, least.width - size.width) + max(0, least.height - size.height)
+        }
+        return Layout.allCases.min { short($0) < short($1) } ?? .split
     }
 
     // When the layout changes, the "Your voice" card fades into its new place, coming up from below (or in from
@@ -1379,7 +1539,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     // MARK: Pickers
 
     func menuNeedsUpdate(_ menu: NSMenu) {
-        if menu === hearCard.picker.menu { rebuildHearMenu() } else { rebuildMicMenu() }
+        if menu === hearCard.picker.menu {
+            rebuildHearMenu()
+        } else if menu === changerCard.picker.menu {
+            rebuildChangerMenu()
+        } else {
+            rebuildMicMenu()
+        }
     }
 
     private func icon(_ image: NSImage?, dimmed: Bool = false) -> NSImage? {
@@ -1463,6 +1629,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         } else {
             rebuildMicMenu()
         }
+    }
+
+    // The voice picker: Woman, Man, then added voices. The voice folders are read again each time it opens, so a
+    // voice added to ~/Library/Application Support/Pitch Shift/Voices shows up without restarting.
+    func rebuildChangerMenu() {
+        let picker = changerCard.picker
+        picker.removeAllItems()
+        let library = VoiceLibrary.shared
+        library.rescan()
+        let first = ["woman", "man"]
+        let voices = library.voices.sorted { a, b in
+            let i = first.firstIndex(of: a.id) ?? first.count, j = first.firstIndex(of: b.id) ?? first.count
+            return i != j ? i < j : a.name.localizedCaseInsensitiveCompare(b.name) == .orderedAscending
+        }
+        guard !voices.isEmpty, let menu = picker.menu else {
+            picker.addItem(withTitle: "No voices")
+            picker.lastItem?.isEnabled = false
+            return
+        }
+        for voice in voices {
+            // Added to the menu itself: two voices may have the same name.
+            menu.addItem(withTitle: voice.name, action: nil, keyEquivalent: "").representedObject = voice.id
+        }
+        showCurrentVoice()
+    }
+
+    private func showCurrentVoice() {
+        let picker = changerCard.picker
+        let current = voice.changer.voiceID
+        guard (picker.selectedItem?.representedObject as? String) != current else { return }
+        if let i = picker.itemArray.firstIndex(where: { $0.representedObject as? String == current }) { picker.selectItem(at: i) }
+    }
+
+    @objc func changerVoicePicked() {
+        guard let id = changerCard.picker.selectedItem?.representedObject as? String else { return }
+        voice.changer.voiceID = id
+        if preview == nil { defaults.set(id, forKey: Keys.changerVoice) }  // pictures change nothing
+        refresh()
     }
 
     // Clicking "All sound" picks everything; clicking an app ticks or unticks it.
@@ -1591,6 +1795,60 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
     }
 
+    // MARK: Voice changer
+
+    private var changerAlert: NSAlert?
+
+    // Turning the Voice changer on also turns Your voice on.
+    func setChanger(_ on: Bool) {
+        voice.changer.on = on
+        guard preview == nil else { refresh(); return }  // pictures change nothing
+        defaults.set(on, forKey: Keys.changerOn)
+        if on && !voice.isOn { setVoice(true) }
+        refresh()
+    }
+
+    func strengthPicked(_ value: Float) {
+        voice.changer.strength = value
+        guard preview == nil else { return }  // pictures change nothing
+        defaults.set(value, forKey: Keys.changerStrength)
+    }
+
+    // Turning Realistic on shows an alert first (it adds delay), unless "Don't show again" was ticked.
+    func realisticPicked(_ on: Bool) {
+        if on && !defaults.bool(forKey: Keys.hideChangerAlert) {
+            askRealistic()
+            return
+        }
+        voice.changer.realistic = on
+        if preview == nil { defaults.set(on ? "realistic" : "natural", forKey: Keys.changerQuality) }
+        refresh()
+    }
+
+    // A sheet on the window: Turn On, or Cancel (the switch goes back off and nothing is saved).
+    func askRealistic() {
+        guard changerAlert == nil else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Realistic voices add delay"
+        alert.informativeText = "Your voice reaches the call about a quarter second later."
+        alert.addButton(withTitle: "Turn On").bezelColor = Theme.purple
+        alert.addButton(withTitle: "Cancel")
+        alert.showsSuppressionButton = true
+        alert.suppressionButton?.title = "Don't show again"
+        changerAlert = alert
+        alert.beginSheetModal(for: window) { [weak self] answer in
+            guard let self else { return }
+            changerAlert = nil
+            if answer == .alertFirstButtonReturn && preview == nil {  // pictures change nothing
+                if alert.suppressionButton?.state == .on { defaults.set(true, forKey: Keys.hideChangerAlert) }
+                voice.changer.realistic = true
+                defaults.set("realistic", forKey: Keys.changerQuality)
+            }
+            refresh()  // shows the switch as it really is (off after Cancel)
+        }
+    }
+
     // MARK: Switches
 
     func setHear(_ on: Bool) {
@@ -1655,8 +1913,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     // MARK: Showing state
 
     // For screenshots (--preview hear-on,voice-on,waiting,typing,recording,playing,listening,hover,menu,roll,
-    // resize,no-driver,advanced-alert,sounds,rename,volume,drop,light,tone,slow [--size 800x400]): shows a state,
-    // no sound.
+    // resize,no-driver,advanced-alert,sounds,rename,volume,drop,light,tone,slow,changer,changer-man,
+    // changer-realistic,changer-loading,changer-fallback,changer-alert,changer-intel [--size 800x400]): shows a
+    // state, no sound. Any changer state also shows Your voice on.
     func showPreview() {
         guard let preview else { return }
         if preview.contains("light") {
@@ -1701,12 +1960,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 self.askAdvanced()
             }
         }
-        if preview.contains("resize") {  // grows the window tall, so the cards move one above the other
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
-                var frame = self.window.frameRect(forContentRect: NSRect(origin: .zero, size: NSSize(width: 600, height: 640)))
-                frame.origin = NSPoint(x: self.window.frame.minX, y: self.window.frame.maxY - frame.height)
-                self.window.setFrame(frame, display: true, animate: true)
+        if preview.contains("changer-alert") {  // the alert shown when Realistic is turned on
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                self.realisticSwitch.isOn = true
+                self.askRealistic()
             }
+        }
+        if preview.contains("resize") {  // drags the window's corner through all three layouts, ending one above the other
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                let path = [NSSize(width: 900, height: 420), NSSize(width: 620, height: 640),
+                            NSSize(width: 1300, height: 640), NSSize(width: 330, height: 880)]
+                self.drag(from: self.window.contentView?.bounds.size ?? .zero, through: path)
+            }
+        }
+    }
+
+    // Pictures: moves the window's bottom-right corner like a person dragging it (1 second from point to point, 60
+    // steps a second, each step limited by windowWillResize); the top-left corner stays put.
+    private func drag(from: NSSize, through path: [NSSize], step: Int = 1) {
+        guard let to = path.first else { return }
+        let steps = 60, t = CGFloat(step) / CGFloat(steps)
+        let mouse = NSSize(width: from.width + (to.width - from.width) * t, height: from.height + (to.height - from.height) * t)
+        let size = windowWillResize(window, to: window.frameRect(forContentRect: NSRect(origin: .zero, size: mouse)).size)
+        window.setFrame(NSRect(x: window.frame.minX, y: window.frame.maxY - size.height, width: size.width, height: size.height), display: true)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0 / Double(steps)) {
+            if step < steps { self.drag(from: from, through: path, step: step + 1) } else { self.drag(from: to, through: Array(path.dropFirst())) }
         }
     }
 
@@ -1722,8 +2000,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         soundsButton.isHidden = !now
         installButton.isHidden = now
         measure()
-        let size = window.contentView?.bounds.size ?? minSide
-        let fixed = allowed(size, narrow: size.width < minSide.width)
+        let size = window.contentView?.bounds.size ?? .zero
+        let fixed = allowed(size, from: nil)
         if fixed != size { window.setContentSize(fixed) }
         arrange()
     }
@@ -1736,7 +2014,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     func refresh() {
         guard hearCard != nil else { return }
         let hearOn = preview.map { $0.contains("hear-on") } ?? hear.isOn
-        let voiceOn = preview.map { $0.contains("voice-on") } ?? voice.isOn
+        let voiceOn = preview.map { $0.contains("voice-on") || $0.contains("changer") } ?? voice.isOn
         let waiting = preview.map { $0.contains("waiting") } ?? (hear.state == .waiting)
         hearCard.show(on: hearOn, value: hear.halfSteps, active: hearOn, waiting: waiting)
         if advancedAlert == nil { advancedSwitch.isOn = hear.advanced }  // stays on while the alert asks
@@ -1753,16 +2031,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         showDriverState()
         let installed = driverInstalled
         let hasMic = !Mics.list().isEmpty
-        voiceCard.show(on: voiceOn, value: voice.halfSteps, active: voiceOn && installed && hasMic)
+        let voiceActive = voiceOn && installed && hasMic
+        // With a voice from the Voice changer on, it sets the pitch and style: the number, − 0 + and the
+        // Natural ... Cartoon slider are dimmed ("Deeper when slow" still works on top).
+        let changerActive = voice.changer.on && voiceActive
+        let changerTip = changerActive ? "Voice changer is on" : nil
+        voiceCard.show(on: voiceOn, value: voice.halfSteps, active: voiceActive, amountActive: voiceActive && !changerActive)
+        voiceCard.buttonsTip = changerTip
         voiceCard.toggle.isEnabled = installed && hasMic
         voiceCard.picker.isEnabled = installed && hasMic
         if hasMic { showCurrentMic() }
         style.value = voice.cartoon
-        style.isEnabled = voiceOn && installed
+        style.isEnabled = voiceOn && installed && !changerActive
+        style.toolTip = changerTip
         slowSwitch.isOn = voice.slowDeeper
         slowSwitch.isEnabled = voiceOn && installed
         soundsButton.isEnabled = installed && hasMic  // the Soundboard works with the voice off too
-        if case .problem(let message) = voice.state { voiceCard.amount.toolTip = message } else { voiceCard.amount.toolTip = nil }
+        if case .problem(let message) = voice.state { voiceCard.amount.toolTip = message } else { voiceCard.amount.toolTip = changerTip }
+        showChanger(active: changerActive, usable: installed && hasMic)
 
         let listening = preview.map { $0.contains("listening") } ?? voice.listening
         dot.isLive = (voiceOn || voice.runsForSounds) && installed && listening
@@ -1793,5 +2079,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             testButton.setAccessibilityLabel("Stop playing")
             testButton.isEnabled = true
         }
+    }
+
+    // The Voice changer card: on while its switch and Your voice are on (`active`); the switch and picker work while
+    // Pitch Shift Mic and a mic are there (`usable`). Next to "Realistic": a spinner while the realistic voice gets
+    // ready, a small warning sign when Natural is standing in (the tooltip says why).
+    private func showChanger(active: Bool, usable: Bool) {
+        changerCard.show(on: voice.changer.on, active: active)
+        changerCard.toggle.isEnabled = usable
+        changerCard.picker.isEnabled = usable
+        showCurrentVoice()
+        strength.value = voice.changer.strength
+        strength.isEnabled = active
+        let chosen = VoiceLibrary.shared.voice(voice.changer.voiceID)
+        let hasRealistic = chosen?.manifest.realistic != nil
+        if changerAlert == nil { realisticSwitch.isOn = voice.changer.realistic }  // stays on while the alert asks
+        realisticSwitch.isEnabled = active && hasRealistic
+
+        enum Look { case natural, loading, realistic, fallback(Int), unavailable(String) }
+        var look: Look
+        switch voice.changerState {
+        case .off, .natural: look = .natural
+        case .loading: look = .loading
+        case .realistic: look = .realistic
+        case .fallback(let misses): look = .fallback(misses)
+        case .unavailable(let reason): look = .unavailable(reason)
+        }
+        if let preview {  // pictures: changer-loading, changer-realistic, changer-fallback
+            if preview.contains("changer-loading") { look = .loading }
+            if preview.contains("changer-realistic") { look = .realistic }
+            if preview.contains("changer-fallback") { look = .fallback(3) }
+        }
+        var note: String?, loading = false, warning = false
+        if let chosen, !hasRealistic {
+            note = "\(chosen.name) has no realistic version"
+        } else if active && voice.changer.realistic {
+            switch look {
+            case .loading:
+                loading = true
+                note = "Getting the realistic voice ready. Natural plays meanwhile."
+            case .fallback(let misses):
+                warning = true
+                note = "The realistic voice fell behind \(misses == 1 ? "once" : "\(misses) times"). Natural filled in."
+            case .unavailable(let reason):
+                warning = true
+                note = reason
+            case .natural, .realistic:
+                break
+            }
+        }
+        if realisticLoading.isHidden == loading {
+            realisticLoading.isHidden = !loading
+            if loading { realisticLoading.startAnimation(nil) } else { realisticLoading.stopAnimation(nil) }
+        }
+        realisticWarning.isHidden = !warning
+        realisticRow.toolTip = note
+        realisticSwitch.setAccessibilityHelp(note)
     }
 }
