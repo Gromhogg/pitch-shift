@@ -16,6 +16,7 @@
 //                                              stop while it plays). --hear: also play it here at that volume.
 //                                              --recording F.caf: check a recording saved with --out (no devices).
 //                                              --stop-after S: press Stop S seconds after the sound starts.
+//                                              --hear-out F.caf: save the owner's copy (with --hear).
 //   --test ... --advanced [--record-out F.wav] [--steps-at "3:8,6:-5"]
 //                                              "What you hear" with Advanced processing on (--watch prints the delay;
 //                                              --record-out saves what it played; --steps-at changes the amount live)
@@ -304,6 +305,17 @@ if let path = arg("--test-sounds") {
     let board = Soundboard(voice: voice, files: [], saves: false)
     board.speakers = args.contains("--speakers")
     board.hearVolume = arg("--hear").flatMap(Float.init) ?? 0
+    // --hear-out: the owner's copy, as its player makes it (collected on the main thread).
+    var heard: [Float] = []
+    var heardRate = 0.0
+    if arg("--hear-out") != nil {
+        board.hearTap = { buffer, _ in
+            guard let data = buffer.floatChannelData else { return }
+            let piece = Array(UnsafeBufferPointer(start: data[0], count: Int(buffer.frameLength)))
+            let rate = buffer.format.sampleRate
+            DispatchQueue.main.async { heard += piece; heardRate = rate }
+        }
+    }
     board.ready = board.hearVolume > 0  // like the open Soundboard: the owner's player is already running
     let url = URL(fileURLWithPath: path)
     let clip: SoundClip
@@ -344,6 +356,14 @@ if let path = arg("--test-sounds") {
             for (i, x) in recorded.enumerated() { buffer.floatChannelData![0][i] = x }
             if (try? AVAudioFile(forWriting: URL(fileURLWithPath: out), settings: format.settings).write(from: buffer)) != nil {
                 print("wrote \(out)")
+            }
+        }
+        if let out = arg("--hear-out"), heardRate > 0, let format = AVAudioFormat(standardFormatWithSampleRate: heardRate, channels: 1),
+           let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(max(1, heard.count))) {
+            buffer.frameLength = AVAudioFrameCount(heard.count)
+            for (i, x) in heard.enumerated() { buffer.floatChannelData![0][i] = x }
+            if (try? AVAudioFile(forWriting: URL(fileURLWithPath: out), settings: format.settings).write(from: buffer)) != nil {
+                print("wrote \(out) (the owner's copy)")
             }
         }
         exit(0)

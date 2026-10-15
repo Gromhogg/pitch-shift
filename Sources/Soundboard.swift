@@ -73,6 +73,12 @@ final class SoundClip {
     }
 }
 
+// The owner's copy's playing state, kept by its sound thread.
+private final class HearMix: @unchecked Sendable {
+    var mix: SoundMix
+    init(_ mix: SoundMix) { self.mix = mix }
+}
+
 // The list of sounds (copies of the owner's files, kept in Application Support), and playing them.
 final class Soundboard {
     static let folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -85,23 +91,27 @@ final class Soundboard {
     var onChange: () -> Void = {}
     var speakers: Bool?        // tests: act as if the sound plays on the Mac's speakers (true) or headphones (false)
     var hearVolume: Float = 1  // the owner's own copy (tests: quiet, or 0 for none)
+    var hearTap: AVAudioNodeTapBlock?  // tests: gets the owner's copy as it plays
     private let voice: VoiceShifter
     private let saves: Bool
     private let folder: URL
     private let defaults: UserDefaults
     private var clips: [String: SoundClip] = [:]
     private var current: SoundClip?
-    private var engine: AVAudioEngine?  // the owner's copy
-    private var player: AVAudioPlayerNode?
+    // The owner's copy: it plays what the voice chain plays (voice.sounds), with the same 10 ms fade (SoundMix).
+    private var engine: AVAudioEngine?
+    private var source: AVAudioSourceNode?
+    private var engineRate: Double = 0
     private var engineWatch: NSObjectProtocol?
     private var restart: DispatchWorkItem?
+    private var stopping: DispatchWorkItem?
     private var ending: DispatchWorkItem?
     // While the Soundboard is open, the owner's player stays running (silent), so a click plays at once instead of
     // after the ~0.1 s it takes to start.
     var ready = false {
         didSet {
             guard oldValue != ready else { return }
-            if ready { startEngine(rate: rate) } else { stopEngine() }
+            if ready { runEngine(rate: rate) } else { stopEngineSoon() }
         }
     }
 
@@ -186,41 +196,59 @@ final class Soundboard {
     private func clear() {
         ending?.cancel()
         ending = nil
-        voice.sounds.withLock { state in state = SoundPlay(take: state.take + 1) }
-        player?.stop()
-        if !ready { stopEngine() }
+        voice.sounds.withLock { state in state = SoundPlay(take: state.take + 1) }  // both copies fade out
+        if !ready { stopEngineSoon() }
         if let current { keepAlive(current) }
         current = nil
         playing = nil
         onChange()
     }
 
-    // The sound thread may read a sound for a moment after it was replaced or stopped: keep it a second longer.
+    // The sound threads (both copies) may read a sound for a moment after it was replaced or stopped: keep it a
+    // second longer.
     private func keepAlive(_ clip: SoundClip) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { withExtendedLifetime(clip) {} }
     }
 
-    // The owner's own copy, on the Mac's current speakers or headphones.
+    // The owner's own copy, on the Mac's current speakers or headphones: its player only has to be running, it picks
+    // the sound up from voice.sounds like the voice chain.
     private func hear(_ clip: SoundClip) {
         guard hearVolume > 0 else { return }
-        if engine?.isRunning != true || player?.outputFormat(forBus: 0).sampleRate != clip.rate { startEngine(rate: clip.rate) }
-        guard let player else { return }
-        player.stop()  // drops the one playing
-        player.volume = hearVolume
-        player.scheduleBuffer(clip.buffer)
-        player.play()
+        runEngine(rate: clip.rate)
+    }
+
+    private func runEngine(rate: Double) {
+        stopping?.cancel()
+        stopping = nil
+        if engine?.isRunning != true || engineRate != rate { startEngine(rate: rate) }
     }
 
     private func startEngine(rate: Double) {
         stopEngine()
         guard hearVolume > 0, let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1) else { return }
         let engine = AVAudioEngine()
-        let player = AVAudioPlayerNode()
-        engine.attach(player)
-        engine.connect(player, to: engine.mainMixerNode, format: format)
+        let sounds = voice.sounds, gain = hearVolume
+        let state = HearMix(SoundMix(rate: rate, take: sounds.withLock { $0.take }))
+        // Runs on the speakers' sound thread. Makes no memory.
+        let source = AVAudioSourceNode(format: format) { silence, _, frameCount, list -> OSStatus in
+            if let play = sounds.withLockIfAvailable({ $0 }), play.take != state.mix.take { _ = state.mix.start(play) }
+            let buffers = UnsafeMutableAudioBufferListPointer(list)
+            guard state.mix.active, let out = buffers.first?.mData?.assumingMemoryBound(to: Float.self) else {
+                for buffer in buffers { if let data = buffer.mData { memset(data, 0, Int(buffer.mDataByteSize)) } }
+                silence.pointee = true
+                return noErr
+            }
+            var ended = false
+            for i in 0..<Int(frameCount) { out[i] = state.mix.next(&ended) * gain }
+            return noErr
+        }
+        engine.attach(source)
+        engine.connect(source, to: engine.mainMixerNode, format: format)
+        if let hearTap { source.installTap(onBus: 0, bufferSize: 4096, format: format, block: hearTap) }
         do { try engine.start() } catch { return }
         self.engine = engine
-        self.player = player
+        self.source = source
+        engineRate = rate
         // Other speakers or headphones were picked: the player stopped; start it again there once things settle
         // (connecting headphones can send several changes in a row).
         engineWatch = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main) { [weak self] _ in
@@ -234,14 +262,26 @@ final class Soundboard {
         }
     }
 
+    // Once a sound that was just stopped has faded out (and reached the speakers).
+    private func stopEngineSoon() {
+        guard engine != nil else { return }
+        stopping?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.stopEngine() }
+        stopping = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2, execute: work)
+    }
+
     private func stopEngine() {
         restart?.cancel()
         restart = nil
+        stopping?.cancel()
+        stopping = nil
         if let engineWatch { NotificationCenter.default.removeObserver(engineWatch) }
         engineWatch = nil
         engine?.stop()
         engine = nil
-        player = nil
+        source = nil
+        engineRate = 0
     }
 
     // Copies the files into the Sounds folder and adds them to the end of the list (files that can't be read are
