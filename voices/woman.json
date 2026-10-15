@@ -1,0 +1,23 @@
+{
+  "id": "woman",
+  "name": "Woman",
+  "version": 1,
+  "natural": {
+    "targetHz": 200,
+    "assumedInputHz": 120,
+    "intonation": 1.2,
+    "formant": 1.18,
+    "breathDb": -30,
+    "presenceDb": 2.5,
+    "sibilanceKeep": 0,
+    "eqAmount": 0.5,
+    "ltas": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  },
+  "realistic": {
+    "model": "woman.mlmodelc",
+    "encoder": "contentvec.mlmodelc",
+    "rate": 48000,
+    "eqAmount": 0.5
+  },
+  "credits": "Made from the CSTR VCTK Corpus 0.92 (University of Edinburgh, CC BY 4.0), a blend of 8 speakers. RVC v2 (MIT), ContentVec (MIT)."
+}

@@ -23,10 +23,18 @@ for arch in arm64 x86_64; do
   for f in Sources/Advanced/*.cpp; do
     clang++ -arch $arch -mmacosx-version-min=14.4 -O2 -std=c++17 -Ibuild/libs/include -c "$f" -o "$obj/${f:t:r}.o"
   done
+  # The voice changer: Natural mode (plain C++) and Realistic mode (Core ML, Objective-C++).
+  for f in Sources/Voice/*.cpp; do
+    clang++ -arch $arch -mmacosx-version-min=14.4 -O2 -std=c++17 -c "$f" -o "$obj/${f:t:r}.o"
+  done
+  for f in Sources/Voice/*.mm; do
+    clang++ -arch $arch -mmacosx-version-min=14.4 -O2 -std=c++17 -fobjc-arc -c "$f" -o "$obj/${f:t:r}.o"
+  done
   # Rubber Band is built into the app, so the app works on its own.
   swiftc -target $arch-apple-macos14.4 -O -swift-version 5 Sources/*.swift $obj/*.o -o $obj/PitchShift \
     -import-objc-header Sources/Bridging.h -Ibuild/libs/include \
-    -Xlinker build/libs/lib/librubberband.a -Xlinker build/libs/lib/libsamplerate.a -lc++ -framework Accelerate
+    -Xlinker build/libs/lib/librubberband.a -Xlinker build/libs/lib/libsamplerate.a -lc++ -framework Accelerate \
+    -framework CoreML
 done
 lipo -create build/obj/arm64/PitchShift build/obj/x86_64/PitchShift -output "$app/Contents/MacOS/PitchShift"
 
@@ -35,6 +43,8 @@ if [[ ! -f AppIcon.icns ]]; then
 fi
 cp Info.plist "$app/Contents/Info.plist"
 cp AppIcon.icns LICENSE packaging/install-driver.sh build/libs/lib/libsamplerate-COPYING "$app/Contents/Resources/"
+# The voice changer's voices (settings, credits and, later, the Realistic models).
+ditto voices "$app/Contents/Resources/Voices"
 codesign --force --sign - "$app"
 codesign --verify --deep --strict "$app"
 echo "Built $app"

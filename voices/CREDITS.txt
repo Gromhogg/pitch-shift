@@ -1,0 +1,13 @@
+Pitch Shift voice changer voices
+
+Woman and Man voices: made by the Pitch Shift project from recordings in the CSTR VCTK Corpus 0.92
+(Centre for Speech Technology Research, University of Edinburgh), licensed CC BY 4.0
+(https://datashare.ed.ac.uk/handle/10283/3443). Each voice is a blend of 8 speakers; no single person is cloned.
+Natural mode uses only each voice's average tone (long-term spectrum), measured from that corpus.
+
+Realistic mode voice model: RVC v2 (Retrieval-based-Voice-Conversion-WebUI, MIT License, Copyright (c) 2023
+liujing04, 源文雨, Ftps), fine-tuned from its pretrained 48 kHz base models (MIT).
+
+Content encoder: ContentVec (auspicious3000/contentvec, MIT License), as distributed by RVC (hubert_base, MIT).
+
+Converted to Core ML with 8-bit weights.

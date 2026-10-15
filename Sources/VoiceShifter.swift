@@ -66,11 +66,40 @@ enum Mics {
 }
 
 // Settings the sound thread reads. Changed from the window, read without waiting on the sound thread.
-struct VoiceParams {
+// `changer` points into VoiceLibrary's table, which lives as long as the app (so the sound thread may keep reading it).
+struct VoiceParams: @unchecked Sendable {
     var halfSteps: Float
     var cartoon: Float      // voice style: 0 = Natural, 1 = Cartoon, in between = a blend
     var slowDeeper = false  // "Deeper when slow": talking slowly makes the voice lower
     var silent: Bool        // during Test playback, so the replay isn't sent into a live call
+    var changer: UnsafePointer<VoiceChangerVoice>? = nil  // the voice changer's voice (nil = off)
+    var strength: Float = 1                               // the voice changer's strength, 0 ... 1
+}
+
+// The voice changer card's settings: on/off, which voice (VoiceLibrary id), how strong, and Realistic (AI) or not.
+struct ChangerSettings: Equatable {
+    var on = false
+    var voiceID = "woman"
+    var strength: Float = 1
+    var realistic = false
+}
+
+// What the voice changer is doing, for the window.
+enum ChangerState: Equatable {
+    case off
+    case natural                 // Natural mode is playing
+    case loading                 // Realistic mode is loading its models (Natural plays meanwhile)
+    case realistic               // the AI voice is playing
+    case fallback(misses: Int)   // Realistic, but some pieces came late and Natural filled in
+    case unavailable(String)     // Realistic can't run here (for example "needs Apple silicon"); Natural plays
+}
+
+// What --render-voice and --test-voice ask of the voice changer.
+struct ChangerOptions {
+    var voice: UnsafePointer<VoiceChangerVoice>
+    var strength: Float = 1
+    var tune: [(String, Float)] = []  // --changer-tune "key=value,..."
+    var stats = false                 // --changer-stats: print what it does once a second
 }
 
 // The sound effect (Soundboard) to mix into Pitch Shift Mic. Set from the window, read by the sound thread without
@@ -862,6 +891,9 @@ final class VoiceShifter {
     var halfSteps: Float { didSet { pushParams() } }
     var cartoon: Float { didSet { pushParams() } }  // voice style: 0 = Natural, 1 = Cartoon
     var slowDeeper: Bool { didSet { pushParams() } }  // "Deeper when slow"
+    // The voice changer card. Used only while "Your voice" is on (never in the Soundboard-only pass-through).
+    var changer = ChangerSettings() { didSet { if changer != oldValue { pushParams() } } }
+    private(set) var changerState: ChangerState = .off
     var micUID: String? { didSet { if oldValue != micUID { rebuild() } } }  // nil = the Mac's default mic
     var onChange: () -> Void = {}
     var testSource: ((UnsafeMutablePointer<Float>, Int) -> Void)?
@@ -965,6 +997,16 @@ final class VoiceShifter {
     private func pushParams() {
         let steps = voiceSwitch ? halfSteps : 0, cartoon = cartoon, slowDeeper = voiceSwitch && slowDeeper
         params.withLock { $0.halfSteps = steps; $0.cartoon = cartoon; $0.slowDeeper = slowDeeper }
+        updateChangerState()
+    }
+
+    // Step 0: the voice changer isn't connected yet, so it never runs.
+    private func updateChangerState() {
+        let new: ChangerState = !(changer.on && voiceSwitch) ? .off
+            : changer.realistic ? .unavailable("not available yet") : .natural
+        guard new != changerState else { return }
+        changerState = new
+        onChange()
     }
 
     private func setState(_ new: VoiceState) {
@@ -1220,9 +1262,10 @@ final class VoiceTest {
 // pieces like the live chain, and writes one channel. `changes` moves the style part way through
 // ((seconds, style) pairs), to check that it changes smoothly. With `slowDeeper` it prints the speaking rate and
 // the extra shift once per second of sound. `levelFix: false` renders it as before the level fix
-// (`--voice-preset old`, see voiceLevelGain), so old and new can be compared.
+// (`--voice-preset old`, see voiceLevelGain), so old and new can be compared. `changer`: the voice changer
+// (--voice; not connected yet at Step 0).
 func renderVoiceFile(input: String, output: String, halfSteps: Float, cartoon: Float, changes: [(Double, Float)],
-                     slowDeeper: Bool = false, levelFix: Bool = true) throws {
+                     slowDeeper: Bool = false, levelFix: Bool = true, changer: ChangerOptions? = nil) throws {
     let file = try AVAudioFile(forReading: URL(fileURLWithPath: input))
     let rate = file.processingFormat.sampleRate
     let length = Int(file.length)

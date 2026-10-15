@@ -1,0 +1,23 @@
+{
+  "id": "man",
+  "name": "Man",
+  "version": 1,
+  "natural": {
+    "targetHz": 112,
+    "assumedInputHz": 205,
+    "intonation": 0.85,
+    "formant": 0.85,
+    "breathDb": -120,
+    "presenceDb": 0,
+    "sibilanceKeep": 0.7,
+    "eqAmount": 0.5,
+    "ltas": [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+  },
+  "realistic": {
+    "model": "man.mlmodelc",
+    "encoder": "contentvec.mlmodelc",
+    "rate": 48000,
+    "eqAmount": 0.5
+  },
+  "credits": "Made from the CSTR VCTK Corpus 0.92 (University of Edinburgh, CC BY 4.0), a blend of 8 speakers. RVC v2 (MIT), ContentVec (MIT)."
+}
