@@ -1,16 +1,24 @@
 // Pitch Shift: plays an app's sound (or all sound) and/or your voice at a higher or lower pitch, live.
 // Checks from Terminal (inside "Pitch Shift.app/Contents/MacOS/PitchShift"):
-//   --list                                     sound devices (with model UIDs), Pitch Shift Mic, the saved Bass ↔ Treble
-//                                              per output, the voice's mic, and which app each sound process belongs to
+//   --list                                     sound devices (with model UIDs; and which are in use), Pitch Shift Mic,
+//                                              the saved Bass ↔ Treble per output, the voice's mic, and which app each
+//                                              sound process belongs to
 //   --watch-output [--seconds 10]              once a second: the output's sample rate (Bluetooth call mode shows
 //                                              8000-24000 Hz), its own mic, and which apps record from which devices
+// The device tests (--test, --test-voice, --test-button, --test-sounds, --test-default-mic) refuse to start while Pitch
+// Shift Mic, the built-in mic or a Bluetooth mic is in use by another app (for example a call), or the Pitch Shift app
+// is open.
 //   --test [--pid N | --app BUNDLE_ID | --all] [--steps 2.5] [--seconds S]     "What you hear" for a few seconds
 //   --test-voice [--mic NAME] [--tone 440 | --file F] [--steps 3] [--cartoon | --cartoon-amount 0.5] [--seconds S]
-//                [--slow-deeper] [--out F.caf]
+//                [--slow-deeper] [--out F.caf] [--watch] [--buffer N]
 //                                              sends a tone or file through the voice chain and records Pitch Shift Mic
 //                                              (voice style from 0 = Natural, the default, to 1 = Cartoon; --cartoon = 1;
 //                                              --slow-deeper turns on "Deeper when slow" and prints the speaking rate
-//                                              and the extra shift once a second)
+//                                              and the extra shift once a second).
+//                                              --watch: the tone plays for half of every second; once a second it prints
+//                                              the sound waiting to go out, the dry-outs/trims/replays and the delay from
+//                                              the mic to Pitch Shift Mic (the delay parts are printed at the start).
+//                                              --buffer N: callback size to ask for (default 128, or 256 above 48 kHz)
 //   --render-voice IN OUT [--steps 3] [--cartoon | --cartoon-amount 0.5] [--cartoon-at "1:1,2:0"] [--slow-deeper]
 //                                              shifts a sound file with the voice's own settings (offline, no devices;
 //                                              --cartoon-at "1:1,2:0" moves the style to 1 at 1 s and back to 0 at 2 s)
@@ -87,6 +95,32 @@ let slowDeeperArg = args.contains("--slow-deeper")
 // The watchdog: a second copy of the app that gives the real mic back if the app ends without doing it.
 if let pid = arg("--watchdog").flatMap({ pid_t($0) }) { DefaultMic.watch(pid) }
 
+// Device tests share the Mac's microphones and Pitch Shift Mic with whatever the owner is doing. They only start
+// when Pitch Shift Mic, the built-in mic and every Bluetooth mic are idle (not used by any app, for example a call
+// in FaceTime, Discord or a browser), and the Pitch Shift app itself isn't open: with "Your voice" on, a test
+// reading Pitch Shift Mic would wake the app's voice on the real mic, and the Test playback would send that to the
+// owner's headphones. Otherwise they stop right away, before touching any device.
+func refuseIfMicsBusy() {
+    let me = ProcessInfo.processInfo.processIdentifier
+    if NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "local.pitch-shift")
+        .contains(where: { $0.processIdentifier != me }) {
+        print("Not starting: the Pitch Shift app is open (its voice or sound would mix into the test). Nothing was changed; try again later.")
+        exit(2)
+    }
+    let busy = allDevices().filter { id in
+        guard streamCount(id, kAudioDevicePropertyScopeInput) > 0, isRunningSomewhere(id) else { return false }
+        let transport = transportType(id)
+        return deviceUID(id) == virtualMicUID || transport == kAudioDeviceTransportTypeBuiltIn
+            || transport == kAudioDeviceTransportTypeBluetooth || transport == kAudioDeviceTransportTypeBluetoothLE
+    }
+    guard busy.isEmpty else {
+        print("Not starting: \(busy.map(deviceName).joined(separator: ", ")) in use by another app right now (maybe a call). Nothing was changed; try again later.")
+        exit(2)
+    }
+}
+if ["--test", "--test-voice", "--test-button", "--test-default-mic"].contains(where: { args.contains($0) })
+    || (args.contains("--test-sounds") && !args.contains("--recording")) { refuseIfMicsBusy() }
+
 // Makes Pitch Shift Mic the default mic and then waits, so a test can force-quit it and check the watchdog.
 if args.contains("--test-default-mic") {
     DefaultMic.takeOver()
@@ -99,7 +133,7 @@ if args.contains("--list") {
     let out = defaultOutput(), inp = defaultInput()
     print("Devices:")
     for id in allDevices() {
-        let flags = (id == out ? " [default output]" : "") + (id == inp ? " [default input]" : "")
+        let flags = (id == out ? " [default output]" : "") + (id == inp ? " [default input]" : "") + (isRunningSomewhere(id) ? " [in use]" : "")
         let model = modelUID(id)
         print("  \(id) \(deviceName(id)) | \(deviceUID(id)) | model \(model.isEmpty ? "-" : model) | \(Int(nominalRate(id))) Hz | \(fourCC(transportType(id))) | in \(streamCount(id, kAudioDevicePropertyScopeInput)) out \(streamCount(id, kAudioDevicePropertyScopeOutput))\(flags)")
     }
@@ -272,11 +306,23 @@ if args.contains("--test-voice") {
     }
     var phase = 0.0, position = 0
     let toneStart = Int(rate)  // the tone starts 1 s in, once recording runs, so its delay can be measured
+    // --watch: the tone plays for half of every second, so the delay can be measured again each second.
+    let watch = args.contains("--watch")
+    let toneStarts = UnsafeMutablePointer<Double>.allocate(capacity: Int(seconds) + 2)  // host time of each tone start (s)
+    var toneCount = 0
+    voice.testBufferFrames = arg("--buffer").flatMap(UInt32.init)
     voice.testSource = { buffer, frames in
         for i in 0..<frames {
             if let tone {
-                buffer[i] = position < toneStart ? 0 : Float(0.3 * sin(phase))
-                if position >= toneStart { phase += 2 * .pi * tone / rate }
+                let t = position - toneStart
+                let on = t >= 0 && (!watch || t % Int(rate) < Int(rate) / 2)
+                if watch && t >= 0 && t % Int(rate) == 0 && toneCount < Int(seconds) + 2, let chain = voice.chain {
+                    phase = 0
+                    toneStarts[toneCount] = Double(AudioConvertHostTimeToNanos(chain.blockInputTime)) / 1e9 + Double(i) / rate
+                    toneCount += 1
+                }
+                buffer[i] = on ? Float(0.3 * sin(phase)) : 0
+                if on { phase += 2 * .pi * tone / rate }
                 position += 1
             } else if !sourceSamples.isEmpty {
                 buffer[i] = sourceSamples[position % sourceSamples.count]
@@ -291,6 +337,48 @@ if args.contains("--test-voice") {
     voice.hold(true)  // runs the chain like the Test button does (no app is listening yet)
     guard let chain = voice.chain else { print("voice did not start: \(voice.state)"); exit(1) }
     let recorder = try! Recorder(device: virtualMic, seconds: seconds)
+    var delays: [Double] = []  // --watch: mic to Pitch Shift Mic, once per tone start (ms)
+    if watch {
+        print(chain.delayParts)
+        let started = Date()
+        var scanned = 0, quiet = 0, matched = 0
+        func ms(_ frames: Int) -> Double { Double(frames) / chain.sampleRate * 1000 }
+        func look() {
+            // New tone starts heard in Pitch Shift Mic: loud after at least 0.15 s of quiet.
+            let heard = recorder.recorded(from: scanned)
+            let base = Double(AudioConvertHostTimeToNanos(recorder.firstInputTime)) / 1e9
+            for (k, x) in heard.enumerated() {
+                if abs(x) > 0.02 {
+                    if quiet >= Int(0.15 * recorder.sampleRate), recorder.firstInputTime > 0 {
+                        let at = base + Double(scanned + k) / recorder.sampleRate
+                        // Count only the first sound within 0.4 s of a tone start (a tone fades in and out a little).
+                        if let index = (0..<toneCount).last(where: { toneStarts[$0] <= at }), index >= matched, at - toneStarts[index] < 0.4 {
+                            delays.append((at - toneStarts[index]) * 1000)
+                            matched = index + 1
+                        }
+                    }
+                    quiet = 0
+                } else {
+                    quiet += 1
+                }
+            }
+            scanned += heard.count
+            let s = chain.stats.withLock { s -> VoiceStats in
+                let copy = s
+                s.lowest = .max
+                return copy
+            }
+            var line = String(format: "%3.0fs  ring %5d (%5.1f ms, lowest %@) | Rubber Band + ring %5.1f ms | callback %d",
+                              Date().timeIntervalSince(started), s.ring, ms(s.ring), s.lowest == .max ? "  -  " : String(format: "%5.1f ms", ms(s.lowest)),
+                              ms(s.delay), s.frames)
+            line += String(format: " | margin %.1f ms | dry-outs %d, trims %d (%.0f ms), replays %d (%.0f ms), overloads %d",
+                           ms(s.margin), s.dryOuts, s.trims, ms(s.trimmed), s.replays, ms(s.replayed), s.overloads)
+            if tone != nil { line += delays.last.map { String(format: " | mic to Pitch Shift Mic %.0f ms", $0) } ?? " | mic to Pitch Shift Mic -" }
+            print(line)
+            if Date().timeIntervalSince(started) < seconds - 0.5 { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { look() } }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { look() }
+    }
     if slowDeeperArg {  // once a second: the speaking rate and the extra shift in use
         let started = Date()
         func report() {
@@ -305,9 +393,10 @@ if args.contains("--test-voice") {
         voice.stop()
         let peak = recorded.reduce(Float(0)) { max($0, abs($1)) }
         let firstSound = recorded.firstIndex { abs($0) > 0.02 }.map { Double($0) / recorder.sampleRate * 1000 }
-        var line = "voice test: mic=\(chain.micName) rate=\(Int(chain.sampleRate)) style=\(voice.cartoon) cushion=\(Int(Double(chain.cushion) / chain.sampleRate * 1000))ms "
+        let s = chain.stats.withLock { $0 }
+        var line = "voice test: mic=\(chain.micName) rate=\(Int(chain.sampleRate)) style=\(voice.cartoon) callback=\(s.frames) "
+        line += String(format: "shifter+wait=%.0fms dry-outs=%d overloads=%d ", Double(s.delay) / chain.sampleRate * 1000, s.dryOuts, s.overloads)
         line += "recorded=\(recorded.count) peak=\(peak) firstSound=\(firstSound.map { "\(Int($0))ms" } ?? "none")"
-        line += " dropouts=\(chain.dropouts) skips=\(chain.skips)"
         if tone != nil, let heard = recorded.firstIndex(where: { abs($0) > 0.02 }), chain.firstInputTime > 0, recorder.firstInputTime > 0 {
             // From the tone starting at the mic to it coming out of Pitch Shift Mic.
             let toneAt = Double(AudioConvertHostTimeToNanos(chain.firstInputTime)) / 1e9 + Double(toneStart) / rate
@@ -327,6 +416,10 @@ if args.contains("--test-voice") {
             line += String(format: " | expected %.1f Hz, measured %.1f Hz, level %.3f, original left %.4f", expected, best, level(best), level(tone))
         }
         print(line)
+        if !delays.isEmpty {
+            print(String(format: "watch: mic to Pitch Shift Mic %.0f..%.0f ms over %d tone starts (first %.0f, last %.0f)",
+                         delays.min()!, delays.max()!, delays.count, delays.first!, delays.last!))
+        }
         if let path = arg("--out"), let format = AVAudioFormat(standardFormatWithSampleRate: recorder.sampleRate, channels: 1),
            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(recorded.count)) {
             buffer.frameLength = AVAudioFrameCount(recorded.count)
