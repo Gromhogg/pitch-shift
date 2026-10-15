@@ -941,6 +941,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         cartoon: AppDelegate.savedCartoon(defaults),
         micUID: defaults.string(forKey: Keys.voiceMic))
     lazy var test = VoiceTest(voice: voice)
+    // Sound effects into Pitch Shift Mic. Pictures show example names and change nothing.
+    lazy var board = Soundboard(voice: voice, files: preview == nil ? Soundboard.saved(defaults) : Soundboard.examples,
+                                saves: preview == nil)
+    lazy var soundboard = SoundboardPanel(board: board)
 
     // The saved voice style. Version 2.0 had a Natural/Cartoon switch instead: the first launch of this version turns
     // it into the slider's setting (Natural 0, Cartoon 1) and removes it; from then on only voiceCartoon is used.
@@ -963,6 +967,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     let advancedSwitch = GradientSwitch()
     let style = GradientSlider()  // voice style: Natural ... Cartoon
     let testButton = NSButton(title: "Test", target: nil, action: nil)
+    let soundsButton = NSButton(title: "Sounds", target: nil, action: nil)  // opens the Soundboard
     let dot = StatusDot()
     let micName = NSTextField(labelWithString: "Pitch Shift Mic")
     let installButton = NSButton(title: "Install Pitch Shift Mic", target: nil, action: nil)
@@ -980,6 +985,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         hear.onChange = { [weak self] in self?.refresh() }
         voice.onChange = { [weak self] in self?.refresh() }
         test.onChange = { [weak self] in self?.refresh() }
+        board.onChange = { [weak self] in self?.soundboard.update() }
         refresh()
         showWindow()
         if preview != nil { showPreview(); return }
@@ -1100,10 +1106,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         installButton.bezelStyle = .rounded
         installButton.target = self
         installButton.action = #selector(installDriver)
-        footer = CardRow(views: [dot, micName, installButton])
+        // Sounds sits right under Test, the same width.
+        soundsButton.bezelStyle = .rounded
+        soundsButton.target = self
+        soundsButton.action = #selector(soundsClicked)
+        let soundsWidth = soundsButton.widthAnchor.constraint(equalToConstant: 72)
+        soundsWidth.isActive = true
+        footer = CardRow()
+        footer.distribution = .gravityAreas
+        for view in [dot, micName, installButton] { footer.addView(view, in: .leading) }
+        footer.addView(soundsButton, in: .trailing)
         footer.onScale = { [unowned self] scale in
+            let size = Theme.controlSize(scale)
             micName.font = .systemFont(ofSize: 11 + (scale - 1) * 2.5)
-            installButton.useSize(Theme.controlSize(scale))
+            installButton.useSize(size)
+            soundsButton.useSize(size)
+            soundsButton.attributedTitle = NSAttributedString(string: "Sounds", attributes: [
+                .foregroundColor: Theme.mid, .font: NSFont.systemFont(ofSize: Theme.fontSize(size), weight: .medium)])
+            soundsWidth.constant = (72 * scale).rounded()
             footer.spacing = (6 * scale).rounded()
         }
 
@@ -1125,7 +1145,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         background.addSubview(voiceCard)
 
         // Tab goes through one card, then the other.
-        let order = hearCard.keyViews + [advancedSwitch] + voiceCard.keyViews + [style, testButton, installButton]
+        let order = hearCard.keyViews + [advancedSwitch] + voiceCard.keyViews + [style, testButton, installButton, soundsButton]
         background.nextKeyView = order[0]
         for (view, next) in zip(order, order.dropFirst() + [order[0]]) { view.nextKeyView = next }
 
@@ -1375,6 +1395,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     @objc func testClicked() { test.click() }
 
+    // Opens the Soundboard next to the window, or closes it.
+    @objc func soundsClicked() {
+        if soundboard.isOpen { soundboard.close() } else { soundboard.open(beside: window) }
+    }
+
     // MARK: Advanced processing
 
     private var advancedAlert: NSAlert?
@@ -1423,6 +1448,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     func setVoice(_ on: Bool) {
         guard on else {
+            soundboard.close()  // stops its sound too
             voice.stop()
             DefaultMic.giveBack()
             defaults.set(false, forKey: Keys.voiceOn)
@@ -1476,10 +1502,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     // MARK: Showing state
 
     // For screenshots (--preview hear-on,voice-on,waiting,typing,recording,playing,listening,hover,menu,roll,
-    // resize,no-driver,advanced-alert,light [--size 800x400]): shows a state, no sound.
+    // resize,no-driver,advanced-alert,sounds,light [--size 800x400]): shows a state, no sound.
     func showPreview() {
         guard let preview else { return }
-        if preview.contains("light") { window.appearance = NSAppearance(named: .aqua) }
+        if preview.contains("light") {
+            window.appearance = NSAppearance(named: .aqua)
+            soundboard.panel.appearance = NSAppearance(named: .aqua)
+        }
+        if preview.contains("sounds") {  // the Soundboard with example names, the second one playing
+            board.showAsPlaying(Soundboard.examples[1])
+            soundboard.open(beside: window)
+            if preview.contains("hover") { soundboard.showHover() }
+        }
         if let cartoonArg { voice.cartoon = cartoonArg }  // where the style slider is (--cartoon-amount 0.5)
         refresh()
         if preview.contains("typing") {
@@ -1525,6 +1559,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         installed = now
         dot.isHidden = !now
         micName.isHidden = !now
+        soundsButton.isHidden = !now
         installButton.isHidden = now
         measure()
         let size = window.contentView?.bounds.size ?? minSide
@@ -1560,6 +1595,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         voiceCard.picker.isEnabled = installed && hasMic
         style.value = voice.cartoon
         style.isEnabled = voiceOn && installed
+        soundsButton.isEnabled = voiceOn && installed && hasMic
         if case .problem(let message) = voice.state { voiceCard.amount.toolTip = message } else { voiceCard.amount.toolTip = nil }
 
         let listening = preview.map { $0.contains("listening") } ?? voice.listening
