@@ -8,11 +8,17 @@ extern "C" {
 #endif
 
 // key / default:
-//   "recipe" 3       3: balanced3 (research round 4, the app's recipe); 2: balanced2 (round 3: blend ramp for +3..+7 with
-//                    the unfolded low band riding in the main shifter, no fold floor, EQ without the deeper low cuts)
+//   "recipe" 4       4: balanced3 with the bass fix (the app's recipe after 2.0.0: steep, power-keeping fold floor at
+//                    45 Hz; going up, the EQ treats the bass like the rest instead of cutting moved bass notes);
+//                    3: balanced3 exactly as in 2.0.0 (research round 4: floor at 35 Hz with LR4 splits, deeper EQ
+//                    cuts below 100 Hz both ways); 2: balanced2 (round 3: blend ramp for +3..+7 with the unfolded low
+//                    band riding in the main shifter, no fold floor, EQ without the deeper low cuts).
+//                    Set "recipe" first: it resets "floorhz" to its own default.
 //   "fold2" 1        second fold (N-24) for N > +15 (0: the one fold keeps going up with N)
 //   "floor2" 1       fold floor for the second fold too (its sub bass goes one level up); 0 = none
-//   "floorhz" 35, "floorout" 30   fold floor and the fold's output high-pass on +3..+7 (Hz)
+//   "floorhz" 45, "floorendhz" 35, "floor2hz" 35, "floorout" 30   fold floor up to +8 (35 with recipe 3), the
+//                    floor it eases to by +11 (recipe 4 only), the second fold's floor, and the fold's output
+//                    high-pass on +3..+7 (Hz)
 //   "airmin" 7000    pitch-down: the unshifted top band never starts below this (Hz)
 //   "catchup" 2      a new amount's shifters are fed up to this many times faster than real time while they catch up
 //   "fadems" 80      crossfade from the old amount to the new one (ms)
