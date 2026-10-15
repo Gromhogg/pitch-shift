@@ -48,6 +48,7 @@ More help: [windows/README.md](windows/README.md).
 **Your voice**
 
 - Pick your mic, turn it on, and slide from **Natural** (sounds like a different person) to **Cartoon** (chipmunk or monster). On Windows, choose Natural or Cartoon.
+- Turn on **Deeper when slow** and your voice goes lower while you talk slowly, then back when you talk normally (Mac).
 - In Discord, Zoom or any other app, choose **Pitch Shift Mic** as your microphone.
 - Press **Test** to record 5 seconds of your shifted voice and hear it back.
 - Use headphones in calls. If your voice cuts out, turn off the call app's noise suppression (like Krisp).

@@ -43,8 +43,9 @@ enum Mics {
 // Settings the sound thread reads. Changed from the window, read without waiting on the sound thread.
 struct VoiceParams {
     var halfSteps: Float
-    var cartoon: Float  // voice style: 0 = Natural, 1 = Cartoon, in between = a blend
-    var silent: Bool    // during Test playback, so the replay isn't sent into a live call
+    var cartoon: Float      // voice style: 0 = Natural, 1 = Cartoon, in between = a blend
+    var slowDeeper = false  // "Deeper when slow": talking slowly makes the voice lower
+    var silent: Bool        // during Test playback, so the replay isn't sent into a live call
 }
 
 // Rubber Band settings for the voice (the Windows version uses the same ones, with a Natural/Cartoon switch).
@@ -66,47 +67,259 @@ func voiceFormantScale(halfSteps: Float, cartoon: Float) -> Double {
 }
 
 // The voice's Rubber Band shifter (used by the live chain and by the offline check --render-voice).
-// A new style glides there over a short moment, so moving the slider never clicks.
+// A new style glides there over a short moment, so moving the slider never clicks. "Deeper when slow" adds an extra
+// shift on top of the set amount, which glides too.
 final class VoiceStretcher {
     let state: RubberBandState
-    private(set) var halfSteps: Float
+    private(set) var halfSteps: Float  // the set amount
     private var cartoon: Float      // the style asked for
     private var cartoonNow: Float   // the style in use (glides toward `cartoon`)
     private let glideStep: Float    // how much the style may move per sample
+    private(set) var slowDeeper: Bool
+    private(set) var extra: Float = 0    // "Deeper when slow": half-steps added now (glides toward `extraTarget`)
+    private var extraTarget: Float = 0
+    private var extraStep: Float = 0     // how much `extra` moves per sample on its way
+    private let extraGlide: Float        // each move of `extra` takes this many samples (0.3 s)
 
-    init?(rate: Double, halfSteps: Float, cartoon: Float) {
+    init?(rate: Double, halfSteps: Float, cartoon: Float, slowDeeper: Bool = false) {
         guard let made = rubberband_new(UInt32(rate), 1, voiceShifterOptions, 1, pow(2, Double(halfSteps) / 12)) else { return nil }
         state = made
         self.halfSteps = halfSteps
         self.cartoon = max(0, min(1, cartoon))
         cartoonNow = self.cartoon
         glideStep = Float(1 / (0.15 * rate))  // all the way from Natural to Cartoon in 0.15 s
+        self.slowDeeper = slowDeeper
+        extraGlide = Float(0.3 * rate)
         rubberband_set_max_process_size(state, 4096)
         rubberband_set_formant_scale(state, voiceFormantScale(halfSteps: halfSteps, cartoon: self.cartoon))
     }
 
     deinit { rubberband_delete(state) }
 
+    // The pitch in use: the set amount plus the extra shift.
+    var pitch: Float { halfSteps + extra }
+
+    // False when the voice goes through untouched (at 0, unless "Deeper when slow" is on).
+    var running: Bool { halfSteps != 0 || slowDeeper }
+
     // Returns true when the shifter started fresh (coming back from normal pitch), so old sound should be dropped.
     func set(halfSteps new: Float) -> Bool {
         guard new != halfSteps else { return false }
-        let fresh = halfSteps == 0 && new != 0
+        let fresh = !running && new != 0
         if fresh { rubberband_reset(state) }
-        if new != 0 { rubberband_set_pitch_scale(state, pow(2, Double(new) / 12)) }
         halfSteps = new
-        rubberband_set_formant_scale(state, voiceFormantScale(halfSteps: halfSteps, cartoon: cartoonNow))
+        if running { rubberband_set_pitch_scale(state, pow(2, Double(pitch) / 12)) }
+        rubberband_set_formant_scale(state, voiceFormantScale(halfSteps: pitch, cartoon: cartoonNow))
         return fresh
     }
 
     func set(cartoon new: Float) { cartoon = max(0, min(1, new)) }
 
-    // Moves the style toward where it's heading; call once for each piece of `frames` samples.
-    func glide(_ frames: Int) {
-        guard cartoonNow != cartoon else { return }
-        let step = glideStep * Float(frames)
-        cartoonNow = abs(cartoon - cartoonNow) <= step ? cartoon : cartoonNow + (cartoon > cartoonNow ? step : -step)
-        rubberband_set_formant_scale(state, voiceFormantScale(halfSteps: halfSteps, cartoon: cartoonNow))
+    // Turns "Deeper when slow" on or off; either way the voice goes straight back to the set amount.
+    // Returns true when the shifter started fresh (it wasn't in use at 0), so old sound should be dropped.
+    func set(slowDeeper on: Bool) -> Bool {
+        guard on != slowDeeper else { return false }
+        let fresh = on && !running
+        if fresh { rubberband_reset(state) }
+        slowDeeper = on
+        extra = 0
+        extraTarget = 0
+        guard running else { return fresh }
+        rubberband_set_pitch_scale(state, pow(2, Double(pitch) / 12))
+        rubberband_set_formant_scale(state, voiceFormantScale(halfSteps: pitch, cartoon: cartoonNow))
+        return fresh
     }
+
+    // Where the extra shift should go (0 or lower). It glides there in 0.3 s.
+    func set(extra target: Float) {
+        guard slowDeeper, target != extraTarget else { return }
+        extraTarget = target
+        extraStep = abs(target - extra) / extraGlide
+    }
+
+    // Moves the style and the extra shift toward where they're heading; call once for each piece of `frames` samples.
+    func glide(_ frames: Int) {
+        let restyle = cartoonNow != cartoon, repitch = extra != extraTarget
+        guard restyle || repitch else { return }
+        if restyle {
+            let step = glideStep * Float(frames)
+            cartoonNow = abs(cartoon - cartoonNow) <= step ? cartoon : cartoonNow + (cartoon > cartoonNow ? step : -step)
+        }
+        if repitch {
+            let step = extraStep * Float(frames)
+            extra = abs(extraTarget - extra) <= step ? extraTarget : extra + (extraTarget > extra ? step : -step)
+            rubberband_set_pitch_scale(state, pow(2, Double(pitch) / 12))
+        }
+        rubberband_set_formant_scale(state, voiceFormantScale(halfSteps: pitch, cartoon: cartoonNow))
+    }
+}
+
+// "Deeper when slow": how fast someone is talking, and how much lower that makes the voice.
+// Each syllable is a bump in loudness, so it counts bumps: the loudness of the voice's middle sounds (about
+// 250-2500 Hz, where the vowels are), smoothed over 20 ms and looked at every 10 ms. A bump counts when it rises
+// well above the quiet between words (the quietest moment of the last second), falls again, and comes at least
+// 80 ms after the last one. The rate is the bumps in the last 2 seconds of talking. Pauses don't count as talking,
+// so the rate stays where it was while it's quiet. The voice only moves once the rate has clearly changed
+// (by more than 0.5 per second, for more than half a second), so normal talking doesn't wobble.
+// `listen` runs on the sound thread: it makes no memory and never waits.
+final class SpeakingRate {
+    static let depth: Float = 5         // half-steps lower when talking slowly
+    static let slowRate: Float = 2      // syllables per second: this slow or slower gets all of `depth`
+    static let normalRate: Float = 4    // this fast or faster: no change (in between: part of `depth`)
+
+    private(set) var rate = SpeakingRate.normalRate  // syllables per second, as measured
+    private(set) var used = SpeakingRate.normalRate  // the rate the voice follows (moves only after a clear change)
+    var extra: Float {  // half-steps to add: 0 down to -depth
+        -Self.depth * max(0, min(1, (Self.normalRate - used) / (Self.normalRate - Self.slowRate)))
+    }
+
+    // Everything below counts in steps of 10 ms.
+    private let bumpRise: Float = 2       // dB a bump must rise and fall
+    private let bumpAboveQuiet: Float = 9 // dB a bump's top must be above the quiet level
+    private let talkAboveQuiet: Float = 6 // dB above the quiet level that counts as talking
+    private let quietest: Float = -55     // dB: anything quieter is never talking
+    private let bumpGap = 8               // at least 80 ms between bumps
+    private let talkHold = 25             // a pause still counts as talking for its first 0.25 s
+    private let windowSteps = 200         // the rate counts the last 2 s of talking
+    private let firstSteps = 100          // ...once there has been 1 s of it
+    private let moveAfter = 50            // the rate must stay clearly changed this long (0.5 s) to move the voice
+    private let stepLength: Int           // samples in 10 ms
+    private let smoothing: Double         // for the 20 ms smoothing
+    private let b0, a1, a2: Double        // the 250-2500 Hz band-pass filter
+    private let quietPieces: UnsafeMutablePointer<Float>  // the quietest level in each 100 ms of the last second
+    private let window: UnsafeMutablePointer<UInt8>       // bumps in each 10 ms of the last 2 s of talking
+
+    private var x1 = 0.0, x2 = 0.0, y1 = 0.0, y2 = 0.0
+    private var energy = 0.0
+    private var inStep = 0
+    private var step = 0
+    private var piece = 0, inPiece = 0, pieceQuietest = Float.infinity
+    private var rising = true
+    private var top = -Float.infinity, bottom = Float.infinity
+    private var lastBump = -1_000_000, lastLoud = -1_000_000
+    private var newBumps = 0
+    private var windowAt = 0, windowFilled = 0, windowBumps = 0
+    private var changedFor = 0
+
+    init(sampleRate: Double) {
+        stepLength = max(1, Int((sampleRate * 0.01).rounded()))
+        smoothing = 1 - exp(-1 / (0.02 * sampleRate))
+        // Band-pass around 790 Hz, about 3.3 octaves wide (Robert Bristow-Johnson's audio EQ cookbook).
+        let w = 2 * Double.pi * min(790, sampleRate * 0.4) / sampleRate
+        let alpha = sin(w) / (2 * 0.35)
+        b0 = alpha / (1 + alpha)
+        a1 = -2 * cos(w) / (1 + alpha)
+        a2 = (1 - alpha) / (1 + alpha)
+        quietPieces = .allocate(capacity: 10)
+        window = .allocate(capacity: windowSteps)
+        reset()
+    }
+
+    deinit {
+        quietPieces.deallocate()
+        window.deallocate()
+    }
+
+    // Starts over, as if nobody had talked yet.
+    func reset() {
+        x1 = 0; x2 = 0; y1 = 0; y2 = 0
+        energy = 0
+        inStep = 0
+        step = 0
+        quietPieces.update(repeating: .infinity, count: 10)
+        piece = 0; inPiece = 0; pieceQuietest = .infinity
+        rising = true; top = -.infinity; bottom = .infinity
+        lastBump = -1_000_000; lastLoud = -1_000_000
+        newBumps = 0
+        window.update(repeating: 0, count: windowSteps)
+        windowAt = 0; windowFilled = 0; windowBumps = 0
+        changedFor = 0
+        rate = Self.normalRate
+        used = Self.normalRate
+    }
+
+    // Takes the next piece of the mic's sound.
+    func listen(_ samples: UnsafePointer<Float>, _ count: Int) {
+        for i in 0..<count {
+            let x = Double(samples[i])
+            let y = b0 * (x - x2) - a1 * y1 - a2 * y2
+            x2 = x1; x1 = x
+            y2 = y1; y1 = y
+            energy += smoothing * (y * y - energy)
+            inStep += 1
+            if inStep == stepLength {
+                inStep = 0
+                nextStep()
+            }
+        }
+    }
+
+    private func nextStep() {
+        step += 1
+        // Tiny numbers are slow on Intel Macs: round them off (-120 dB is far below any mic).
+        energy = max(energy, 1e-12)
+        if abs(y1) < 1e-15 { y1 = 0 }
+        if abs(y2) < 1e-15 { y2 = 0 }
+        let level = Float(10 * log10(energy))
+
+        // The quiet level: the quietest moment of the last second.
+        pieceQuietest = min(pieceQuietest, level)
+        inPiece += 1
+        if inPiece == 10 {
+            quietPieces[piece] = pieceQuietest
+            piece = (piece + 1) % 10
+            inPiece = 0
+            pieceQuietest = .infinity
+        }
+        var quiet = pieceQuietest
+        for p in 0..<10 { quiet = min(quiet, quietPieces[p]) }
+
+        // Bumps: up by `bumpRise`, then down by `bumpRise`.
+        if rising {
+            top = max(top, level)
+            if level < top - bumpRise {
+                if top > quiet + bumpAboveQuiet && top > quietest && step - lastBump >= bumpGap {
+                    newBumps += 1
+                    lastBump = step
+                }
+                rising = false
+                bottom = level
+            }
+        } else {
+            bottom = min(bottom, level)
+            if level > bottom + bumpRise {
+                rising = true
+                top = level
+            }
+        }
+
+        if level > quiet + talkAboveQuiet && level > quietest { lastLoud = step }
+        guard step - lastLoud <= talkHold else { return }  // quiet: everything stays as it is
+
+        // Talking: these 10 ms join the window.
+        let added = min(newBumps, 255)
+        newBumps = 0
+        windowBumps += added - Int(window[windowAt])
+        window[windowAt] = UInt8(added)
+        windowAt = (windowAt + 1) % windowSteps
+        windowFilled = min(windowFilled + 1, windowSteps)
+        if windowFilled >= firstSteps { rate = Float(windowBumps) / (Float(windowFilled) * 0.01) }
+        if abs(rate - used) > 0.5 {
+            changedFor += 1
+            if changedFor >= moveAfter {
+                used = rate
+                changedFor = 0
+            }
+        } else {
+            changedFor = 0
+        }
+    }
+}
+
+// What "Deeper when slow" is doing, for the command-line test.
+struct SlowReading {
+    var rate: Float = SpeakingRate.normalRate
+    var extra: Float = 0
 }
 
 // One running voice chain: a private combined device of [real mic + hidden side of Pitch Shift Mic] with one
@@ -137,9 +350,13 @@ final class VoiceChain {
     private var sinceCheck = 0
     private let checkEvery: Int
     private let extraAllowed: Int
+    private let speaking: SpeakingRate  // "Deeper when slow"
     // For the command-line test: replaces the mic with a made-up sound.
     var testSource: ((UnsafeMutablePointer<Float>, Int) -> Void)?
     private(set) var firstInputTime: UInt64 = 0  // host time of the first mic sample (for the delay test)
+    let slowReading = OSAllocatedUnfairLock(initialState: SlowReading())  // for the test (written without waiting)
+    private(set) var dropouts = 0  // times the sound ran out and had to wait (for the test)
+    private(set) var skips = 0     // times extra delay was skipped (for the test)
 
     init(mic: AudioDeviceID, feed: AudioDeviceID, params: OSAllocatedUnfairLock<VoiceParams>) throws {
         micName = deviceName(mic)
@@ -158,10 +375,11 @@ final class VoiceChain {
         self.params = params
         let start = params.withLock { $0 }
         applied = start
-        guard let made = VoiceStretcher(rate: rate, halfSteps: start.halfSteps, cartoon: start.cartoon) else {
+        guard let made = VoiceStretcher(rate: rate, halfSteps: start.halfSteps, cartoon: start.cartoon, slowDeeper: start.slowDeeper) else {
             throw Problem(message: "Can't use \(micName).")
         }
         stretcher = made
+        speaking = SpeakingRate(sampleRate: rate)
         // 20 ms is enough at every amount and callback size tried (16-96 kHz); more would only add delay.
         cushion = Int(rate * 0.02)
         extraAllowed = Int(rate * 0.005)
@@ -244,7 +462,14 @@ final class VoiceChain {
             for i in 0..<frames { source[i] = 0 }
         }
 
-        let shifting = applied.halfSteps != 0
+        if applied.slowDeeper {
+            speaking.listen(source, frames)
+            stretcher.set(extra: speaking.extra)
+            let reading = SlowReading(rate: speaking.rate, extra: stretcher.extra)
+            slowReading.withLockIfAvailable { $0 = reading }
+        }
+
+        let shifting = stretcher.running
         if shifting { shift(source, frames) }
         for i in 0..<frames {
             var value: Float = 0
@@ -257,6 +482,7 @@ final class VoiceChain {
                     ringCount -= 1
                 } else {
                     waiting = true  // ran dry (only right after a big amount change): build the cushion again
+                    dropouts += 1
                 }
             }
             if applied.silent { value = 0 }
@@ -300,7 +526,10 @@ final class VoiceChain {
         if !waiting { lowest = min(lowest, ringCount - frames) }
         sinceCheck += frames
         if sinceCheck >= checkEvery {
-            if !waiting && lowest != .max && lowest > cushion + extraAllowed { skip(lowest - cushion) }
+            if !waiting && lowest != .max && lowest > cushion + extraAllowed {
+                skip(lowest - cushion)
+                skips += 1
+            }
             lowest = .max
             sinceCheck = 0
         }
@@ -326,7 +555,9 @@ final class VoiceChain {
 
     private func apply(_ latest: VoiceParams) {
         stretcher.set(cartoon: latest.cartoon)
-        if stretcher.set(halfSteps: latest.halfSteps) {  // coming back from normal pitch: start fresh
+        if latest.slowDeeper && !applied.slowDeeper { speaking.reset() }
+        let restarted = stretcher.set(slowDeeper: latest.slowDeeper)
+        if stretcher.set(halfSteps: latest.halfSteps) || restarted {  // coming back from normal pitch: start fresh
             ringRead = 0
             ringCount = 0
             waiting = true
@@ -375,6 +606,7 @@ enum VoiceState: Equatable {
 final class VoiceShifter {
     var halfSteps: Float { didSet { pushParams() } }
     var cartoon: Float { didSet { pushParams() } }  // voice style: 0 = Natural, 1 = Cartoon
+    var slowDeeper: Bool { didSet { pushParams() } }  // "Deeper when slow"
     var micUID: String? { didSet { if oldValue != micUID { rebuild() } } }  // nil = the Mac's default mic
     var onChange: () -> Void = {}
     var testSource: ((UnsafeMutablePointer<Float>, Int) -> Void)?
@@ -390,11 +622,12 @@ final class VoiceShifter {
     private let debounce = Debouncer(0.3)
     private var rebuilds: [Date] = []
 
-    init(halfSteps: Float, cartoon: Float, micUID: String?) {
+    init(halfSteps: Float, cartoon: Float, slowDeeper: Bool = false, micUID: String?) {
         self.halfSteps = halfSteps
         self.cartoon = cartoon
+        self.slowDeeper = slowDeeper
         self.micUID = micUID
-        params = OSAllocatedUnfairLock(initialState: VoiceParams(halfSteps: halfSteps, cartoon: cartoon, silent: false))
+        params = OSAllocatedUnfairLock(initialState: VoiceParams(halfSteps: halfSteps, cartoon: cartoon, slowDeeper: slowDeeper, silent: false))
     }
 
     var isOn: Bool { running }
@@ -435,8 +668,8 @@ final class VoiceShifter {
     }
 
     private func pushParams() {
-        let steps = halfSteps, cartoon = cartoon
-        params.withLock { $0.halfSteps = steps; $0.cartoon = cartoon }
+        let steps = halfSteps, cartoon = cartoon, slowDeeper = slowDeeper
+        params.withLock { $0.halfSteps = steps; $0.cartoon = cartoon; $0.slowDeeper = slowDeeper }
     }
 
     private func setState(_ new: VoiceState) {
@@ -678,8 +911,10 @@ final class VoiceTest {
 
 // Offline check (--render-voice): shifts a sound file with the voice's own Rubber Band settings, in 512-sample
 // pieces like the live chain, and writes one channel. `changes` moves the style part way through
-// ((seconds, style) pairs), to check that it changes smoothly.
-func renderVoiceFile(input: String, output: String, halfSteps: Float, cartoon: Float, changes: [(Double, Float)]) throws {
+// ((seconds, style) pairs), to check that it changes smoothly. With `slowDeeper` it prints the speaking rate and
+// the extra shift once per second of sound.
+func renderVoiceFile(input: String, output: String, halfSteps: Float, cartoon: Float, changes: [(Double, Float)],
+                     slowDeeper: Bool = false) throws {
     let file = try AVAudioFile(forReading: URL(fileURLWithPath: input))
     let rate = file.processingFormat.sampleRate
     let length = Int(file.length)
@@ -696,10 +931,12 @@ func renderVoiceFile(input: String, output: String, halfSteps: Float, cartoon: F
         for i in 0..<length { mono[i] += data[i] / Float(used) }
     }
     var result = mono
-    if halfSteps != 0 {
-        guard let stretcher = VoiceStretcher(rate: rate, halfSteps: halfSteps, cartoon: cartoon) else {
+    if halfSteps != 0 || slowDeeper {
+        guard let stretcher = VoiceStretcher(rate: rate, halfSteps: halfSteps, cartoon: cartoon, slowDeeper: slowDeeper) else {
             throw Problem(message: "Could not start Rubber Band.")
         }
+        let speaking = SpeakingRate(sampleRate: rate)
+        var nextReport = 1
         let block = 512
         var skip = Int(rubberband_get_start_delay(stretcher.state))  // so the output lines up with the input
         var chunk = [Float](repeating: 0, count: block)
@@ -711,6 +948,14 @@ func renderVoiceFile(input: String, output: String, halfSteps: Float, cartoon: F
             if let change = changes.last(where: { Int($0.0 * rate) <= position }) { stretcher.set(cartoon: change.1) }
             stretcher.glide(block)
             for i in 0..<block { chunk[i] = position + i < length ? mono[position + i] : 0 }
+            if slowDeeper {
+                chunk.withUnsafeBufferPointer { speaking.listen($0.baseAddress!, block) }
+                stretcher.set(extra: speaking.extra)
+                if position + block >= nextReport * Int(rate) && position + block <= length {
+                    print(String(format: "%3ds  rate %.1f syllables/s  extra %+.1f half-steps", nextReport, speaking.rate, stretcher.extra))
+                    nextReport += 1
+                }
+            }
             chunk.withUnsafeBufferPointer { p in
                 var pointer: UnsafePointer<Float>? = p.baseAddress
                 rubberband_process(stretcher.state, &pointer, UInt32(block), 0)
