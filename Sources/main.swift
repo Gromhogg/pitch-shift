@@ -1,6 +1,9 @@
 // Pitch Shift: plays an app's sound (or all sound) and/or your voice at a higher or lower pitch, live.
 // Checks from Terminal (inside "Pitch Shift.app/Contents/MacOS/PitchShift"):
-//   --list                                     sound devices, Pitch Shift Mic, and which app each sound process belongs to
+//   --list                                     sound devices (and which are in use), Pitch Shift Mic, and which app each
+//                                              sound process belongs to
+// The device tests (--test, --test-voice, --test-button, --test-default-mic) refuse to start while Pitch Shift Mic,
+// the built-in mic or a Bluetooth mic is in use by another app (for example a call).
 //   --test [--pid N | --app BUNDLE_ID | --all] [--steps 2.5] [--seconds S]     "What you hear" for a few seconds
 //   --test-voice [--mic NAME] [--tone 440 | --file F] [--steps 3] [--cartoon | --cartoon-amount 0.5] [--seconds S]
 //                [--out F.caf]                 sends a tone or file through the voice chain and records Pitch Shift Mic
@@ -51,6 +54,23 @@ let cartoonArg: Float? = args.contains("--cartoon") ? 1 : arg("--cartoon-amount"
 // The watchdog: a second copy of the app that gives the real mic back if the app ends without doing it.
 if let pid = arg("--watchdog").flatMap({ pid_t($0) }) { DefaultMic.watch(pid) }
 
+// Device tests share the Mac's microphones and Pitch Shift Mic with whatever the owner is doing. They only start
+// when Pitch Shift Mic, the built-in mic and every Bluetooth mic are idle (not used by any app, for example a call
+// in FaceTime, Discord or a browser). Otherwise they stop right away, before touching any device.
+func refuseIfMicsBusy() {
+    let busy = allDevices().filter { id in
+        guard streamCount(id, kAudioDevicePropertyScopeInput) > 0, isRunningSomewhere(id) else { return false }
+        let transport = transportType(id)
+        return deviceUID(id) == virtualMicUID || transport == kAudioDeviceTransportTypeBuiltIn
+            || transport == kAudioDeviceTransportTypeBluetooth || transport == kAudioDeviceTransportTypeBluetoothLE
+    }
+    guard busy.isEmpty else {
+        print("Not starting: \(busy.map(deviceName).joined(separator: ", ")) in use by another app right now (maybe a call). Nothing was changed; try again later.")
+        exit(2)
+    }
+}
+if ["--test", "--test-voice", "--test-button", "--test-default-mic"].contains(where: { args.contains($0) }) { refuseIfMicsBusy() }
+
 // Makes Pitch Shift Mic the default mic and then waits, so a test can force-quit it and check the watchdog.
 if args.contains("--test-default-mic") {
     DefaultMic.takeOver()
@@ -63,7 +83,7 @@ if args.contains("--list") {
     let out = defaultOutput(), inp = defaultInput()
     print("Devices:")
     for id in allDevices() {
-        let flags = (id == out ? " [default output]" : "") + (id == inp ? " [default input]" : "")
+        let flags = (id == out ? " [default output]" : "") + (id == inp ? " [default input]" : "") + (isRunningSomewhere(id) ? " [in use]" : "")
         print("  \(id) \(deviceName(id)) | \(deviceUID(id)) | \(Int(nominalRate(id))) Hz | \(fourCC(transportType(id))) | in \(streamCount(id, kAudioDevicePropertyScopeInput)) out \(streamCount(id, kAudioDevicePropertyScopeOutput))\(flags)")
     }
     if let mic = Mics.virtualMic, let feed = Mics.virtualFeed {

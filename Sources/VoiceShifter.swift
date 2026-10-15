@@ -141,7 +141,9 @@ final class VoiceChain {
     var testSource: ((UnsafeMutablePointer<Float>, Int) -> Void)?
     private(set) var firstInputTime: UInt64 = 0  // host time of the first mic sample (for the delay test)
 
-    init(mic: AudioDeviceID, feed: AudioDeviceID, params: OSAllocatedUnfairLock<VoiceParams>) throws {
+    init(mic: AudioDeviceID, feed: AudioDeviceID, params: OSAllocatedUnfairLock<VoiceParams>,
+         testSource: ((UnsafeMutablePointer<Float>, Int) -> Void)? = nil) throws {
+        self.testSource = testSource  // set before the sound starts, so a test never sends the real mic
         micName = deviceName(mic)
         micUID = deviceUID(mic)
         devices = [mic, Mics.virtualMic ?? 0, feed]
@@ -503,8 +505,7 @@ final class VoiceShifter {
             stopLater = nil
             if chain == nil {
                 do {
-                    let made = try VoiceChain(mic: mic, feed: feed, params: params)
-                    made.testSource = testSource
+                    let made = try VoiceChain(mic: mic, feed: feed, params: params, testSource: testSource)
                     chain = made
                 } catch {
                     setState(.problem((error as? Problem)?.message ?? "\(error)"))
