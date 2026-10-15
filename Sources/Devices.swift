@@ -43,6 +43,8 @@ func getString(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector)
 func allDevices() -> [AudioDeviceID] { getArray(system, kAudioHardwarePropertyDevices, of: AudioDeviceID.self) }
 func deviceName(_ id: AudioDeviceID) -> String { getString(id, kAudioObjectPropertyName) }
 func deviceUID(_ id: AudioDeviceID) -> String { getString(id, kAudioDevicePropertyDeviceUID) }
+// The same for every unit of one model (for Bluetooth headphones it holds the maker's and the model's numbers).
+func modelUID(_ id: AudioDeviceID) -> String { getString(id, kAudioDevicePropertyModelUID) }
 func defaultOutput() -> AudioDeviceID { getValue(system, kAudioHardwarePropertyDefaultOutputDevice, default: AudioDeviceID(0)) }
 func defaultInput() -> AudioDeviceID { getValue(system, kAudioHardwarePropertyDefaultInputDevice, default: AudioDeviceID(0)) }
 func nominalRate(_ id: AudioDeviceID) -> Double { getValue(id, kAudioDevicePropertyNominalSampleRate, default: Float64(0)) }

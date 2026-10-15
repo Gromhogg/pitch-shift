@@ -1,16 +1,24 @@
 // Pitch Shift: plays an app's sound (or all sound) and/or your voice at a higher or lower pitch, live.
 // Checks from Terminal (inside "Pitch Shift.app/Contents/MacOS/PitchShift"):
-//   --list                                     sound devices, Pitch Shift Mic, and which app each sound process belongs to
+//   --list                                     sound devices (with model UIDs), Pitch Shift Mic, the saved Bass ↔ Treble
+//                                              per output, and which app each sound process belongs to
 //   --test [--pid N | --app BUNDLE_ID | --all] [--steps 2.5] [--seconds S]     "What you hear" for a few seconds
-//   --test-voice [--mic NAME] [--tone 440 | --file F] [--steps 3] [--cartoon] [--seconds S] [--out F.caf]
-//                                              sends a tone or file through the voice chain and records Pitch Shift Mic
-//   --test-button [--volume 0.03]              presses Test with a quiet tone as the voice (record 5 s, play back)
-//   --test ... --advanced [--record-out F.wav] [--steps-at "3:8,6:-5"] [--tone-db 6,-6]
+//   --test-voice [--mic NAME] [--tone 440 | --file F] [--steps 3] [--cartoon | --cartoon-amount 0.5] [--seconds S]
+//                [--out F.caf]                 sends a tone or file through the voice chain and records Pitch Shift Mic
+//                                              (voice style from 0 = Natural, the default, to 1 = Cartoon; --cartoon = 1)
+//   --render-voice IN OUT [--steps 3] [--cartoon | --cartoon-amount 0.5] [--cartoon-at "1:1,2:0"]
+//                                              shifts a sound file with the voice's own settings (offline, no devices;
+//                                              --cartoon-at "1:1,2:0" moves the style to 1 at 1 s and back to 0 at 2 s)
+//   --test-button [--mic NAME] [--volume 0.03] presses Test with a quiet tone as the voice (record 5 s, play back)
+//   --test ... --advanced [--record-out F.wav] [--steps-at "3:8,6:-5"] [--tone-amount 0.5] [--tone-at "2:1,4:-1"]
+//              [--as-device UID] [--tone-db 6,-6]
 //                                              "What you hear" with Advanced processing on (--watch prints the delay;
 //                                              --record-out saves what it played; --steps-at changes the amount live;
-//                                              --tone-db sets its bass and treble in dB)
-//   --render-file IN OUT [--steps 5] [--advanced] [--steps-at "4:8,8:-5"] [--tone-db 6,-6]
-//                                              shifts a sound file with the app's own code (normal or advanced)
+//                                              --tone-amount sets the Bass ↔ Treble slider, −1 … 1, for the output;
+//                                              --tone-at moves it live; --as-device uses that device's saved Bass ↔
+//                                              Treble as if it were playing; --tone-db sets bass and treble in dB)
+//   --render-file IN OUT [--steps 5] [--advanced] [--steps-at "4:8,8:-5"] [--tone-amount 0.5] [--tone-at "2:1,4:-1"]
+//                [--tone-db 6,-6]              shifts a sound file with the app's own code (normal or advanced)
 import AppKit
 import AVFoundation
 import CoreAudio
@@ -20,9 +28,11 @@ func arg(_ name: String) -> String? {
     guard let i = args.firstIndex(of: name), i + 1 < args.count else { return nil }
     return args[i + 1]
 }
-// --preview STATES [--size 800x400]: show the window in a state for screenshots, without touching any sound
-// (states: hear-on, voice-on, waiting, typing, recording, playing, listening, hover, menu, roll, resize, no-driver,
-// advanced-alert, light).
+// --preview STATES [--size 800x400] [--cartoon-amount 0.5] [--tone-amount -0.4]: show the window in a state for
+// screenshots, without touching any sound or settings, and without switching apps (states: hear-on, voice-on, waiting,
+// typing, recording, playing, listening, hover, menu, roll, resize, no-driver, advanced-alert, light, tone;
+// --cartoon-amount sets the voice style slider; "tone" shows Advanced processing on, and --tone-amount sets the
+// Bass ↔ Treble slider).
 let preview = arg("--preview")
 
 var signalSources: [DispatchSourceSignal] = []
@@ -37,14 +47,27 @@ func onQuitSignals(_ handler: @escaping () -> Void) {
 }
 
 // --tone-db "B,T": Advanced processing's bass and treble in dB (not --tone, which is a frequency in --test-voice).
-let toneFromArgs: (bass: Double, treble: Double) = {
+let toneDbArg: (bass: Double, treble: Double)? = {
     let parts = (arg("--tone-db") ?? "").split(separator: ",").compactMap { Double($0) }
-    return parts.count == 2 ? (parts[0], parts[1]) : (0, 0)
+    return parts.count == 2 ? (parts[0], parts[1]) : nil
 }()
+// --tone-amount T: the Bass ↔ Treble slider, −1 (more bass) … 0 (middle) … 1 (more treble). In --preview it sets
+// where the slider is. --tone-at "2:1,4:-1": moves it to 1 at 2 s, then to −1 at 4 s.
+func parseTilt(_ text: Substring) -> Float? { Float(text).flatMap { $0.isFinite ? max(-1, min(1, $0)) : nil } }
+let toneArg: Float? = arg("--tone-amount").flatMap { parseTilt(Substring($0)) }
+let toneChanges: [(Double, Float)] = (arg("--tone-at") ?? "").split(separator: ",").compactMap { item in
+    let parts = item.split(separator: ":")
+    guard parts.count == 2, let t = Double(parts[0]), let value = parseTilt(parts[1]) else { return nil }
+    return (t, value)
+}
 
 func fourCC(_ value: UInt32) -> String {
     String(bytes: [24, 16, 8, 0].map { UInt8((value >> $0) & 0xFF) }, encoding: .ascii) ?? "\(value)"
 }
+
+// Voice style from the command line: --cartoon = 1 (Cartoon), --cartoon-amount X (0 = Natural ... 1 = Cartoon).
+// In --preview it sets where the slider is.
+let cartoonArg: Float? = args.contains("--cartoon") ? 1 : arg("--cartoon-amount").flatMap(Float.init).map { max(0, min(1, $0)) }
 
 // The watchdog: a second copy of the app that gives the real mic back if the app ends without doing it.
 if let pid = arg("--watchdog").flatMap({ pid_t($0) }) { DefaultMic.watch(pid) }
@@ -62,7 +85,16 @@ if args.contains("--list") {
     print("Devices:")
     for id in allDevices() {
         let flags = (id == out ? " [default output]" : "") + (id == inp ? " [default input]" : "")
-        print("  \(id) \(deviceName(id)) | \(deviceUID(id)) | \(Int(nominalRate(id))) Hz | \(fourCC(transportType(id))) | in \(streamCount(id, kAudioDevicePropertyScopeInput)) out \(streamCount(id, kAudioDevicePropertyScopeOutput))\(flags)")
+        let model = modelUID(id)
+        print("  \(id) \(deviceName(id)) | \(deviceUID(id)) | model \(model.isEmpty ? "-" : model) | \(Int(nominalRate(id))) Hz | \(fourCC(transportType(id))) | in \(streamCount(id, kAudioDevicePropertyScopeInput)) out \(streamCount(id, kAudioDevicePropertyScopeOutput))\(flags)")
+    }
+    // The Bass ↔ Treble slider (Advanced processing), as saved for each speakers or headphones (read only).
+    let tones = AppDelegate.savedTones(UserDefaults.standard)
+    print("Bass ↔ Treble saved per output (-1 bass … 1 treble):\(tones.isEmpty ? " none" : "")")
+    for (uid, tilt) in tones.sorted(by: { $0.key < $1.key }) {
+        let id = device(uid: uid)
+        let name = id.map { deviceName($0) } ?? "not connected"
+        print(String(format: "  %@ (%@): %.2f", uid, name, tilt) + (id == out ? " [default output]" : ""))
     }
     if let mic = Mics.virtualMic, let feed = Mics.virtualFeed {
         print("Pitch Shift Mic: \(mic) (\(Int(nominalRate(mic))) Hz, in use: \(isRunningSomewhere(mic))), hidden feed: \(feed) (hidden: \(getValue(feed, kAudioDevicePropertyIsHidden, default: UInt32(0)) != 0))")
@@ -94,8 +126,29 @@ if let input = arg("--render-file") {
     let started = Date()
     do {
         try renderFile(input: input, output: args[i + 2], halfSteps: arg("--steps").flatMap(Float.init) ?? 2,
-                       advanced: args.contains("--advanced"), changes: changes, tone: toneFromArgs)
+                       advanced: args.contains("--advanced"), changes: changes,
+                       tone: toneDbArg ?? AdvancedProcessor.toneDb(tilt: toneArg ?? 0), toneChanges: toneChanges)
         print(String(format: "wrote %@ (%.1f s)", args[i + 2], Date().timeIntervalSince(started)))
+        exit(0)
+    } catch {
+        print("render failed: \((error as? Problem)?.message ?? "\(error)")")
+        exit(1)
+    }
+}
+
+if let input = arg("--render-voice") {
+    let i = args.firstIndex(of: "--render-voice")!
+    guard i + 2 < args.count else { print("usage: --render-voice IN OUT [--steps N] [--cartoon-amount X]"); exit(1) }
+    // "1:1,2:0" = at 1 s go to Cartoon, at 2 s back to Natural
+    let changes: [(Double, Float)] = (arg("--cartoon-at") ?? "").split(separator: ",").compactMap { item in
+        let parts = item.split(separator: ":")
+        guard parts.count == 2, let t = Double(parts[0]), let n = Float(parts[1]) else { return nil }
+        return (t, n)
+    }
+    do {
+        try renderVoiceFile(input: input, output: args[i + 2], halfSteps: arg("--steps").flatMap(Float.init) ?? 3,
+                            cartoon: cartoonArg ?? 0, changes: changes)
+        print("wrote \(args[i + 2])")
         exit(0)
     } catch {
         print("render failed: \((error as? Problem)?.message ?? "\(error)")")
@@ -105,9 +158,16 @@ if let input = arg("--render-file") {
 
 if args.contains("--test") {
     let source: HearSource = args.contains("--all") ? .all : HearSource(saved: arg("--app") ?? "com.apple.Music")
-    let shifter = HearShifter(halfSteps: arg("--steps").flatMap(Float.init) ?? 2, source: source, advanced: args.contains("--advanced"))
+    // Uses the saved Bass ↔ Treble for the output, like the app (only read; --tone-amount changes it for this test).
+    let shifter = HearShifter(halfSteps: arg("--steps").flatMap(Float.init) ?? 2, source: source, advanced: args.contains("--advanced"),
+                              tones: AppDelegate.savedTones(UserDefaults.standard))
     shifter.testPID = arg("--pid").flatMap { pid_t($0) }
-    shifter.setTone(bass: toneFromArgs.bass, treble: toneFromArgs.treble)
+    shifter.testOutputKey = arg("--as-device")
+    shifter.fixedToneDb = toneDbArg
+    if let toneArg { shifter.setTone(toneArg, for: shifter.outputKey) }
+    for (t, value) in toneChanges {
+        DispatchQueue.main.asyncAfter(deadline: .now() + t) { shifter.setTone(value, for: shifter.outputKey) }
+    }
     let seconds = arg("--seconds").flatMap(Double.init) ?? 3
     // --record-out F (Advanced processing only): saves what it played. --steps-at "2:8,4:-5": change the amount live.
     let recordPath = arg("--record-out")
@@ -140,7 +200,7 @@ if args.contains("--test") {
 if args.contains("--test-voice") {
     let steps = arg("--steps").flatMap(Float.init) ?? 3
     let micUID = arg("--mic").flatMap { name in Mics.list().first { $0.name == name }?.uid }
-    let voice = VoiceShifter(halfSteps: steps, natural: !args.contains("--cartoon"), micUID: micUID)
+    let voice = VoiceShifter(halfSteps: steps, cartoon: cartoonArg ?? 0, micUID: micUID)
     guard let mic = voice.currentMic, let virtualMic = Mics.virtualMic else { print("No mic or Pitch Shift Mic not installed"); exit(1) }
     let rate = nominalRate(mic)
     let seconds = arg("--seconds").flatMap(Double.init) ?? 3
@@ -188,7 +248,7 @@ if args.contains("--test-voice") {
         voice.stop()
         let peak = recorded.reduce(Float(0)) { max($0, abs($1)) }
         let firstSound = recorded.firstIndex { abs($0) > 0.02 }.map { Double($0) / recorder.sampleRate * 1000 }
-        var line = "voice test: mic=\(chain.micName) rate=\(Int(chain.sampleRate)) cushion=\(Int(Double(chain.cushion) / chain.sampleRate * 1000))ms "
+        var line = "voice test: mic=\(chain.micName) rate=\(Int(chain.sampleRate)) style=\(voice.cartoon) cushion=\(Int(Double(chain.cushion) / chain.sampleRate * 1000))ms "
         line += "recorded=\(recorded.count) peak=\(peak) firstSound=\(firstSound.map { "\(Int($0))ms" } ?? "none")"
         if tone != nil, let heard = recorded.firstIndex(where: { abs($0) > 0.02 }), chain.firstInputTime > 0, recorder.firstInputTime > 0 {
             // From the tone starting at the mic to it coming out of Pitch Shift Mic.
@@ -224,7 +284,8 @@ if args.contains("--test-voice") {
 
 // Presses the Test button with a quiet tone as the "voice": records 5 s from Pitch Shift Mic, then plays it back.
 if args.contains("--test-button") {
-    let voice = VoiceShifter(halfSteps: 3, natural: true, micUID: nil)
+    let micUID = arg("--mic").flatMap { name in Mics.list().first { $0.name == name }?.uid }  // e.g. not a Bluetooth headset's
+    let voice = VoiceShifter(halfSteps: 3, cartoon: 0, micUID: micUID)
     let rate = voice.currentMic.map(nominalRate) ?? 48000
     let volume = arg("--volume").flatMap(Double.init) ?? 0.03
     var phase = 0.0
@@ -245,7 +306,7 @@ if args.contains("--test-button") {
 }
 
 let app = NSApplication.shared
-app.setActivationPolicy(.regular)
+app.setActivationPolicy(preview == nil ? .regular : .accessory)  // pictures: no Dock icon, no switching apps
 let delegate = AppDelegate()
 app.delegate = delegate
 onQuitSignals {
