@@ -43,9 +43,10 @@ func arg(_ name: String) -> String? {
 }
 // --preview STATES [--size 800x400] [--cartoon-amount 0.5] [--tone-amount -0.4]: show the window in a state for
 // screenshots, without touching any sound or settings, and without switching apps (states: hear-on, voice-on, waiting,
-// typing, recording, playing, listening, hover, menu, roll, resize, no-driver, advanced-alert, sounds, light, tone,
-// slow; --cartoon-amount sets the voice style slider; sounds opens the Soundboard with example names; "tone" shows
-// Advanced processing on, and --tone-amount sets the Bass ↔ Treble slider; slow turns on "Deeper when slow").
+// typing, recording, playing, listening, hover, menu, roll, resize, no-driver, advanced-alert, sounds, rename, light,
+// tone, slow; --cartoon-amount sets the voice style slider; sounds opens the Soundboard with example names, and rename
+// shows the first name being changed; "tone" shows Advanced processing on, and --tone-amount sets the Bass ↔ Treble
+// slider; slow turns on "Deeper when slow").
 let preview = arg("--preview")
 
 var signalSources: [DispatchSourceSignal] = []
@@ -393,7 +394,7 @@ if let path = arg("--test-sounds") {
     voice.testSource = { buffer, frames in
         for i in 0..<frames { buffer[i] = Float(volume * sin(phase)); phase += 2 * .pi * toneHz / rate }
     }
-    let board = Soundboard(voice: voice, files: [], saves: false)
+    let board = Soundboard(voice: voice, sounds: [], saves: false)
     board.speakers = args.contains("--speakers")
     board.hearVolume = arg("--hear").flatMap(Float.init) ?? 0
     // --hear-out: the owner's copy, as its player makes it (collected on the main thread).

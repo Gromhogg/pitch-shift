@@ -79,15 +79,41 @@ private final class HearMix: @unchecked Sendable {
     init(_ mix: SoundMix) { self.mix = mix }
 }
 
+// One sound on the Soundboard: its file (a copy in the Sounds folder) and the name on its button, which the owner
+// can change (the file keeps its name).
+struct SoundEntry: Equatable {
+    let file: String
+    var name: String
+
+    init(file: String, name: String? = nil) {
+        self.file = file
+        self.name = name.flatMap { $0.isEmpty ? nil : $0 } ?? Soundboard.displayName(file)
+    }
+
+    // One entry of the saved list: {file, name}, or just the file name (before sounds could be renamed).
+    init?(saved: Any) {
+        if let file = saved as? String {
+            self.init(file: file)
+        } else if let entry = saved as? [String: Any], let file = entry["file"] as? String, !file.isEmpty {
+            self.init(file: file, name: entry["name"] as? String)
+        } else {
+            return nil
+        }
+    }
+
+    var saved: [String: Any] { ["file": file, "name": name] }
+}
+
 // The list of sounds (copies of the owner's files, kept in Application Support), and playing them.
 final class Soundboard {
     static let folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("Pitch Shift", isDirectory: true).appendingPathComponent("Sounds", isDirectory: true)
-    static let key = "soundboard"  // the file names, in order
-    static let examples = ["Air horn.m4a", "Applause.wav", "Sad trombone.mp3"]  // for pictures (--preview sounds)
+    static let key = "soundboard"  // the sounds in order, each {file, name}
+    static let examples = ["Air horn.m4a", "Applause.wav", "Sad trombone.mp3"].map { SoundEntry(file: $0) }  // for pictures
 
-    private(set) var files: [String]
-    private(set) var playing: String?
+    private(set) var sounds: [SoundEntry]
+    var files: [String] { sounds.map(\.file) }
+    private(set) var playing: String?  // its file
     var onChange: () -> Void = {}
     var speakers: Bool?        // tests: act as if the sound plays on the Mac's speakers (true) or headphones (false)
     var hearVolume: Float = 1  // the owner's own copy (tests: quiet, or 0 for none)
@@ -116,19 +142,21 @@ final class Soundboard {
     }
 
     // `folder` and `defaults` are only changed by tests.
-    init(voice: VoiceShifter, files: [String], saves: Bool, folder: URL = Soundboard.folder, defaults: UserDefaults = .standard) {
+    init(voice: VoiceShifter, sounds: [SoundEntry], saves: Bool, folder: URL = Soundboard.folder, defaults: UserDefaults = .standard) {
         self.voice = voice
-        self.files = files
+        self.sounds = sounds
         self.saves = saves
         self.folder = folder
         self.defaults = defaults
     }
 
-    // The saved list, without files that are gone.
-    static func saved(_ defaults: UserDefaults) -> [String] {
-        (defaults.array(forKey: key) as? [String] ?? []).filter {
-            FileManager.default.fileExists(atPath: folder.appendingPathComponent($0).path)
-        }
+    // The saved list, without files that are gone. A list saved before sounds could be renamed (only file names) is
+    // saved again in the new form the first time it's read.
+    static func saved(_ defaults: UserDefaults) -> [SoundEntry] {
+        let stored = defaults.array(forKey: key) ?? []
+        let all = stored.compactMap(SoundEntry.init(saved:))
+        if stored.contains(where: { $0 is String }) { defaults.set(all.map(\.saved), forKey: key) }
+        return all.filter { FileManager.default.fileExists(atPath: folder.appendingPathComponent($0.file).path) }
     }
 
     static func displayName(_ file: String) -> String { (file as NSString).deletingPathExtension }
@@ -299,7 +327,7 @@ final class Soundboard {
                 NSSound.beep()
                 continue
             }
-            files.append(name)
+            sounds.append(SoundEntry(file: name))
             added = true
         }
         guard added else { return }
@@ -311,7 +339,7 @@ final class Soundboard {
     func remove(_ file: String) {
         if playing == file { stop() }
         if let clip = clips.removeValue(forKey: file) { keepAlive(clip) }
-        files.removeAll { $0 == file }
+        sounds.removeAll { $0.file == file }
         if saves {
             try? FileManager.default.removeItem(at: folder.appendingPathComponent(file))
             save()
@@ -319,9 +347,18 @@ final class Soundboard {
         onChange()
     }
 
+    // A new name for a sound's button (the file keeps its name). An empty name keeps the old one.
+    func rename(_ file: String, to name: String) {
+        let clean = name.components(separatedBy: .newlines).joined(separator: " ").trimmingCharacters(in: .whitespaces)
+        guard !clean.isEmpty, let i = sounds.firstIndex(where: { $0.file == file }), sounds[i].name != clean else { return }
+        sounds[i].name = clean
+        save()
+        onChange()
+    }
+
     private func save() {
         guard saves else { return }
-        defaults.set(files, forKey: Self.key)
+        defaults.set(sounds.map(\.saved), forKey: Self.key)
     }
 
     // "Air horn.mp3", or "Air horn 2.mp3" if that name is taken.
@@ -337,11 +374,13 @@ final class Soundboard {
 }
 
 // One sound's button: its name, filled with the theme colors while it plays. Click to play, again to stop. A small
-// ✕ shows in its corner while the mouse is over it (or right-click → Remove).
-final class SoundPad: NSView {
+// ✕ shows in its corner while the mouse is over it (or right-click → Remove). Right-click → Rename… or a double-click
+// turns the name into a text field: Return keeps the new name, Escape the old one.
+final class SoundPad: NSView, NSTextFieldDelegate {
     let file: String
     var onPlay: () -> Void = {}
     var onRemove: () -> Void = {}
+    var onRename: (String) -> Void = { _ in }
     var isPlaying = false {
         didSet {
             guard oldValue != isPlaying else { return }
@@ -352,25 +391,40 @@ final class SoundPad: NSView {
     var hovered = false { didSet { if oldValue != hovered { needsDisplay = true } } }
     private var pressed = false { didSet { if oldValue != pressed { needsDisplay = true } } }
     private var pressedRemove = false
-    private let name: String
+    private var startedByClick = false  // the last click started this sound (the second click of a double-click stops it)
+    private var editor: NSTextField?    // while renaming
+    var name: String {
+        didSet { if oldValue != name { named() } }
+    }
     private static let font = NSFont.systemFont(ofSize: 13, weight: .medium)
 
-    init(file: String) {
-        self.file = file
-        name = Soundboard.displayName(file)
+    init(sound: SoundEntry) {
+        file = sound.file
+        name = sound.name
         super.init(frame: NSRect(x: 0, y: 0, width: 120, height: 40))
         setAccessibilityElement(true)
         setAccessibilityRole(.button)
+        named()
+        let menu = NSMenu()
+        menu.addItem(withTitle: "Rename…", action: #selector(renameClicked), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Remove", action: #selector(removeClicked), keyEquivalent: "").target = self
+        self.menu = menu
+        setAccessibilityCustomActions([
+            NSAccessibilityCustomAction(name: "Rename") { [weak self] in
+                self?.startRenaming()
+                return true
+            },
+            NSAccessibilityCustomAction(name: "Remove") { [weak self] in
+                self?.onRemove()
+                return true
+            }])
+    }
+
+    private func named() {
         setAccessibilityLabel(name)
         // The full name shows on hover only when it doesn't fit.
         toolTip = (name as NSString).size(withAttributes: [.font: Self.font]).width > bounds.width - 20 ? name : nil
-        let remove = NSMenu()
-        remove.addItem(withTitle: "Remove", action: #selector(removeClicked), keyEquivalent: "").target = self
-        menu = remove
-        setAccessibilityCustomActions([NSAccessibilityCustomAction(name: "Remove") { [weak self] in
-            self?.onRemove()
-            return true
-        }])
+        needsDisplay = true
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -402,9 +456,11 @@ final class SoundPad: NSView {
             .font: font, .foregroundColor: isPlaying ? NSColor.white : NSColor.labelColor, .paragraphStyle: style]
         let height = (font.ascender - font.descender).rounded(.up)
         let line = NSRect(x: bounds.minX + 10, y: (bounds.midY - height / 2).rounded(), width: bounds.width - 20, height: height)
-        (name as NSString).draw(with: line, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine], attributes: attributes)
+        if editor == nil {
+            (name as NSString).draw(with: line, options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine], attributes: attributes)
+        }
 
-        guard hovered else { return }
+        guard hovered, editor == nil else { return }
         let spot = removeSpot
         NSColor.secondaryLabelColor.setFill()
         NSBezierPath(ovalIn: spot).fill()
@@ -433,8 +489,22 @@ final class SoundPad: NSView {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func mouseDown(with event: NSEvent) {
+        pressed = false
+        pressedRemove = false
+        if editor != nil {  // a click on the button around the name being typed keeps it
+            finishRenaming(keep: true)
+            return
+        }
         let point = convert(event.locationInWindow, from: nil)
-        pressedRemove = hovered && removeSpot.insetBy(dx: -3, dy: -3).contains(point)
+        let onRemoveSpot = hovered && removeSpot.insetBy(dx: -3, dy: -3).contains(point)
+        if event.clickCount == 2 && !onRemoveSpot {
+            // A double-click renames. Its first click played the sound: this one stops it again.
+            if isPlaying && startedByClick { onPlay() }
+            startedByClick = false
+            startRenaming()
+            return
+        }
+        pressedRemove = onRemoveSpot
         pressed = !pressedRemove
     }
 
@@ -444,8 +514,58 @@ final class SoundPad: NSView {
         pressed = false
         pressedRemove = false
         if wasRemove && removeSpot.insetBy(dx: -3, dy: -3).contains(point) { onRemove() }
-        if wasPressed && bounds.contains(point) { onPlay() }
+        if wasPressed && bounds.contains(point) {
+            startedByClick = !isPlaying
+            onPlay()
+        }
     }
+
+    // MARK: Renaming
+
+    // Turns the name into a text field with the whole name selected. The Soundboard takes the typing (it never
+    // switches apps); pictures (--preview) only show the field.
+    func startRenaming() {
+        guard editor == nil else { return }
+        let field = NSTextField(string: name)
+        field.font = Self.font
+        field.alignment = .center
+        field.bezelStyle = .roundedBezel
+        field.usesSingleLineMode = true
+        field.lineBreakMode = .byClipping
+        field.cell?.isScrollable = true
+        field.setAccessibilityLabel("Name")
+        field.delegate = self
+        let height = field.intrinsicContentSize.height
+        field.frame = NSRect(x: 6, y: ((bounds.height - height) / 2).rounded(), width: bounds.width - 12, height: height)
+        addSubview(field)
+        editor = field
+        needsDisplay = true
+        if preview == nil { window?.makeKey() }
+        window?.makeFirstResponder(field)
+        field.currentEditor()?.selectAll(nil)
+    }
+
+    // Return or clicking elsewhere keeps what was typed (an empty name keeps the old one); Escape keeps the old name.
+    func finishRenaming(keep: Bool) {
+        guard let field = editor else { return }
+        editor = nil
+        let typed = field.stringValue
+        if field.currentEditor() != nil { window?.makeFirstResponder(nil) }
+        field.removeFromSuperview()
+        needsDisplay = true
+        if keep { onRename(typed) }
+    }
+
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        switch selector {
+        case #selector(NSResponder.insertNewline(_:)): finishRenaming(keep: true)
+        case #selector(NSResponder.cancelOperation(_:)): finishRenaming(keep: false)
+        default: return false
+        }
+        return true
+    }
+
+    func controlTextDidEndEditing(_ notification: Notification) { finishRenaming(keep: true) }
 
     override func accessibilityPerformPress() -> Bool {
         onPlay()
@@ -453,6 +573,7 @@ final class SoundPad: NSView {
     }
 
     @objc private func removeClicked() { onRemove() }
+    @objc private func renameClicked() { startRenaming() }
 }
 
 private final class FlippedView: NSView {
@@ -547,16 +668,22 @@ final class SoundboardPanel: NSObject, NSWindowDelegate {
     func close() { panel.close() }
 
     func windowWillClose(_ notification: Notification) {
+        pads.forEach { $0.finishRenaming(keep: true) }
         board.stop()
         board.ready = false
     }
 
+    // Typing a new name ends when the owner goes back to another app.
+    func windowDidResignKey(_ notification: Notification) { pads.forEach { $0.finishRenaming(keep: true) } }
+
     // Makes one button per sound, three to a row, and fits the window around them.
     func reload() {
         pads.forEach { $0.removeFromSuperview() }
-        pads = board.files.map { file in
-            let pad = SoundPad(file: file)
+        pads = board.sounds.map { sound in
+            let pad = SoundPad(sound: sound)
+            let file = sound.file
             pad.onPlay = { [weak self] in self?.board.click(file) }
+            pad.onRename = { [weak self] name in self?.board.rename(file, to: name) }
             // A moment later: removing rebuilds the buttons, and this one is still handling its click.
             pad.onRemove = { [weak self] in DispatchQueue.main.async { self?.board.remove(file) } }
             return pad
@@ -588,15 +715,21 @@ final class SoundboardPanel: NSObject, NSWindowDelegate {
         update()
     }
 
-    // Shows which sound is playing.
+    // Shows the names and which sound is playing.
     func update() {
         if pads.map(\.file) != board.files { reload(); return }
-        for pad in pads { pad.isPlaying = pad.file == board.playing }
+        for (pad, sound) in zip(pads, board.sounds) {
+            pad.name = sound.name
+            pad.isPlaying = pad.file == board.playing
+        }
         stopButton.isEnabled = board.playing != nil
     }
 
     // For pictures: the mouse over the first sound.
     func showHover() { pads.first?.hovered = true }
+
+    // For pictures: the first sound's name being changed.
+    func showRenaming() { pads.first?.startRenaming() }
 
     @objc private func addClicked() {
         guard preview == nil else { return }

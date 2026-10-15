@@ -981,7 +981,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         micUID: defaults.string(forKey: Keys.voiceMic))
     lazy var test = VoiceTest(voice: voice)
     // Sound effects into Pitch Shift Mic. Pictures show example names and change nothing.
-    lazy var board = Soundboard(voice: voice, files: preview == nil ? Soundboard.saved(defaults) : Soundboard.examples,
+    lazy var board = Soundboard(voice: voice, sounds: preview == nil ? Soundboard.saved(defaults) : Soundboard.examples,
                                 saves: preview == nil)
     lazy var soundboard = SoundboardPanel(board: board)
 
@@ -1620,7 +1620,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     // MARK: Showing state
 
     // For screenshots (--preview hear-on,voice-on,waiting,typing,recording,playing,listening,hover,menu,roll,
-    // resize,no-driver,advanced-alert,sounds,light,tone,slow [--size 800x400]): shows a state, no sound.
+    // resize,no-driver,advanced-alert,sounds,rename,light,tone,slow [--size 800x400]): shows a state, no sound.
     func showPreview() {
         guard let preview else { return }
         if preview.contains("light") {
@@ -1628,9 +1628,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             soundboard.panel.appearance = NSAppearance(named: .aqua)
         }
         if preview.contains("sounds") {  // the Soundboard with example names, the second one playing
-            board.showAsPlaying(Soundboard.examples[1])
+            board.showAsPlaying(Soundboard.examples[1].file)
             soundboard.open(beside: window)
             if preview.contains("hover") { soundboard.showHover() }
+            if preview.contains("rename") { soundboard.showRenaming() }  // the first name being changed
         }
         if let cartoonArg { voice.cartoon = cartoonArg }  // where the style slider is (--cartoon-amount 0.5)
         if preview.contains("tone") { hear.advanced = true }  // Advanced processing on (nothing runs in pictures)
