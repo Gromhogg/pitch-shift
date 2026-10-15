@@ -47,6 +47,26 @@ struct VoiceParams {
     var silent: Bool    // during Test playback, so the replay isn't sent into a live call
 }
 
+// The sound effect (Soundboard) to mix into Pitch Shift Mic. Set from the window, read by the sound thread without
+// waiting. The samples belong to a SoundClip that the window side keeps alive while the sound thread may read them.
+struct SoundPlay: @unchecked Sendable {
+    var samples: UnsafePointer<Float>?  // nil = no sound
+    var count = 0
+    var rate: Double = 0  // the samples' rate: a chain running at another rate doesn't play them
+    var take = 0          // goes up with every play and stop, so the sound thread sees each one
+    var muteMic = false   // playing on the Mac's speakers: the real mic is muted while it plays and just after
+}
+
+// Keeps voice + sound under full scale: unchanged up to 0.7, then eased so it never passes 0.95 (the Mac's clock
+// matching between the mic and Pitch Shift Mic can add about 1% on top).
+@inline(__always) func softLimit(_ x: Float) -> Float {
+    let knee: Float = 0.7, ceiling: Float = 0.95
+    let size = abs(x)
+    guard size > knee else { return x }
+    let eased = knee + (ceiling - knee) * tanh((size - knee) / (ceiling - knee))
+    return x < 0 ? -eased : eased
+}
+
 // Rubber Band settings for the voice (the Windows version uses the same ones, with a Natural/Cartoon switch).
 // Not the "live shifter" (rubberband_live_*): it only keeps the voice's shape (formants) up to about 10 kHz and
 // moves everything above that up like Cartoon, which put a loud hiss on every word in Natural ("buzzy", like a Z).
@@ -137,11 +157,26 @@ final class VoiceChain {
     private var sinceCheck = 0
     private let checkEvery: Int
     private let extraAllowed: Int
+    // Sound effects (Soundboard): mixed in after the voice, never through the mic or the pitch change.
+    private let sounds: OSAllocatedUnfairLock<SoundPlay>
+    private var soundTake: Int
+    private var sound: UnsafePointer<Float>?  // the one playing
+    private var soundCount = 0
+    private var soundAt = 0
+    private var fading: UnsafePointer<Float>?  // one that was stopped or replaced: it fades out over 10 ms
+    private var fadingCount = 0
+    private var fadingAt = 0
+    private var fadingGain: Float = 0
+    private var muteMic = false   // the playing sound is on the Mac's speakers
+    private var muteLeft = 0      // samples the mic stays muted after a sound on the speakers ends
+    private var micGain: Float = 1
+    private let fadeStep: Float   // 10 ms from full to nothing
+    private let muteAfter: Int    // 150 ms
     // For the command-line test: replaces the mic with a made-up sound.
     var testSource: ((UnsafeMutablePointer<Float>, Int) -> Void)?
     private(set) var firstInputTime: UInt64 = 0  // host time of the first mic sample (for the delay test)
 
-    init(mic: AudioDeviceID, feed: AudioDeviceID, params: OSAllocatedUnfairLock<VoiceParams>) throws {
+    init(mic: AudioDeviceID, feed: AudioDeviceID, params: OSAllocatedUnfairLock<VoiceParams>, sounds: OSAllocatedUnfairLock<SoundPlay>) throws {
         micName = deviceName(mic)
         micUID = deviceUID(mic)
         devices = [mic, Mics.virtualMic ?? 0, feed]
@@ -162,6 +197,10 @@ final class VoiceChain {
             throw Problem(message: "Can't use \(micName).")
         }
         stretcher = made
+        self.sounds = sounds
+        soundTake = sounds.withLock { $0.take }  // a sound already playing when the chain starts isn't sent
+        fadeStep = Float(1 / (0.01 * rate))
+        muteAfter = Int(rate * 0.15)
         // 20 ms is enough at every amount and callback size tried (16-96 kHz); more would only add delay.
         cushion = Int(rate * 0.02)
         extraAllowed = Int(rate * 0.005)
@@ -244,6 +283,18 @@ final class VoiceChain {
             for i in 0..<frames { source[i] = 0 }
         }
 
+        // A sound playing on the Mac's speakers: the mic would hear it and send it into the call a second time, so
+        // the mic fades out (10 ms) while it plays and for 150 ms after. Headphones: nothing is muted.
+        if let play = sounds.withLockIfAvailable({ $0 }), play.take != soundTake { startSound(play) }
+        let muted = (sound != nil && muteMic) || muteLeft > 0
+        if muted || micGain < 1 {
+            for i in 0..<frames {
+                micGain = muted ? max(0, micGain - fadeStep) : min(1, micGain + fadeStep)
+                source[i] *= micGain
+            }
+        }
+        muteLeft = max(0, muteLeft - frames)
+
         let shifting = applied.halfSteps != 0
         if shifting { shift(source, frames) }
         for i in 0..<frames {
@@ -260,13 +311,58 @@ final class VoiceChain {
                 }
             }
             if applied.silent { value = 0 }
-            value = max(-1, min(1, value))
+            if sound != nil || fading != nil {
+                value = softLimit(value + nextSoundSample())
+            } else {
+                value = max(-1, min(1, value))
+            }
             for b in micOutputStreams..<outs.count {
                 guard let d = outs[b].mData?.assumingMemoryBound(to: Float.self) else { continue }
                 let ch = Int(outs[b].mNumberChannels)
                 for c in 0..<ch { d[i * ch + c] = value }
             }
         }
+    }
+
+    // A new sound, or Stop: the one playing fades out, and the new one starts from its beginning.
+    private func startSound(_ play: SoundPlay) {
+        soundTake = play.take
+        if let playing = sound {
+            fading = playing
+            fadingCount = soundCount
+            fadingAt = soundAt
+            fadingGain = 1
+            if muteMic { muteLeft = muteAfter }
+        }
+        sound = nil
+        guard let samples = play.samples, play.count > 0, play.rate == sampleRate else { return }
+        sound = samples
+        soundCount = play.count
+        soundAt = 0
+        muteMic = play.muteMic
+    }
+
+    // The next sample of the sound(s) to mix in.
+    @inline(__always) private func nextSoundSample() -> Float {
+        var value: Float = 0
+        if let playing = sound {
+            value = playing[soundAt]
+            soundAt += 1
+            if soundAt >= soundCount {  // played to the end
+                sound = nil
+                if muteMic { muteLeft = muteAfter }
+            }
+        }
+        if let old = fading {
+            fadingGain -= fadeStep
+            if fadingGain > 0 && fadingAt < fadingCount {
+                value += old[fadingAt] * fadingGain
+                fadingAt += 1
+            } else {
+                fading = nil
+            }
+        }
+        return value
     }
 
     // Gives one callback's sound to Rubber Band and moves everything it has ready into the ring.
@@ -382,6 +478,7 @@ final class VoiceShifter {
     private(set) var listening = false  // some app is using Pitch Shift Mic right now
     private(set) var chain: VoiceChain?
     let params: OSAllocatedUnfairLock<VoiceParams>
+    let sounds = OSAllocatedUnfairLock(uncheckedState: SoundPlay())  // the Soundboard's sound, for the chain
     private var running = false
     private var holdCount = 0
     private var listeners: [Listener] = []
@@ -503,7 +600,7 @@ final class VoiceShifter {
             stopLater = nil
             if chain == nil {
                 do {
-                    let made = try VoiceChain(mic: mic, feed: feed, params: params)
+                    let made = try VoiceChain(mic: mic, feed: feed, params: params, sounds: sounds)
                     made.testSource = testSource
                     chain = made
                 } catch {
