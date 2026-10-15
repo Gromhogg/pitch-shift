@@ -16,6 +16,7 @@
 //                                              --cartoon-at "1:1,2:0" moves the style to 1 at 1 s and back to 0 at 2 s)
 //   --test-button [--mic NAME] [--volume 0.03] presses Test with a quiet tone as the voice (record 5 s, play back)
 //   --test-sounds FILE [--speakers] [--seconds S] [--out F.caf] [--mic NAME] [--steps 3] [--volume 0.05] [--hear 0.02]
+//                [--sound-volume 0.5]
 //                                              Soundboard: plays FILE into Pitch Shift Mic 1 s in, with a quiet tone as
 //                                              the voice, records Pitch Shift Mic and checks it (one copy of the sound,
 //                                              its level; --speakers: as if on the Mac's speakers, so the voice must
@@ -23,6 +24,8 @@
 //                                              --recording F.caf: check a recording saved with --out (no devices).
 //                                              --stop-after S: press Stop S seconds after the sound starts.
 //                                              --hear-out F.caf: save the owner's copy (with --hear).
+//                                              --sound-volume V: the sound's own volume (0 ... 1.5, Volume… on its
+//                                              button), so its level in Pitch Shift Mic should be V x the file.
 //   --test ... --advanced [--record-out F.wav] [--steps-at "3:8,6:-5"] [--tone-amount 0.5] [--tone-at "2:1,4:-1"]
 //              [--as-device UID] [--tone-db 6,-6]
 //                                              "What you hear" with Advanced processing on (--watch prints the delay;
@@ -43,10 +46,10 @@ func arg(_ name: String) -> String? {
 }
 // --preview STATES [--size 800x400] [--cartoon-amount 0.5] [--tone-amount -0.4]: show the window in a state for
 // screenshots, without touching any sound or settings, and without switching apps (states: hear-on, voice-on, waiting,
-// typing, recording, playing, listening, hover, menu, roll, resize, no-driver, advanced-alert, sounds, rename, light,
-// tone, slow; --cartoon-amount sets the voice style slider; sounds opens the Soundboard with example names, and rename
-// shows the first name being changed; "tone" shows Advanced processing on, and --tone-amount sets the Bass ↔ Treble
-// slider; slow turns on "Deeper when slow").
+// typing, recording, playing, listening, hover, menu, roll, resize, no-driver, advanced-alert, sounds, rename, volume,
+// light, tone, slow; --cartoon-amount sets the voice style slider; sounds opens the Soundboard with example names,
+// rename shows the first name being changed and volume the first sound's volume slider; "tone" shows Advanced
+// processing on, and --tone-amount sets the Bass ↔ Treble slider; slow turns on "Deeper when slow").
 let preview = arg("--preview")
 
 var signalSources: [DispatchSourceSignal] = []
@@ -413,6 +416,7 @@ if let path = arg("--test-sounds") {
     let clip: SoundClip
     do { clip = try SoundClip(url: url, rate: rate) } catch { print("Can't read \(path)"); exit(1) }
     let seconds = arg("--seconds").flatMap(Double.init) ?? (1 + clip.seconds + 2)
+    let soundVolume = arg("--sound-volume").flatMap(Float.init).map { max(0, min(SoundEntry.loudest, $0)) } ?? 1
     let started = Date()
     board.onChange = {
         print(String(format: "%.2fs: %@", Date().timeIntervalSince(started), board.playing.map { "playing \($0)" } ?? "stopped"))
@@ -424,7 +428,7 @@ if let path = arg("--test-sounds") {
     let recorder = try! Recorder(device: virtualMic, seconds: seconds)
     DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
         let asked = Date()
-        board.play(clip, as: url.lastPathComponent)
+        board.play(clip, as: url.lastPathComponent, volume: soundVolume)
         if board.hearVolume > 0 { print(String(format: "the owner's copy took %.0f ms to start", Date().timeIntervalSince(asked) * 1000)) }
     }
     if let stopAfter = arg("--stop-after").flatMap(Double.init) {  // presses Stop part way through
@@ -433,9 +437,9 @@ if let path = arg("--test-sounds") {
     DispatchQueue.main.asyncAfter(deadline: .now() + seconds + 0.2) {
         let recorded = recorder.finish()
         voice.stop()
-        print(String(format: "sound test: file=%@ (%.2f s) mic=%@ rate=%d steps=%g speakers=%@ tone=%g",
+        print(String(format: "sound test: file=%@ (%.2f s) mic=%@ rate=%d steps=%g speakers=%@ tone=%g sound volume=%g",
                      url.lastPathComponent, clip.seconds, chain.micName, Int(chain.sampleRate), steps,
-                     board.speakers == true ? "yes" : "no", volume))
+                     board.speakers == true ? "yes" : "no", volume, soundVolume))
         // The file as the chain plays it, at the recording's rate.
         let reference = recorder.sampleRate == clip.rate ? clip : (try? SoundClip(url: url, rate: recorder.sampleRate))
         if let reference {

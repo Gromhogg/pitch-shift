@@ -81,29 +81,35 @@ struct SoundPlay: @unchecked Sendable {
     var rate: Double = 0  // the samples' rate: a chain running at another rate doesn't play them
     var take = 0          // goes up with every play and stop, so the sound thread sees each one
     var muteMic = false   // playing on the Mac's speakers: the real mic is muted while it plays and just after
+    var volume: Float = 1 // the playing sound's own volume (0 ... 1.5); it may change while the sound plays
 }
 
 // Plays the Soundboard's sound one sample at a time on a sound thread, following SoundPlay. Used for both copies:
 // the one sent into Pitch Shift Mic (VoiceChain) and the owner's own (Soundboard), so both stop and switch the same
 // way. A sound that is stopped or replaced fades out over 10 ms (stopping at once would click); a new one starts
-// from its beginning.
+// from its beginning. A new volume for the playing sound glides there in about 20 ms (a jump would click too).
 struct SoundMix {
     private(set) var take: Int
     private let rate: Double
     private let fadeStep: Float  // 10 ms from full to nothing
+    private let volumeGlide: Float  // the part of the way to a new volume taken each sample (20 ms smoothing)
     private var sound: UnsafePointer<Float>?  // the one playing
     private var count = 0
     private var at = 0
+    private var gain: Float = 1    // its volume now
+    private var volume: Float = 1  // its volume as set (`gain` glides there)
     private var fading: UnsafePointer<Float>?  // one that was stopped or replaced
     private var fadingCount = 0
     private var fadingAt = 0
     private var fadingGain: Float = 0
+    private var fadingVolume: Float = 1
 
     // `take`: the SoundPlay's take now (a sound already playing isn't picked up).
     init(rate: Double, take: Int) {
         self.rate = rate
         self.take = take
         fadeStep = Float(1 / (0.01 * rate))
+        volumeGlide = Float(1 - exp(-1 / (0.02 * rate)))
     }
 
     var playing: Bool { sound != nil }
@@ -118,20 +124,30 @@ struct SoundMix {
             fadingCount = count
             fadingAt = at
             fadingGain = 1
+            fadingVolume = gain
         }
         sound = nil
         guard let samples = play.samples, play.count > 0, play.rate == rate else { return cut }
         sound = samples
         count = play.count
         at = 0
+        gain = play.volume
+        volume = play.volume
         return cut
     }
+
+    // The playing sound's volume as set now (read from SoundPlay on every pass).
+    mutating func follow(volume new: Float) { volume = new }
 
     // The next sample of the sound(s). `ended` turns true when the sound plays to its end.
     @inline(__always) mutating func next(_ ended: inout Bool) -> Float {
         var value: Float = 0
         if let playing = sound {
-            value = playing[at]
+            if gain != volume {
+                gain += (volume - gain) * volumeGlide
+                if abs(volume - gain) < 1e-4 { gain = volume }
+            }
+            value = playing[at] * gain
             at += 1
             if at >= count {
                 sound = nil
@@ -141,7 +157,7 @@ struct SoundMix {
         if let old = fading {
             fadingGain -= fadeStep
             if fadingGain > 0 && fadingAt < fadingCount {
-                value += old[fadingAt] * fadingGain
+                value += old[fadingAt] * fadingGain * fadingVolume
                 fadingAt += 1
             } else {
                 fading = nil
@@ -591,7 +607,10 @@ final class VoiceChain {
 
         // A sound playing on the Mac's speakers: the mic would hear it and send it into the call a second time, so
         // the mic fades out (10 ms) while it plays and for 150 ms after. Headphones: nothing is muted.
-        if let play = sounds.withLockIfAvailable({ $0 }), play.take != mix.take { startSound(play) }
+        if let play = sounds.withLockIfAvailable({ $0 }) {
+            if play.take != mix.take { startSound(play) }
+            mix.follow(volume: play.volume)
+        }
         let muted = (mix.playing && muteMic) || muteLeft > 0
         if muted || micGain < 1 {
             for i in 0..<frames {

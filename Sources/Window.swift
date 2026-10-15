@@ -170,12 +170,14 @@ final class GradientSwitch: NSView {
 
 // A slider from 0 (left) to 1 (right), like the voice style (Natural ... Cartoon) or the tone (Bass ... Treble). The
 // track shows the icon's purple-to-pink colors from end to end, with a round white knob (like GradientSwitch's) and
-// small labels under its ends. `middleMark` adds a small mark at the middle, and the knob snaps to it when close.
+// small labels under its ends. `mark` adds a small mark (at 0.5 = the middle), and the knob snaps to it when close.
 // Click or drag to set it; with "Keyboard navigation" on, the arrow keys move it in steps of 0.1.
 // Nothing moves on its own, so it's the same with Reduce Motion.
 final class GradientSlider: NSView {
     var onChange: (Float) -> Void = { _ in }
-    var middleMark = false { didSet { needsDisplay = true } }
+    var mark: Float? { didSet { needsDisplay = true } }
+    var steps: Float = 100     // values it can take between 0 and 1
+    var clickThrough = false   // a click works even while another app is in front (the Soundboard's volume)
     private let left: String, right: String
     private let describe: (Float) -> String  // what VoiceOver says for a value
     var isEnabled = true {
@@ -266,11 +268,12 @@ final class GradientSlider: NSView {
 
         // The middle mark: a short line across the track's middle, just inside the knob's height (so the knob covers
         // it when it's there).
-        if middleMark {
+        if let mark {
             (isEnabled ? NSColor.secondaryLabelColor : NSColor.tertiaryLabelColor).setFill()
             let reach = knobSize / 2 - 1
-            NSBezierPath(rect: NSRect(x: (bounds.midX - 1).rounded(), y: middle - reach, width: 2, height: reach - trackHeight / 2)).fill()
-            NSBezierPath(rect: NSRect(x: (bounds.midX - 1).rounded(), y: middle + trackHeight / 2, width: 2, height: reach - trackHeight / 2)).fill()
+            let x = (bounds.minX + knobSize / 2 + CGFloat(mark) * (bounds.width - knobSize) - 1).rounded()
+            NSBezierPath(rect: NSRect(x: x, y: middle - reach, width: 2, height: reach - trackHeight / 2)).fill()
+            NSBezierPath(rect: NSRect(x: x, y: middle + trackHeight / 2, width: 2, height: reach - trackHeight / 2)).fill()
         }
 
         // The knob, with a soft shadow and a thin edge (so it stands out on a white card too).
@@ -293,6 +296,7 @@ final class GradientSlider: NSView {
 
     // Reachable with Tab when "Keyboard navigation" is on in the Mac's settings (like the switches).
     override var acceptsFirstResponder: Bool { isEnabled && NSApp.isFullKeyboardAccessEnabled }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { clickThrough }
     override var focusRingMaskBounds: NSRect { track.insetBy(dx: 0, dy: -(knobSize - trackHeight) / 2) }
     override func drawFocusRingMask() {
         let ring = focusRingMaskBounds
@@ -341,10 +345,10 @@ final class GradientSlider: NSView {
         return true
     }
 
-    // Steps of 0.01 from 0 to 1 (and to the middle mark when within 0.03 of it).
+    // Steps of 1/`steps` (0.01) from 0 to 1, and to the mark when within 3 steps of it.
     private func set(_ new: Float) {
-        var clean = max(0, min(1, (new * 100).rounded() / 100))
-        if middleMark && abs(clean - 0.5) < 0.031 { clean = 0.5 }
+        var clean = max(0, min(1, (new * steps).rounded() / steps))
+        if let mark, abs(clean - mark) < 3.1 / steps { clean = mark }
         guard clean != value else { return }
         value = clean
         onChange(clean)
@@ -1151,7 +1155,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         advancedSwitch.onChange = { [weak self] on in self?.advancedPicked(on) }
         hearCard.addRow(ShiftCard.switchRow("Advanced processing", advancedSwitch))
         // Its tone, Bass ... Treble, kept for each speakers or headphones.
-        tone.middleMark = true
+        tone.mark = 0.5
         tone.onChange = { [weak self] value in self?.tonePicked(value) }
         let toneRow = CardRow(views: [tone])
         toneRow.onScale = { [unowned self] scale in
@@ -1620,7 +1624,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     // MARK: Showing state
 
     // For screenshots (--preview hear-on,voice-on,waiting,typing,recording,playing,listening,hover,menu,roll,
-    // resize,no-driver,advanced-alert,sounds,rename,light,tone,slow [--size 800x400]): shows a state, no sound.
+    // resize,no-driver,advanced-alert,sounds,rename,volume,light,tone,slow [--size 800x400]): shows a state, no sound.
     func showPreview() {
         guard let preview else { return }
         if preview.contains("light") {
@@ -1632,6 +1636,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             soundboard.open(beside: window)
             if preview.contains("hover") { soundboard.showHover() }
             if preview.contains("rename") { soundboard.showRenaming() }  // the first name being changed
+            if preview.contains("volume") { soundboard.showVolume() }  // the first sound's volume slider
         }
         if let cartoonArg { voice.cartoon = cartoonArg }  // where the style slider is (--cartoon-amount 0.5)
         if preview.contains("tone") { hear.advanced = true }  // Advanced processing on (nothing runs in pictures)

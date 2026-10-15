@@ -79,36 +79,39 @@ private final class HearMix: @unchecked Sendable {
     init(_ mix: SoundMix) { self.mix = mix }
 }
 
-// One sound on the Soundboard: its file (a copy in the Sounds folder) and the name on its button, which the owner
-// can change (the file keeps its name).
+// One sound on the Soundboard: its file (a copy in the Sounds folder), the name on its button, which the owner
+// can change (the file keeps its name), and its own volume (1 = as loud as the others, up to 1.5).
 struct SoundEntry: Equatable {
+    static let loudest: Float = 1.5
     let file: String
     var name: String
+    var volume: Float
 
-    init(file: String, name: String? = nil) {
+    init(file: String, name: String? = nil, volume: Float = 1) {
         self.file = file
         self.name = name.flatMap { $0.isEmpty ? nil : $0 } ?? Soundboard.displayName(file)
+        self.volume = volume.isFinite ? max(0, min(Self.loudest, volume)) : 1
     }
 
-    // One entry of the saved list: {file, name}, or just the file name (before sounds could be renamed).
+    // One entry of the saved list: {file, name, volume}, or older forms: {file, name}, or just the file name.
     init?(saved: Any) {
         if let file = saved as? String {
             self.init(file: file)
         } else if let entry = saved as? [String: Any], let file = entry["file"] as? String, !file.isEmpty {
-            self.init(file: file, name: entry["name"] as? String)
+            self.init(file: file, name: entry["name"] as? String, volume: (entry["volume"] as? NSNumber)?.floatValue ?? 1)
         } else {
             return nil
         }
     }
 
-    var saved: [String: Any] { ["file": file, "name": name] }
+    var saved: [String: Any] { ["file": file, "name": name, "volume": Double(volume)] }
 }
 
 // The list of sounds (copies of the owner's files, kept in Application Support), and playing them.
 final class Soundboard {
     static let folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("Pitch Shift", isDirectory: true).appendingPathComponent("Sounds", isDirectory: true)
-    static let key = "soundboard"  // the sounds in order, each {file, name}
+    static let key = "soundboard"  // the sounds in order, each {file, name, volume}
     static let examples = ["Air horn.m4a", "Applause.wav", "Sad trombone.mp3"].map { SoundEntry(file: $0) }  // for pictures
 
     private(set) var sounds: [SoundEntry]
@@ -186,17 +189,17 @@ final class Soundboard {
         }
         if clips[file] == nil { clips[file] = try? SoundClip(url: folder.appendingPathComponent(file), rate: rate) }
         guard let clip = clips[file] else { NSSound.beep(); return }
-        play(clip, as: file)
+        play(clip, as: file, volume: sounds.first { $0.file == file }?.volume ?? 1)
     }
 
-    func play(_ clip: SoundClip, as name: String) {
+    func play(_ clip: SoundClip, as name: String, volume: Float = 1) {
         if let current, current !== clip { keepAlive(current) }
         current = clip
         // The owner's copy first (starting it can take a moment), then the call's copy, so they start together and
         // the mic stays muted until the speakers are done.
         hear(clip)
         let next = SoundPlay(samples: clip.samples, count: clip.count, rate: clip.rate, take: 0,
-                             muteMic: speakers ?? Self.onSpeakers(defaultOutput()))
+                             muteMic: speakers ?? Self.onSpeakers(defaultOutput()), volume: volume)
         voice.sounds.withLock { state in
             var play = next
             play.take = state.take + 1
@@ -259,7 +262,10 @@ final class Soundboard {
         let state = HearMix(SoundMix(rate: rate, take: sounds.withLock { $0.take }))
         // Runs on the speakers' sound thread. Makes no memory.
         let source = AVAudioSourceNode(format: format) { silence, _, frameCount, list -> OSStatus in
-            if let play = sounds.withLockIfAvailable({ $0 }), play.take != state.mix.take { _ = state.mix.start(play) }
+            if let play = sounds.withLockIfAvailable({ $0 }) {
+                if play.take != state.mix.take { _ = state.mix.start(play) }
+                state.mix.follow(volume: play.volume)
+            }
             let buffers = UnsafeMutableAudioBufferListPointer(list)
             guard state.mix.active, let out = buffers.first?.mData?.assumingMemoryBound(to: Float.self) else {
                 for buffer in buffers { if let data = buffer.mData { memset(data, 0, Int(buffer.mDataByteSize)) } }
@@ -356,6 +362,18 @@ final class Soundboard {
         onChange()
     }
 
+    // A sound's own volume (0 ... 1.5). Heard at once if it's playing (both copies glide there, so no click).
+    func setVolume(_ file: String, _ volume: Float) {
+        guard let i = sounds.firstIndex(where: { $0.file == file }) else { return }
+        let clean = max(0, min(SoundEntry.loudest, volume))
+        guard sounds[i].volume != clean else { return }
+        sounds[i].volume = clean
+        if playing == file { voice.sounds.withLock { $0.volume = clean } }
+        save()
+    }
+
+    func volume(of file: String) -> Float { sounds.first { $0.file == file }?.volume ?? 1 }
+
     private func save() {
         guard saves else { return }
         defaults.set(sounds.map(\.saved), forKey: Self.key)
@@ -375,12 +393,14 @@ final class Soundboard {
 
 // One sound's button: its name, filled with the theme colors while it plays. Click to play, again to stop. A small
 // ✕ shows in its corner while the mouse is over it (or right-click → Remove). Right-click → Rename… or a double-click
-// turns the name into a text field: Return keeps the new name, Escape the old one.
+// turns the name into a text field: Return keeps the new name, Escape the old one. Right-click → Volume… shows a
+// small slider for its own volume.
 final class SoundPad: NSView, NSTextFieldDelegate {
     let file: String
     var onPlay: () -> Void = {}
     var onRemove: () -> Void = {}
     var onRename: (String) -> Void = { _ in }
+    var onVolume: () -> Void = {}
     var isPlaying = false {
         didSet {
             guard oldValue != isPlaying else { return }
@@ -407,11 +427,16 @@ final class SoundPad: NSView, NSTextFieldDelegate {
         named()
         let menu = NSMenu()
         menu.addItem(withTitle: "Rename…", action: #selector(renameClicked), keyEquivalent: "").target = self
+        menu.addItem(withTitle: "Volume…", action: #selector(volumeClicked), keyEquivalent: "").target = self
         menu.addItem(withTitle: "Remove", action: #selector(removeClicked), keyEquivalent: "").target = self
         self.menu = menu
         setAccessibilityCustomActions([
             NSAccessibilityCustomAction(name: "Rename") { [weak self] in
                 self?.startRenaming()
+                return true
+            },
+            NSAccessibilityCustomAction(name: "Volume") { [weak self] in
+                self?.onVolume()
                 return true
             },
             NSAccessibilityCustomAction(name: "Remove") { [weak self] in
@@ -574,6 +599,7 @@ final class SoundPad: NSView, NSTextFieldDelegate {
 
     @objc private func removeClicked() { onRemove() }
     @objc private func renameClicked() { startRenaming() }
+    @objc private func volumeClicked() { onVolume() }
 }
 
 private final class FlippedView: NSView {
@@ -590,6 +616,8 @@ final class SoundboardPanel: NSObject, NSWindowDelegate {
     private let addButton = NSButton()
     private let stopButton = NSButton(title: "Stop", target: nil, action: nil)
     private var pads: [SoundPad] = []
+    private var volumePopover: NSPopover?
+    private var clickWatch: Any?  // closes the volume popover on a click in another app
     private let columns = 3, padSize = NSSize(width: 120, height: 40), gap: CGFloat = 8, margin: CGFloat = 16
     private let visibleRows = 5  // more scroll
     private var placed = false
@@ -668,6 +696,7 @@ final class SoundboardPanel: NSObject, NSWindowDelegate {
     func close() { panel.close() }
 
     func windowWillClose(_ notification: Notification) {
+        closeVolume()
         pads.forEach { $0.finishRenaming(keep: true) }
         board.stop()
         board.ready = false
@@ -678,12 +707,14 @@ final class SoundboardPanel: NSObject, NSWindowDelegate {
 
     // Makes one button per sound, three to a row, and fits the window around them.
     func reload() {
+        closeVolume()
         pads.forEach { $0.removeFromSuperview() }
         pads = board.sounds.map { sound in
             let pad = SoundPad(sound: sound)
             let file = sound.file
             pad.onPlay = { [weak self] in self?.board.click(file) }
             pad.onRename = { [weak self] name in self?.board.rename(file, to: name) }
+            pad.onVolume = { [weak self, weak pad] in if let pad { self?.showVolume(pad) } }
             // A moment later: removing rebuilds the buttons, and this one is still handling its click.
             pad.onRemove = { [weak self] in DispatchQueue.main.async { self?.board.remove(file) } }
             return pad
@@ -730,6 +761,64 @@ final class SoundboardPanel: NSObject, NSWindowDelegate {
 
     // For pictures: the first sound's name being changed.
     func showRenaming() { pads.first?.startRenaming() }
+
+    // For pictures: the first sound's volume slider, at 80%.
+    func showVolume() {
+        guard let pad = pads.first else { return }
+        board.setVolume(pad.file, 0.8)
+        showVolume(pad)
+    }
+
+    // A small popover under a sound: one slider from 0 to 150% (a mark at 100%) and the amount, e.g. "80%". It
+    // changes the volume as it moves.
+    private func showVolume(_ pad: SoundPad) {
+        closeVolume()
+        let file = pad.file
+        let percent = { (value: Float) in "\(Int((value * SoundEntry.loudest * 100).rounded()))%" }
+        let slider = GradientSlider(left: "", right: "", name: "Volume", describe: percent)
+        let amount = NSTextField(labelWithString: "")
+        amount.font = .monospacedDigitSystemFont(ofSize: 13, weight: .medium)
+        amount.textColor = Theme.mid
+        amount.alignment = .right
+        slider.steps = 150  // 1% each
+        slider.mark = 1 / SoundEntry.loudest
+        slider.clickThrough = true
+        slider.value = board.volume(of: file) / SoundEntry.loudest
+        amount.stringValue = percent(slider.value)
+        slider.onChange = { [weak self, weak amount] value in
+            amount?.stringValue = percent(value)
+            self?.board.setVolume(file, (value * SoundEntry.loudest * 100).rounded() / 100)
+        }
+        let content = NSView(frame: NSRect(x: 0, y: 0, width: 226, height: 36))
+        slider.frame = NSRect(x: 12, y: 6, width: 150, height: 24)
+        amount.frame = NSRect(x: 166, y: 9, width: 48, height: 18)
+        content.addSubview(slider)
+        content.addSubview(amount)
+        let controller = NSViewController()
+        controller.view = content
+        let popover = NSPopover()
+        popover.contentViewController = controller
+        popover.contentSize = content.frame.size
+        popover.behavior = .transient
+        popover.animates = preview == nil
+        popover.show(relativeTo: pad.bounds, of: pad, preferredEdge: .minY)
+        volumePopover = popover
+        if preview != nil, let window = content.window {  // pictures: under the desktop picture like the Soundboard
+            window.level = panel.level
+            window.orderBack(nil)
+            return
+        }
+        clickWatch = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
+            self?.closeVolume()
+        }
+    }
+
+    private func closeVolume() {
+        if let clickWatch { NSEvent.removeMonitor(clickWatch) }
+        clickWatch = nil
+        volumePopover?.close()
+        volumePopover = nil
+    }
 
     @objc private func addClicked() {
         guard preview == nil else { return }
