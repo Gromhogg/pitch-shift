@@ -795,8 +795,23 @@ struct AutoEQ5 {
             if (two) x1[i] = (float)s[1];
         }
         eN += m;
-        if (blockEnd) analyze(eng);
+        if (blockEnd) { analyze(eng); flushTiny(); }
         if (!eng && mix <= 0.0) stop();  // faded out: from now on skipped
+    }
+
+    // Filter memories that have died away to almost nothing (under 1e-20, -400 dB) are set to exactly 0, once per
+    // block. In digital silence they would otherwise sink into "denormal" numbers, which Intel and AMD processors
+    // handle many times slower (measured: up to 100 ms for one 512-sample call on an Intel build). A block can't take
+    // them from 1e-20 down to that range, and the sound is not changed in any way that can be heard.
+    static void flush(double &z) { if (std::fabs(z) < 1e-20) z = 0; }
+    static void flush(Biquad &q) { flush(q.z1); flush(q.z2); }
+    static void flush(Biquad2 &q) { flush(q.z1[0]); flush(q.z1[1]); flush(q.z2[0]); flush(q.z2[1]); }
+    void flushTiny() {
+        for (int k = 0; k < AEQB - 1; k++) {
+            flush(lo1[k]); flush(lo2[k]); flush(xap[k]); flush(ap[k]);
+            flush(refLo1[k]); flush(refLo2[k]); flush(refAp[k]);
+        }
+        flush(subIn); flush(subOut);
     }
 
     // the change each section needs (dB) so its share of the total is the original's (all 0 while too quiet to tell)
