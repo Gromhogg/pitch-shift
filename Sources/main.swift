@@ -20,8 +20,9 @@
 //                                              the mic to Pitch Shift Mic (the delay parts are printed at the start).
 //                                              --buffer N: callback size to ask for (default 128, or 256 above 48 kHz)
 //   --render-voice IN OUT [--steps 3] [--cartoon | --cartoon-amount 0.5] [--cartoon-at "1:1,2:0"] [--slow-deeper]
-//                                              shifts a sound file with the voice's own settings (offline, no devices;
-//                                              --cartoon-at "1:1,2:0" moves the style to 1 at 1 s and back to 0 at 2 s)
+//                [--voice-preset old]          shifts a sound file with the voice's own settings (offline, no devices;
+//                                              --cartoon-at "1:1,2:0" moves the style to 1 at 1 s and back to 0 at 2 s;
+//                                              --voice-preset old: as before the Natural level fix, for comparing)
 //   --test-button [--mic NAME] [--volume 0.03] presses Test with a quiet tone as the voice (record 5 s, play back)
 //   --test-sounds FILE [--speakers] [--seconds S] [--out F.caf] [--mic NAME] [--steps 3] [--volume 0.05] [--hear 0.02]
 //                [--sound-volume 0.5] [--voice-off]
@@ -226,7 +227,11 @@ if let input = arg("--render-file") {
 
 if let input = arg("--render-voice") {
     let i = args.firstIndex(of: "--render-voice")!
-    guard i + 2 < args.count else { print("usage: --render-voice IN OUT [--steps N] [--cartoon-amount X] [--slow-deeper]"); exit(1) }
+    guard i + 2 < args.count else {
+        print("usage: --render-voice IN OUT [--steps N] [--cartoon-amount X] [--slow-deeper] [--voice-preset old]"); exit(1)
+    }
+    let preset = arg("--voice-preset") ?? "current"
+    guard preset == "current" || preset == "old" else { print("--voice-preset: old or current"); exit(1) }
     // "1:1,2:0" = at 1 s go to Cartoon, at 2 s back to Natural
     let changes: [(Double, Float)] = (arg("--cartoon-at") ?? "").split(separator: ",").compactMap { item in
         let parts = item.split(separator: ":")
@@ -235,7 +240,7 @@ if let input = arg("--render-voice") {
     }
     do {
         try renderVoiceFile(input: input, output: args[i + 2], halfSteps: arg("--steps").flatMap(Float.init) ?? 3,
-                            cartoon: cartoonArg ?? 0, changes: changes, slowDeeper: slowDeeperArg)
+                            cartoon: cartoonArg ?? 0, changes: changes, slowDeeper: slowDeeperArg, levelFix: preset != "old")
         print("wrote \(args[i + 2])")
         exit(0)
     } catch {
