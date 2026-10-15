@@ -104,9 +104,15 @@ protocol HearPlayer: AnyObject {
     var skips: Int { get }
     func play(_ buffer: AVAudioPCMBuffer)
     func setHalfSteps(_ value: Float)
+    func setTone(bass: Double, treble: Double)
     func stop()
     // Where the delay comes from, in milliseconds: the cushion, the pitch shifting, and the speakers or headphones.
     var delays: (cushion: Double, shifter: Double, device: Double) { get }
+}
+
+// Bass and treble are an Advanced processing setting: normal mode ignores them.
+extension HearPlayer {
+    func setTone(bass: Double, treble: Double) {}
 }
 
 // Changes the pitch with Rubber Band and plays to one speaker or headphone device.
@@ -278,6 +284,12 @@ final class HearShifter {
     var advanced: Bool {
         didSet { if oldValue != advanced, running { restartCapture() } }
     }
+    // Advanced processing's bass and treble in dB (normal mode ignores them). Rebuilt players keep them.
+    private(set) var tone = (bass: 0.0, treble: 0.0)
+    func setTone(bass: Double, treble: Double) {
+        tone = (bass, treble)
+        audioQueue.async { self.player?.setTone(bass: bass, treble: treble) }
+    }
     var onChange: () -> Void = {}
     var testPID: pid_t?
     var testRecordSeconds: Double = 0  // checks only: Advanced processing keeps what it plays (see saveTestRecording)
@@ -443,6 +455,7 @@ final class HearShifter {
         guard running, let format = capture?.format else { return }
         let device = defaultOutput()
         let steps = halfSteps
+        let tone = tone
         let ring = capture?.ring
         if let playerObserver { NotificationCenter.default.removeObserver(playerObserver) }
         playerObserver = nil
@@ -450,7 +463,7 @@ final class HearShifter {
             player?.stop()
             player = nil
             let made: Result<HearPlayer, Error> = Result {
-                if let ring { return try AdvancedPlayer(device: device, format: format, halfSteps: steps, input: ring, recordSeconds: testRecordSeconds) }
+                if let ring { return try AdvancedPlayer(device: device, format: format, halfSteps: steps, tone: tone, input: ring, recordSeconds: testRecordSeconds) }
                 return try Player(device: device, format: format, halfSteps: steps)
             }
             if case .success(let p) = made { player = p }
