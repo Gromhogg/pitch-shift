@@ -81,29 +81,35 @@ struct SoundPlay: @unchecked Sendable {
     var rate: Double = 0  // the samples' rate: a chain running at another rate doesn't play them
     var take = 0          // goes up with every play and stop, so the sound thread sees each one
     var muteMic = false   // playing on the Mac's speakers: the real mic is muted while it plays and just after
+    var volume: Float = 1 // the playing sound's own volume (0 ... 1.5); it may change while the sound plays
 }
 
 // Plays the Soundboard's sound one sample at a time on a sound thread, following SoundPlay. Used for both copies:
 // the one sent into Pitch Shift Mic (VoiceChain) and the owner's own (Soundboard), so both stop and switch the same
 // way. A sound that is stopped or replaced fades out over 10 ms (stopping at once would click); a new one starts
-// from its beginning.
+// from its beginning. A new volume for the playing sound glides there in about 20 ms (a jump would click too).
 struct SoundMix {
     private(set) var take: Int
     private let rate: Double
     private let fadeStep: Float  // 10 ms from full to nothing
+    private let volumeGlide: Float  // the part of the way to a new volume taken each sample (20 ms smoothing)
     private var sound: UnsafePointer<Float>?  // the one playing
     private var count = 0
     private var at = 0
+    private var gain: Float = 1    // its volume now
+    private var volume: Float = 1  // its volume as set (`gain` glides there)
     private var fading: UnsafePointer<Float>?  // one that was stopped or replaced
     private var fadingCount = 0
     private var fadingAt = 0
     private var fadingGain: Float = 0
+    private var fadingVolume: Float = 1
 
     // `take`: the SoundPlay's take now (a sound already playing isn't picked up).
     init(rate: Double, take: Int) {
         self.rate = rate
         self.take = take
         fadeStep = Float(1 / (0.01 * rate))
+        volumeGlide = Float(1 - exp(-1 / (0.02 * rate)))
     }
 
     var playing: Bool { sound != nil }
@@ -118,20 +124,30 @@ struct SoundMix {
             fadingCount = count
             fadingAt = at
             fadingGain = 1
+            fadingVolume = gain
         }
         sound = nil
         guard let samples = play.samples, play.count > 0, play.rate == rate else { return cut }
         sound = samples
         count = play.count
         at = 0
+        gain = play.volume
+        volume = play.volume
         return cut
     }
+
+    // The playing sound's volume as set now (read from SoundPlay on every pass).
+    mutating func follow(volume new: Float) { volume = new }
 
     // The next sample of the sound(s). `ended` turns true when the sound plays to its end.
     @inline(__always) mutating func next(_ ended: inout Bool) -> Float {
         var value: Float = 0
         if let playing = sound {
-            value = playing[at]
+            if gain != volume {
+                gain += (volume - gain) * volumeGlide
+                if abs(volume - gain) < 1e-4 { gain = volume }
+            }
+            value = playing[at] * gain
             at += 1
             if at >= count {
                 sound = nil
@@ -141,7 +157,7 @@ struct SoundMix {
         if let old = fading {
             fadingGain -= fadeStep
             if fadingGain > 0 && fadingAt < fadingCount {
-                value += old[fadingAt] * fadingGain
+                value += old[fadingAt] * fadingGain * fadingVolume
                 fadingAt += 1
             } else {
                 fading = nil
@@ -179,6 +195,18 @@ func voiceFormantScale(halfSteps: Float, cartoon: Float) -> Double {
     cartoon <= 0 ? 0 : pow(2, Double(halfSteps) / 12 * Double(min(cartoon, 1) - 1))
 }
 
+// How much quieter the voice is made, for a pitch (half-steps, including "Deeper when slow") and a style.
+// Rubber Band's short window (used for its low delay) makes the voice louder when it moves the voice's shape
+// (formants) back down, which is what Natural does when going up: about 0.25 dB per half-step the shape is moved,
+// measured on 4 recorded voices and 2 made-up ones against Rubber Band's own standard window, which keeps the level
+// (for example +2.6 dB at +10, up to +6 dB on a high voice). Loud words could then go past full scale and sound harsh.
+// So the output is turned down by that much: nothing in Cartoon (the shape isn't moved) or when going down.
+// Off for `--render-voice --voice-preset old`.
+func voiceLevelGain(halfSteps: Float, cartoon: Float) -> Float {
+    let shapeMove = halfSteps * (1 - max(0, min(1, cartoon)))  // half-steps the shape is moved back down
+    return shapeMove > 0 ? pow(10, -0.25 * shapeMove / 20) : 1
+}
+
 // The voice's Rubber Band shifter (used by the live chain and by the offline check --render-voice).
 // A new style glides there over a short moment, so moving the slider never clicks. "Deeper when slow" adds an extra
 // shift on top of the set amount, which glides too.
@@ -193,8 +221,12 @@ final class VoiceStretcher {
     private var extraTarget: Float = 0
     private var extraStep: Float = 0     // how much `extra` moves per sample on its way
     private let extraGlide: Float        // each move of `extra` takes this many samples (0.3 s)
+    private let levelFix: Bool           // turn the output down as voiceLevelGain says
+    private var gain: Float = 1          // the output gain in use (follows `gainTarget` smoothly)
+    private var gainTarget: Float = 1
+    private let gainSmoothing: Float     // per sample, for a 30 ms glide
 
-    init?(rate: Double, halfSteps: Float, cartoon: Float, slowDeeper: Bool = false) {
+    init?(rate: Double, halfSteps: Float, cartoon: Float, slowDeeper: Bool = false, levelFix: Bool = true) {
         guard let made = rubberband_new(UInt32(rate), 1, voiceShifterOptions, 1, pow(2, Double(halfSteps) / 12)) else { return nil }
         state = made
         self.halfSteps = halfSteps
@@ -203,8 +235,12 @@ final class VoiceStretcher {
         glideStep = Float(1 / (0.15 * rate))  // all the way from Natural to Cartoon in 0.15 s
         self.slowDeeper = slowDeeper
         extraGlide = Float(0.3 * rate)
+        self.levelFix = levelFix
+        gainSmoothing = Float(1 - exp(-1 / (0.03 * rate)))
         rubberband_set_max_process_size(state, 4096)
         rubberband_set_formant_scale(state, voiceFormantScale(halfSteps: halfSteps, cartoon: self.cartoon))
+        aimGain()
+        gain = gainTarget
     }
 
     deinit { rubberband_delete(state) }
@@ -223,6 +259,8 @@ final class VoiceStretcher {
         halfSteps = new
         if running { rubberband_set_pitch_scale(state, pow(2, Double(pitch) / 12)) }
         rubberband_set_formant_scale(state, voiceFormantScale(halfSteps: pitch, cartoon: cartoonNow))
+        aimGain()
+        if fresh { gain = gainTarget }  // nothing old is left to glide from
         return fresh
     }
 
@@ -240,6 +278,8 @@ final class VoiceStretcher {
         guard running else { return fresh }
         rubberband_set_pitch_scale(state, pow(2, Double(pitch) / 12))
         rubberband_set_formant_scale(state, voiceFormantScale(halfSteps: pitch, cartoon: cartoonNow))
+        aimGain()
+        if fresh { gain = gainTarget }
         return fresh
     }
 
@@ -264,6 +304,25 @@ final class VoiceStretcher {
             rubberband_set_pitch_scale(state, pow(2, Double(pitch) / 12))
         }
         rubberband_set_formant_scale(state, voiceFormantScale(halfSteps: pitch, cartoon: cartoonNow))
+        aimGain()
+    }
+
+    private func aimGain() {
+        gainTarget = levelFix ? voiceLevelGain(halfSteps: pitch, cartoon: cartoonNow) : 1
+    }
+
+    // Takes up to `count` shifted samples from Rubber Band into `buffer`, at the level voiceLevelGain says
+    // (gliding there), and returns how many it took.
+    func retrieve(_ buffer: UnsafeMutablePointer<Float>, _ count: Int) -> Int {
+        var output: UnsafeMutablePointer<Float>? = buffer
+        let got = Int(rubberband_retrieve(state, &output, UInt32(count)))
+        guard gain != 1 || gainTarget != 1 else { return got }  // Cartoon and going down: untouched
+        for j in 0..<got {
+            gain += (gainTarget - gain) * gainSmoothing
+            buffer[j] *= gain
+        }
+        if abs(gain - gainTarget) < 1e-4 { gain = gainTarget }  // close enough (0.001 dB): stop gliding
+        return got
     }
 }
 
@@ -271,14 +330,15 @@ final class VoiceStretcher {
 // Each syllable is a bump in loudness, so it counts bumps: the loudness of the voice's middle sounds (about
 // 250-2500 Hz, where the vowels are), smoothed over 20 ms and looked at every 10 ms. A bump counts when it rises
 // well above the quiet between words (the quietest moment of the last second), falls again, and comes at least
-// 80 ms after the last one. The rate is the bumps in the last 2 seconds of talking. Pauses don't count as talking,
-// so the rate stays where it was while it's quiet. The voice only moves once the rate has clearly changed
-// (by more than 0.5 per second, for more than half a second), so normal talking doesn't wobble.
+// 80 ms after the last one. The rate is the bumps in the last 1.2 seconds of talking. Pauses don't count as
+// talking, so the rate stays where it was while it's quiet. The voice only moves once the rate has clearly changed
+// (by more than one syllable in those 1.2 s, for more than a quarter of a second), so normal talking doesn't
+// wobble. Going from normal to slow talking moves the voice all the way down in about 2 seconds.
 // `listen` runs on the sound thread: it makes no memory and never waits.
 final class SpeakingRate {
-    static let depth: Float = 5         // half-steps lower when talking slowly
-    static let slowRate: Float = 2      // syllables per second: this slow or slower gets all of `depth`
-    static let normalRate: Float = 4    // this fast or faster: no change (in between: part of `depth`)
+    static let depth: Float = 8         // half-steps lower when talking slowly
+    static let slowRate: Float = 1.5    // syllables per second: this slow or slower gets all of `depth`
+    static let normalRate: Float = 3    // this fast or faster: no change (in between: part of `depth`)
 
     private(set) var rate = SpeakingRate.normalRate  // syllables per second, as measured
     private(set) var used = SpeakingRate.normalRate  // the rate the voice follows (moves only after a clear change)
@@ -293,14 +353,15 @@ final class SpeakingRate {
     private let quietest: Float = -55     // dB: anything quieter is never talking
     private let bumpGap = 8               // at least 80 ms between bumps
     private let talkHold = 25             // a pause still counts as talking for its first 0.25 s
-    private let windowSteps = 200         // the rate counts the last 2 s of talking
-    private let firstSteps = 100          // ...once there has been 1 s of it
-    private let moveAfter = 50            // the rate must stay clearly changed this long (0.5 s) to move the voice
+    private let windowSteps = 120         // the rate counts the last 1.2 s of talking
+    private let firstSteps = 60           // ...once there has been 0.6 s of it
+    private let moveAfter = 25            // the rate must stay clearly changed this long (0.25 s) to move the voice
+    private let moveBy: Float = 0.9       // ...by more than this (syllables per second): one syllable in 1.2 s is 0.83
     private let stepLength: Int           // samples in 10 ms
     private let smoothing: Double         // for the 20 ms smoothing
     private let b0, a1, a2: Double        // the 250-2500 Hz band-pass filter
     private let quietPieces: UnsafeMutablePointer<Float>  // the quietest level in each 100 ms of the last second
-    private let window: UnsafeMutablePointer<UInt8>       // bumps in each 10 ms of the last 2 s of talking
+    private let window: UnsafeMutablePointer<UInt8>       // bumps in each 10 ms of the last 1.2 s of talking
 
     private var x1 = 0.0, x2 = 0.0, y1 = 0.0, y2 = 0.0
     private var energy = 0.0
@@ -417,7 +478,7 @@ final class SpeakingRate {
         windowAt = (windowAt + 1) % windowSteps
         windowFilled = min(windowFilled + 1, windowSteps)
         if windowFilled >= firstSteps { rate = Float(windowBumps) / (Float(windowFilled) * 0.01) }
-        if abs(rate - used) > 0.5 {
+        if abs(rate - used) > moveBy {
             changedFor += 1
             if changedFor >= moveAfter {
                 used = rate
@@ -616,7 +677,10 @@ final class VoiceChain {
 
         // A sound playing on the Mac's speakers: the mic would hear it and send it into the call a second time, so
         // the mic fades out (10 ms) while it plays and for 150 ms after. Headphones: nothing is muted.
-        if let play = sounds.withLockIfAvailable({ $0 }), play.take != mix.take { startSound(play) }
+        if let play = sounds.withLockIfAvailable({ $0 }) {
+            if play.take != mix.take { startSound(play) }
+            mix.follow(volume: play.volume)
+        }
         let muted = (mix.playing && muteMic) || muteLeft > 0
         if muted || micGain < 1 {
             for i in 0..<frames {
@@ -645,6 +709,10 @@ final class VoiceChain {
                 var ended = false
                 value = softLimit(value + mix.next(&ended))
                 if ended && muteMic { muteLeft = muteAfter }  // played to the end
+            } else if shifting {
+                // The shifted voice can peak a few dB above the mic: ease its loudest moments instead of cutting
+                // them off at full scale (a hard cut sounds harsh and buzzy).
+                value = softLimit(value)
             } else {
                 value = max(-1, min(1, value))
             }
@@ -699,8 +767,7 @@ final class VoiceChain {
         while true {
             let ready = min(Int(rubberband_available(shifter)), maxPiece)
             if ready <= 0 { break }
-            var output: UnsafeMutablePointer<Float>? = piece
-            let got = Int(rubberband_retrieve(shifter, &output, UInt32(ready)))
+            let got = stretcher.retrieve(piece, ready)
             if got <= 0 { break }
             counts.returned += got
             ring.write(piece, got)
@@ -788,7 +855,9 @@ enum VoiceState: Equatable {
     case problem(String)
 }
 
-// Decides when the voice chain runs, which mic it uses, and rebuilds it when devices change.
+// Decides when the voice chain runs, which mic it uses, and rebuilds it when devices change. It runs while "Your
+// voice" is on, and also while the Soundboard is open with the voice off: then the mic goes into Pitch Shift Mic
+// unchanged (no pitch change, so Rubber Band isn't used and there's almost no delay), with the sounds mixed in.
 final class VoiceShifter {
     var halfSteps: Float { didSet { pushParams() } }
     var cartoon: Float { didSet { pushParams() } }  // voice style: 0 = Natural, 1 = Cartoon
@@ -802,7 +871,9 @@ final class VoiceShifter {
     private(set) var chain: VoiceChain?
     let params: OSAllocatedUnfairLock<VoiceParams>
     let sounds = OSAllocatedUnfairLock(uncheckedState: SoundPlay())  // the Soundboard's sound, for the chain
-    private var running = false
+    private var running = false      // the chain may run (the voice is on, or the Soundboard is open)
+    private var voiceSwitch = false  // "Your voice" is on
+    private(set) var runsForSounds = false  // the Soundboard is open (with the voice off: no pitch change)
     private var holdCount = 0
     private var listeners: [Listener] = []
     private var micListeners: [Listener] = []
@@ -818,10 +889,40 @@ final class VoiceShifter {
         params = OSAllocatedUnfairLock(initialState: VoiceParams(halfSteps: halfSteps, cartoon: cartoon, slowDeeper: slowDeeper, silent: false))
     }
 
-    var isOn: Bool { running }
+    var isOn: Bool { voiceSwitch }
     var currentMic: AudioDeviceID? { Mics.resolve(micUID) }
 
+    // "Your voice" on.
     func start() {
+        guard !voiceSwitch else { return }
+        voiceSwitch = true
+        begin()
+    }
+
+    // "Your voice" off. With the Soundboard open, the chain keeps going with no pitch change.
+    func stop() {
+        guard voiceSwitch else { return }
+        voiceSwitch = false
+        pushParams()
+        if runsForSounds { onChange() } else { end() }
+    }
+
+    // The Soundboard opened or closed: while it's open the chain runs even with the voice off.
+    func keepForSounds(_ on: Bool) {
+        guard on != runsForSounds else { return }
+        runsForSounds = on
+        if on { begin() } else if !voiceSwitch { end() }
+    }
+
+    // Everything off (quitting).
+    func stopAll() {
+        runsForSounds = false
+        stop()
+        end()
+    }
+
+    private func begin() {
+        pushParams()
         guard !running else { return }
         running = true
         // With no mic picked, the mic follows the Mac's default mic, and the headphones in use (see Mics.choose).
@@ -838,7 +939,7 @@ final class VoiceShifter {
         update()
     }
 
-    func stop() {
+    private func end() {
         guard running else { return }
         running = false
         listeners = []
@@ -860,8 +961,9 @@ final class VoiceShifter {
         params.withLock { $0.silent = silent }
     }
 
+    // With the voice off (only the Soundboard running) the voice goes through unchanged.
     private func pushParams() {
-        let steps = halfSteps, cartoon = cartoon, slowDeeper = slowDeeper
+        let steps = voiceSwitch ? halfSteps : 0, cartoon = cartoon, slowDeeper = voiceSwitch && slowDeeper
         params.withLock { $0.halfSteps = steps; $0.cartoon = cartoon; $0.slowDeeper = slowDeeper }
     }
 
@@ -1117,9 +1219,10 @@ final class VoiceTest {
 // Offline check (--render-voice): shifts a sound file with the voice's own Rubber Band settings, in 512-sample
 // pieces like the live chain, and writes one channel. `changes` moves the style part way through
 // ((seconds, style) pairs), to check that it changes smoothly. With `slowDeeper` it prints the speaking rate and
-// the extra shift once per second of sound.
+// the extra shift once per second of sound. `levelFix: false` renders it as before the level fix
+// (`--voice-preset old`, see voiceLevelGain), so old and new can be compared.
 func renderVoiceFile(input: String, output: String, halfSteps: Float, cartoon: Float, changes: [(Double, Float)],
-                     slowDeeper: Bool = false) throws {
+                     slowDeeper: Bool = false, levelFix: Bool = true) throws {
     let file = try AVAudioFile(forReading: URL(fileURLWithPath: input))
     let rate = file.processingFormat.sampleRate
     let length = Int(file.length)
@@ -1137,7 +1240,8 @@ func renderVoiceFile(input: String, output: String, halfSteps: Float, cartoon: F
     }
     var result = mono
     if halfSteps != 0 || slowDeeper {
-        guard let stretcher = VoiceStretcher(rate: rate, halfSteps: halfSteps, cartoon: cartoon, slowDeeper: slowDeeper) else {
+        guard let stretcher = VoiceStretcher(rate: rate, halfSteps: halfSteps, cartoon: cartoon, slowDeeper: slowDeeper,
+                                             levelFix: levelFix) else {
             throw Problem(message: "Could not start Rubber Band.")
         }
         let speaking = SpeakingRate(sampleRate: rate)
@@ -1168,10 +1272,7 @@ func renderVoiceFile(input: String, output: String, halfSteps: Float, cartoon: F
             position += block
             while rubberband_available(stretcher.state) > 0 {
                 let want = min(Int(rubberband_available(stretcher.state)), piece.count)
-                let got = piece.withUnsafeMutableBufferPointer { p in
-                    var pointer: UnsafeMutablePointer<Float>? = p.baseAddress
-                    return Int(rubberband_retrieve(stretcher.state, &pointer, UInt32(want)))
-                }
+                let got = piece.withUnsafeMutableBufferPointer { stretcher.retrieve($0.baseAddress!, want) }
                 if got <= 0 { break }
                 let drop = min(skip, got)
                 skip -= drop

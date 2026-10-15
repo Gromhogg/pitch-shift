@@ -20,10 +20,12 @@
 //                                              the mic to Pitch Shift Mic (the delay parts are printed at the start).
 //                                              --buffer N: callback size to ask for (default 128, or 256 above 48 kHz)
 //   --render-voice IN OUT [--steps 3] [--cartoon | --cartoon-amount 0.5] [--cartoon-at "1:1,2:0"] [--slow-deeper]
-//                                              shifts a sound file with the voice's own settings (offline, no devices;
-//                                              --cartoon-at "1:1,2:0" moves the style to 1 at 1 s and back to 0 at 2 s)
+//                [--voice-preset old]          shifts a sound file with the voice's own settings (offline, no devices;
+//                                              --cartoon-at "1:1,2:0" moves the style to 1 at 1 s and back to 0 at 2 s;
+//                                              --voice-preset old: as before the Natural level fix, for comparing)
 //   --test-button [--mic NAME] [--volume 0.03] presses Test with a quiet tone as the voice (record 5 s, play back)
 //   --test-sounds FILE [--speakers] [--seconds S] [--out F.caf] [--mic NAME] [--steps 3] [--volume 0.05] [--hear 0.02]
+//                [--sound-volume 0.5] [--voice-off]
 //                                              Soundboard: plays FILE into Pitch Shift Mic 1 s in, with a quiet tone as
 //                                              the voice, records Pitch Shift Mic and checks it (one copy of the sound,
 //                                              its level; --speakers: as if on the Mac's speakers, so the voice must
@@ -31,6 +33,10 @@
 //                                              --recording F.caf: check a recording saved with --out (no devices).
 //                                              --stop-after S: press Stop S seconds after the sound starts.
 //                                              --hear-out F.caf: save the owner's copy (with --hear).
+//                                              --sound-volume V: the sound's own volume (0 ... 1.5, Volume… on its
+//                                              button), so its level in Pitch Shift Mic should be V x the file.
+//                                              --voice-off: as with "Your voice" off and the Soundboard open: the
+//                                              tone must come through at its own pitch (440 Hz), no shift.
 //   --test ... --advanced [--record-out F.wav] [--steps-at "3:8,6:-5"] [--tone-amount 0.5] [--tone-at "2:1,4:-1"]
 //              [--as-device UID] [--tone-db 6,-6]
 //                                              "What you hear" with Advanced processing on (--watch prints the delay;
@@ -51,9 +57,11 @@ func arg(_ name: String) -> String? {
 }
 // --preview STATES [--size 800x400] [--cartoon-amount 0.5] [--tone-amount -0.4]: show the window in a state for
 // screenshots, without touching any sound or settings, and without switching apps (states: hear-on, voice-on, waiting,
-// typing, recording, playing, listening, hover, menu, roll, resize, no-driver, advanced-alert, sounds, light, tone,
-// slow; --cartoon-amount sets the voice style slider; sounds opens the Soundboard with example names; "tone" shows
-// Advanced processing on, and --tone-amount sets the Bass ↔ Treble slider; slow turns on "Deeper when slow").
+// typing, recording, playing, listening, hover, menu, roll, resize, no-driver, advanced-alert, sounds, rename, volume,
+// drop, light, tone, slow; --cartoon-amount sets the voice style slider; sounds opens the Soundboard with example
+// names, rename shows the first name being changed, volume the first sound's volume slider and drop files being
+// dragged over it; "tone" shows Advanced processing on, and --tone-amount sets the Bass ↔ Treble slider; slow turns
+// on "Deeper when slow").
 let preview = arg("--preview")
 
 var signalSources: [DispatchSourceSignal] = []
@@ -219,7 +227,11 @@ if let input = arg("--render-file") {
 
 if let input = arg("--render-voice") {
     let i = args.firstIndex(of: "--render-voice")!
-    guard i + 2 < args.count else { print("usage: --render-voice IN OUT [--steps N] [--cartoon-amount X] [--slow-deeper]"); exit(1) }
+    guard i + 2 < args.count else {
+        print("usage: --render-voice IN OUT [--steps N] [--cartoon-amount X] [--slow-deeper] [--voice-preset old]"); exit(1)
+    }
+    let preset = arg("--voice-preset") ?? "current"
+    guard preset == "current" || preset == "old" else { print("--voice-preset: old or current"); exit(1) }
     // "1:1,2:0" = at 1 s go to Cartoon, at 2 s back to Natural
     let changes: [(Double, Float)] = (arg("--cartoon-at") ?? "").split(separator: ",").compactMap { item in
         let parts = item.split(separator: ":")
@@ -228,7 +240,7 @@ if let input = arg("--render-voice") {
     }
     do {
         try renderVoiceFile(input: input, output: args[i + 2], halfSteps: arg("--steps").flatMap(Float.init) ?? 3,
-                            cartoon: cartoonArg ?? 0, changes: changes, slowDeeper: slowDeeperArg)
+                            cartoon: cartoonArg ?? 0, changes: changes, slowDeeper: slowDeeperArg, levelFix: preset != "old")
         print("wrote \(args[i + 2])")
         exit(0)
     } catch {
@@ -459,8 +471,10 @@ if args.contains("--test-button") {
 }
 
 // Soundboard check: a quiet tone is the voice, FILE plays into Pitch Shift Mic 1 s in, Pitch Shift Mic is recorded.
+// --voice-off: as with "Your voice" off and the Soundboard open (the voice goes through unchanged).
 if let path = arg("--test-sounds") {
-    let steps = arg("--steps").flatMap(Float.init) ?? 3
+    let voiceOff = args.contains("--voice-off")
+    let steps = voiceOff ? 0 : arg("--steps").flatMap(Float.init) ?? 3
     let toneHz = 440.0
     // --recording F.caf: checks a recording saved earlier with --out (no devices are used).
     if let saved = arg("--recording") {
@@ -486,7 +500,7 @@ if let path = arg("--test-sounds") {
     voice.testSource = { buffer, frames in
         for i in 0..<frames { buffer[i] = Float(volume * sin(phase)); phase += 2 * .pi * toneHz / rate }
     }
-    let board = Soundboard(voice: voice, files: [], saves: false)
+    let board = Soundboard(voice: voice, sounds: [], saves: false)
     board.speakers = args.contains("--speakers")
     board.hearVolume = arg("--hear").flatMap(Float.init) ?? 0
     // --hear-out: the owner's copy, as its player makes it (collected on the main thread).
@@ -505,18 +519,19 @@ if let path = arg("--test-sounds") {
     let clip: SoundClip
     do { clip = try SoundClip(url: url, rate: rate) } catch { print("Can't read \(path)"); exit(1) }
     let seconds = arg("--seconds").flatMap(Double.init) ?? (1 + clip.seconds + 2)
+    let soundVolume = arg("--sound-volume").flatMap(Float.init).map { max(0, min(SoundEntry.loudest, $0)) } ?? 1
     let started = Date()
     board.onChange = {
         print(String(format: "%.2fs: %@", Date().timeIntervalSince(started), board.playing.map { "playing \($0)" } ?? "stopped"))
     }
-    onQuitSignals { voice.stop(); exit(0) }
-    voice.start()
+    onQuitSignals { voice.stopAll(); exit(0) }
+    if voiceOff { voice.keepForSounds(true) } else { voice.start() }
     voice.hold(true)  // runs the chain like the Test button does (no app is listening yet)
     guard let chain = voice.chain else { print("voice did not start: \(voice.state)"); exit(1) }
     let recorder = try! Recorder(device: virtualMic, seconds: seconds)
     DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
         let asked = Date()
-        board.play(clip, as: url.lastPathComponent)
+        board.play(clip, as: url.lastPathComponent, volume: soundVolume)
         if board.hearVolume > 0 { print(String(format: "the owner's copy took %.0f ms to start", Date().timeIntervalSince(asked) * 1000)) }
     }
     if let stopAfter = arg("--stop-after").flatMap(Double.init) {  // presses Stop part way through
@@ -524,10 +539,10 @@ if let path = arg("--test-sounds") {
     }
     DispatchQueue.main.asyncAfter(deadline: .now() + seconds + 0.2) {
         let recorded = recorder.finish()
-        voice.stop()
-        print(String(format: "sound test: file=%@ (%.2f s) mic=%@ rate=%d steps=%g speakers=%@ tone=%g",
-                     url.lastPathComponent, clip.seconds, chain.micName, Int(chain.sampleRate), steps,
-                     board.speakers == true ? "yes" : "no", volume))
+        voice.stopAll()
+        print(String(format: "sound test: file=%@ (%.2f s) mic=%@ rate=%d voice=%@ steps=%g speakers=%@ tone=%g sound volume=%g",
+                     url.lastPathComponent, clip.seconds, chain.micName, Int(chain.sampleRate), voiceOff ? "off" : "on", steps,
+                     board.speakers == true ? "yes" : "no", volume, soundVolume))
         // The file as the chain plays it, at the recording's rate.
         let reference = recorder.sampleRate == clip.rate ? clip : (try? SoundClip(url: url, rate: recorder.sampleRate))
         if let reference {
@@ -562,7 +577,7 @@ let delegate = AppDelegate()
 app.delegate = delegate
 onQuitSignals {
     delegate.hear.stop()
-    delegate.voice.stop()
+    delegate.voice.stopAll()
     DefaultMic.giveBack()
     exit(0)
 }
