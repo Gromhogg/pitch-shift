@@ -47,7 +47,7 @@ More help: [windows/README.md](windows/README.md).
 
 **Your voice**
 
-- Pick your mic, turn it on, and choose **Natural** (sounds like a different person) or **Cartoon** (chipmunk or monster).
+- Pick your mic, turn it on, and slide from **Natural** (sounds like a different person) to **Cartoon** (chipmunk or monster). On Windows, choose Natural or Cartoon.
 - In Discord, Zoom or any other app, choose **Pitch Shift Mic** as your microphone.
 - Press **Test** to record 5 seconds of your shifted voice and hear it back.
 - Use headphones in calls. If your voice cuts out, turn off the call app's noise suppression (like Krisp).
