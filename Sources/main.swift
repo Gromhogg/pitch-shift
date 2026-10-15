@@ -20,7 +20,9 @@
 //                                              the mic to Pitch Shift Mic (the delay parts are printed at the start).
 //                                              --buffer N: callback size to ask for (default 128, or 256 above 48 kHz)
 //                                              --voice Woman [--strength S] [--quality natural] [--changer-tune ...]
-//                                              [--changer-stats]: with the voice changer on (--watch also prints what
+//                                              [--changer-stats] [--compute cpu|gpu|ane|all]: with the voice changer
+//                                              on (--quality realistic: the AI voice; its fixed delay, late pieces and
+//                                              the time Natural filled in are printed; --watch also prints what
 //                                              it does; with --file, --watch measures the delay at each start of the
 //                                              file's sound: give it a file with ~1 s of silence first)
 //   --render-voice IN OUT [--steps 3] [--cartoon | --cartoon-amount 0.5] [--cartoon-at "1:1,2:0"] [--slow-deeper]
@@ -128,19 +130,26 @@ let changerArg: ChangerOptions? = {
     }
     guard let natural = entry.natural else { print("--voice: \(entry.name) has no Natural mode settings"); exit(1) }
     if !changerTuneArg.isEmpty, let probe = voicechanger_new(48000, 512) {  // check the keys before starting
-        let unknown = changerTuneArg.filter { voicechanger_tune(probe, $0.0, $0.1) == 0 }.map(\.0)
+        let aiKeys = ["aiSlowMs", "aiSlowEvery", "aiGainMaxDb"]  // Realistic mode's test keys (voicestream_tune)
+        let unknown = changerTuneArg.filter { voicechanger_tune(probe, $0.0, $0.1) == 0 && !aiKeys.contains($0.0) }.map(\.0)
         voicechanger_delete(probe)
         if !unknown.isEmpty { print("--changer-tune: unknown keys \(unknown.joined(separator: ", "))"); exit(1) }
     }
     let strength = arg("--strength").flatMap(Float.init).map { max(0, min(1, $0)) } ?? 1
     return ChangerOptions(voice: natural, strength: strength, tune: changerTuneArg, stats: args.contains("--changer-stats"))
 }()
-// Why Realistic (AI) mode can't run yet.
+// Why Realistic (AI) mode can't run here (nil = it can).
 #if arch(arm64)
-let realisticUnavailable = "not available yet"
+let realisticUnavailable: String? = nil
 #else
-let realisticUnavailable = "needs Apple silicon"
+let realisticUnavailable: String? = "needs Apple silicon"
 #endif
+// --compute cpu|gpu|ane|all|auto: which chips run the AI voice (auto: the encoder on the Neural Engine, the voice on
+// the GPU, the CPU if those can't be used).
+if let name = arg("--compute") {
+    guard let units = computeUnits(named: name) else { print("--compute: cpu, gpu, ane, all or auto"); exit(1) }
+    VoiceModelStore.computeUnits = units
+}
 let realisticArg: Bool = {
     switch arg("--quality") ?? "natural" {
     case "natural": return false
@@ -307,11 +316,17 @@ if let input = arg("--render-voice") {
         guard parts.count == 2, let t = Double(parts[0]), let n = Float(parts[1]) else { return nil }
         return (t, n)
     }
-    if changerArg != nil && realisticArg { print("Realistic mode: \(realisticUnavailable); Natural mode is used.") }
+    if changerArg != nil && realisticArg, let why = realisticUnavailable { print("Realistic mode: \(why); Natural mode is used.") }
     do {
         try renderVoiceFile(input: input, output: args[i + 2], halfSteps: arg("--steps").flatMap(Float.init) ?? 3,
                             cartoon: cartoonArg ?? 0, changes: changes, slowDeeper: slowDeeperArg, levelFix: preset != "old",
                             changer: changerArg)
+        // Realistic: the AI voice over the same file, inline (it never comes late), with the Natural render as its
+        // fallback sound (only used before the first piece is ready).
+        if let changerArg, realisticArg, realisticUnavailable == nil, let entry = arg("--voice").flatMap({ VoiceLibrary.shared.voice($0) }) {
+            let natural = try readMonoFile(args[i + 2])
+            try renderRealisticFile(input: input, natural: natural.samples, rate: natural.rate, output: args[i + 2], entry: entry, options: changerArg)
+        }
         print("wrote \(args[i + 2])")
         exit(0)
     } catch {
@@ -476,9 +491,26 @@ if args.contains("--test-voice") {
             }
             print(line)
             if s.changing { print(changerStatsLine(s.changer, seconds: Date().timeIntervalSince(started).rounded())) }
+            if let ai = chain.aiStats { print(aiStatsLine(ai.stats, latencyMs: ai.latencyMs, seconds: Date().timeIntervalSince(started).rounded())) }
             if Date().timeIntervalSince(started) < seconds - 0.5 { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { look() } }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { look() }
+    }
+    // Realistic: when the AI voice started playing (the models load in the background; Natural plays meanwhile).
+    let aiStarted = Date()
+    var aiReadyAfter: Double?
+    if chain.aiStats != nil {
+        func check() {
+            if aiReadyAfter == nil, let ai = chain.aiStats, ai.stats.loaded != 0 {
+                aiReadyAfter = Date().timeIntervalSince(aiStarted)
+                print(String(format: "AI voice playing after %.1f s (%@)", aiReadyAfter!, voice.changerState == .realistic ? "realistic" : "\(voice.changerState)"))
+            }
+            if !watch, let ai = chain.aiStats, Int(Date().timeIntervalSince(aiStarted)) % 10 == 9 {
+                print(aiStatsLine(ai.stats, latencyMs: ai.latencyMs, seconds: Date().timeIntervalSince(aiStarted).rounded()))
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { check() }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { check() }
     }
     if changerArg?.stats == true && !watch {  // once a second: what the voice changer is doing
         let started = Date()
@@ -511,6 +543,11 @@ if args.contains("--test-voice") {
         line += String(format: "shifter+wait=%.0fms dry-outs=%d overloads=%d ", Double(s.delay) / chain.sampleRate * 1000, s.dryOuts, s.overloads)
         line += "recorded=\(recorded.count) peak=\(peak) firstSound=\(firstSound.map { "\(Int($0))ms" } ?? "none")"
         line += String(format: " cpu=%.1f%% of one core (whole test)", cpuShare)
+        if let ai = chain.aiStats {  // Realistic: misses count only after the AI voice started playing
+            line += String(format: " | AI voice: ready after %@, delay %.0f ms fixed, pieces %lld, late %lld, Natural filled in %.2f s, piece %.1f ms avg / %.1f ms worst, AI thread %.0f%% of a core",
+                           aiReadyAfter.map { String(format: "%.1f s", $0) } ?? "never", ai.latencyMs, ai.stats.hops, ai.stats.misses,
+                           ai.stats.fallbackSeconds, ai.stats.averageHopMs, ai.stats.worstHopMs, ai.stats.cpuShare * 100)
+        }
         if changerArg != nil {
             line += " changer=\(voice.changerState)"
             if s.changing {
