@@ -4,9 +4,12 @@
 //                                              per output, and which app each sound process belongs to
 //   --test [--pid N | --app BUNDLE_ID | --all] [--steps 2.5] [--seconds S]     "What you hear" for a few seconds
 //   --test-voice [--mic NAME] [--tone 440 | --file F] [--steps 3] [--cartoon | --cartoon-amount 0.5] [--seconds S]
-//                [--out F.caf]                 sends a tone or file through the voice chain and records Pitch Shift Mic
-//                                              (voice style from 0 = Natural, the default, to 1 = Cartoon; --cartoon = 1)
-//   --render-voice IN OUT [--steps 3] [--cartoon | --cartoon-amount 0.5] [--cartoon-at "1:1,2:0"]
+//                [--slow-deeper] [--out F.caf]
+//                                              sends a tone or file through the voice chain and records Pitch Shift Mic
+//                                              (voice style from 0 = Natural, the default, to 1 = Cartoon; --cartoon = 1;
+//                                              --slow-deeper turns on "Deeper when slow" and prints the speaking rate
+//                                              and the extra shift once a second)
+//   --render-voice IN OUT [--steps 3] [--cartoon | --cartoon-amount 0.5] [--cartoon-at "1:1,2:0"] [--slow-deeper]
 //                                              shifts a sound file with the voice's own settings (offline, no devices;
 //                                              --cartoon-at "1:1,2:0" moves the style to 1 at 1 s and back to 0 at 2 s)
 //   --test-button [--mic NAME] [--volume 0.03] presses Test with a quiet tone as the voice (record 5 s, play back)
@@ -30,9 +33,9 @@ func arg(_ name: String) -> String? {
 }
 // --preview STATES [--size 800x400] [--cartoon-amount 0.5] [--tone-amount -0.4]: show the window in a state for
 // screenshots, without touching any sound or settings, and without switching apps (states: hear-on, voice-on, waiting,
-// typing, recording, playing, listening, hover, menu, roll, resize, no-driver, advanced-alert, light, tone;
+// typing, recording, playing, listening, hover, menu, roll, resize, no-driver, advanced-alert, light, tone, slow;
 // --cartoon-amount sets the voice style slider; "tone" shows Advanced processing on, and --tone-amount sets the
-// Bass ↔ Treble slider).
+// Bass ↔ Treble slider; slow turns on "Deeper when slow").
 let preview = arg("--preview")
 
 var signalSources: [DispatchSourceSignal] = []
@@ -68,6 +71,8 @@ func fourCC(_ value: UInt32) -> String {
 // Voice style from the command line: --cartoon = 1 (Cartoon), --cartoon-amount X (0 = Natural ... 1 = Cartoon).
 // In --preview it sets where the slider is.
 let cartoonArg: Float? = args.contains("--cartoon") ? 1 : arg("--cartoon-amount").flatMap(Float.init).map { max(0, min(1, $0)) }
+// "Deeper when slow" on, for --test-voice and --render-voice.
+let slowDeeperArg = args.contains("--slow-deeper")
 
 // The watchdog: a second copy of the app that gives the real mic back if the app ends without doing it.
 if let pid = arg("--watchdog").flatMap({ pid_t($0) }) { DefaultMic.watch(pid) }
@@ -138,7 +143,7 @@ if let input = arg("--render-file") {
 
 if let input = arg("--render-voice") {
     let i = args.firstIndex(of: "--render-voice")!
-    guard i + 2 < args.count else { print("usage: --render-voice IN OUT [--steps N] [--cartoon-amount X]"); exit(1) }
+    guard i + 2 < args.count else { print("usage: --render-voice IN OUT [--steps N] [--cartoon-amount X] [--slow-deeper]"); exit(1) }
     // "1:1,2:0" = at 1 s go to Cartoon, at 2 s back to Natural
     let changes: [(Double, Float)] = (arg("--cartoon-at") ?? "").split(separator: ",").compactMap { item in
         let parts = item.split(separator: ":")
@@ -147,7 +152,7 @@ if let input = arg("--render-voice") {
     }
     do {
         try renderVoiceFile(input: input, output: args[i + 2], halfSteps: arg("--steps").flatMap(Float.init) ?? 3,
-                            cartoon: cartoonArg ?? 0, changes: changes)
+                            cartoon: cartoonArg ?? 0, changes: changes, slowDeeper: slowDeeperArg)
         print("wrote \(args[i + 2])")
         exit(0)
     } catch {
@@ -200,7 +205,7 @@ if args.contains("--test") {
 if args.contains("--test-voice") {
     let steps = arg("--steps").flatMap(Float.init) ?? 3
     let micUID = arg("--mic").flatMap { name in Mics.list().first { $0.name == name }?.uid }
-    let voice = VoiceShifter(halfSteps: steps, cartoon: cartoonArg ?? 0, micUID: micUID)
+    let voice = VoiceShifter(halfSteps: steps, cartoon: cartoonArg ?? 0, slowDeeper: slowDeeperArg, micUID: micUID)
     guard let mic = voice.currentMic, let virtualMic = Mics.virtualMic else { print("No mic or Pitch Shift Mic not installed"); exit(1) }
     let rate = nominalRate(mic)
     let seconds = arg("--seconds").flatMap(Double.init) ?? 3
@@ -243,6 +248,15 @@ if args.contains("--test-voice") {
     voice.start()
     guard let chain = voice.chain else { print("voice did not start: \(voice.state)"); exit(1) }
     let recorder = try! Recorder(device: virtualMic, seconds: seconds)
+    if slowDeeperArg {  // once a second: the speaking rate and the extra shift in use
+        let started = Date()
+        func report() {
+            let reading = chain.slowReading.withLock { $0 }
+            print(String(format: "%4.1fs  rate %.1f syllables/s  extra %+.1f half-steps", Date().timeIntervalSince(started), reading.rate, reading.extra))
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { report() }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { report() }
+    }
     DispatchQueue.main.asyncAfter(deadline: .now() + seconds + 0.2) {
         let recorded = recorder.finish()
         voice.stop()
@@ -250,6 +264,7 @@ if args.contains("--test-voice") {
         let firstSound = recorded.firstIndex { abs($0) > 0.02 }.map { Double($0) / recorder.sampleRate * 1000 }
         var line = "voice test: mic=\(chain.micName) rate=\(Int(chain.sampleRate)) style=\(voice.cartoon) cushion=\(Int(Double(chain.cushion) / chain.sampleRate * 1000))ms "
         line += "recorded=\(recorded.count) peak=\(peak) firstSound=\(firstSound.map { "\(Int($0))ms" } ?? "none")"
+        line += " dropouts=\(chain.dropouts) skips=\(chain.skips)"
         if tone != nil, let heard = recorded.firstIndex(where: { abs($0) > 0.02 }), chain.firstInputTime > 0, recorder.firstInputTime > 0 {
             // From the tone starting at the mic to it coming out of Pitch Shift Mic.
             let toneAt = Double(AudioConvertHostTimeToNanos(chain.firstInputTime)) / 1e9 + Double(toneStart) / rate

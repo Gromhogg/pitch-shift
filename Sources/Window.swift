@@ -55,7 +55,13 @@ extension NSControl {
 // a little while pressed, like the standard switch.
 final class GradientSwitch: NSView {
     var onChange: (Bool) -> Void = { _ in }
-    var isEnabled = true { didSet { needsDisplay = true } }
+    var onEnabled: (Bool) -> Void = { _ in }  // when it's turned on or off as a control (for its label)
+    var isEnabled = true {
+        didSet {
+            needsDisplay = true
+            if oldValue != isEnabled { onEnabled(isEnabled) }
+        }
+    }
     var isOn = false {
         didSet {
             guard oldValue != isOn else { return }
@@ -788,9 +794,11 @@ final class ShiftCard: NSView {
     }
 
     // A row with a label on the left and a small switch on the right, for settings like "Advanced processing".
+    // The label dims while the switch can't be used.
     static func switchRow(_ text: String, _ toggle: GradientSwitch) -> CardRow {
         let label = NSTextField(labelWithString: text)
-        label.textColor = .secondaryLabelColor
+        label.textColor = toggle.isEnabled ? .secondaryLabelColor : .tertiaryLabelColor
+        toggle.onEnabled = { label.textColor = $0 ? .secondaryLabelColor : .tertiaryLabelColor }
         toggle.setAccessibilityLabel(text)
         let row = CardRow(views: [label, toggle])
         row.distribution = .equalSpacing
@@ -955,6 +963,7 @@ enum Keys {
     static let voiceOn = "voiceOn", voiceSteps = "voiceSteps", voiceMic = "voiceMic"
     static let voiceCartoon = "voiceCartoon"  // voice style, 0 (Natural) to 1 (Cartoon)
     static let voiceNatural = "voiceNatural"  // the old Natural/Cartoon switch (version 2.0), read once to carry over
+    static let voiceSlowDeeper = "voiceSlowDeeper"  // "Deeper when slow"
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
@@ -967,6 +976,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     lazy var voice = VoiceShifter(
         halfSteps: defaults.object(forKey: Keys.voiceSteps) as? Float ?? 3,
         cartoon: AppDelegate.savedCartoon(defaults),
+        slowDeeper: defaults.bool(forKey: Keys.voiceSlowDeeper),
         micUID: defaults.string(forKey: Keys.voiceMic))
     lazy var test = VoiceTest(voice: voice)
 
@@ -1002,6 +1012,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     let style = GradientSlider(left: "Natural", right: "Cartoon", name: "Voice style") { value in
         value <= 0 ? "Natural" : value >= 1 ? "Cartoon" : "\(Int((value * 100).rounded())) percent Cartoon"
     }
+    let slowSwitch = GradientSwitch()  // "Deeper when slow"
     // Advanced processing's tone for the speakers or headphones playing now: 0 = more bass, 0.5 = middle, 1 = more treble.
     let tone = GradientSlider(left: "Bass", right: "Treble", name: "Tone") { value in
         let percent = Int(((value * 2 - 1) * 100).rounded())
@@ -1167,7 +1178,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             footer.spacing = (6 * scale).rounded()
         }
 
-        voiceCard = ShiftCard(title: "Your voice", extraRows: [styleRow, footer])
+        // Deeper when slow: talking slowly makes the voice lower.
+        slowSwitch.onChange = { [weak self] on in self?.slowPicked(on) }
+        let slowRow = ShiftCard.switchRow("Deeper when slow", slowSwitch)
+
+        voiceCard = ShiftCard(title: "Your voice", extraRows: [styleRow, slowRow, footer])
         voiceCard.picker.menu?.delegate = self
         voiceCard.picker.target = self
         voiceCard.picker.action = #selector(micPicked)
@@ -1185,7 +1200,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         background.addSubview(voiceCard)
 
         // Tab goes through one card, then the other.
-        let order = hearCard.keyViews + [advancedSwitch, tone] + voiceCard.keyViews + [style, testButton, installButton]
+        let order = hearCard.keyViews + [advancedSwitch, tone] + voiceCard.keyViews + [style, testButton, slowSwitch, installButton]
         background.nextKeyView = order[0]
         for (view, next) in zip(order, order.dropFirst() + [order[0]]) { view.nextKeyView = next }
 
@@ -1449,6 +1464,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         refresh()
     }
 
+    func slowPicked(_ on: Bool) {
+        voice.slowDeeper = on
+        guard preview == nil else { return }  // pictures change nothing
+        defaults.set(on, forKey: Keys.voiceSlowDeeper)
+    }
+
     @objc func testClicked() { test.click() }
 
     // MARK: Advanced processing
@@ -1553,13 +1574,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     // MARK: Showing state
 
     // For screenshots (--preview hear-on,voice-on,waiting,typing,recording,playing,listening,hover,menu,roll,
-    // resize,no-driver,advanced-alert,light,tone [--size 800x400]): shows a state, no sound.
+    // resize,no-driver,advanced-alert,light,tone,slow [--size 800x400]): shows a state, no sound.
     func showPreview() {
         guard let preview else { return }
         if preview.contains("light") { window.appearance = NSAppearance(named: .aqua) }
         if let cartoonArg { voice.cartoon = cartoonArg }  // where the style slider is (--cartoon-amount 0.5)
         if preview.contains("tone") { hear.advanced = true }  // Advanced processing on (nothing runs in pictures)
         if let toneArg, !outputUID.isEmpty { hear.setTone(toneArg, for: outputUID) }  // the tone slider (--tone-amount -0.4)
+        if preview.contains("slow") { voice.slowDeeper = true }  // "Deeper when slow" on
         refresh()
         if preview.contains("typing") {
             window.makeFirstResponder(hearCard.amount)
@@ -1642,6 +1664,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         voiceCard.picker.isEnabled = installed && hasMic
         style.value = voice.cartoon
         style.isEnabled = voiceOn && installed
+        slowSwitch.isOn = voice.slowDeeper
+        slowSwitch.isEnabled = voiceOn && installed
         if case .problem(let message) = voice.state { voiceCard.amount.toolTip = message } else { voiceCard.amount.toolTip = nil }
 
         let listening = preview.map { $0.contains("listening") } ?? voice.listening
