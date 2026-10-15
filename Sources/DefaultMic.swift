@@ -11,7 +11,7 @@ enum DefaultMic {
     // The real mic that was the default before Pitch Shift Mic took over (nil when we haven't taken over).
     static var realMic: AudioDeviceID? {
         guard let virtual = Mics.virtualMic, defaultInput() == virtual else { return nil }
-        return UserDefaults.standard.string(forKey: savedKey).flatMap { device(uid: $0) } ?? builtInMic()
+        return UserDefaults.standard.string(forKey: savedKey).flatMap { device(uid: $0) } ?? Mics.builtIn
     }
 
     static func takeOver() {
@@ -22,15 +22,14 @@ enum DefaultMic {
         startWatchdog()
     }
 
+    // Gives the real mic back, but not the mic of the Bluetooth headphones that play the Mac's sound: every app set
+    // to the default mic would then open it, which switches the headphones into call mode (thin, hollow sound) even
+    // with the voice off. The built-in mic is given back instead.
     static func giveBack() {
-        guard let virtual = Mics.virtualMic, defaultInput() == virtual else { return }
-        if let real = UserDefaults.standard.string(forKey: savedKey).flatMap({ device(uid: $0) }) ?? builtInMic() {
-            setDefaultInput(real)
-        }
-    }
-
-    private static func builtInMic() -> AudioDeviceID? {
-        allDevices().first { transportType($0) == kAudioDeviceTransportTypeBuiltIn && streamCount($0, kAudioDevicePropertyScopeInput) > 0 }
+        guard let virtual = Mics.virtualMic, defaultInput() == virtual,
+              var real = UserDefaults.standard.string(forKey: savedKey).flatMap({ device(uid: $0) }) ?? Mics.builtIn else { return }
+        if Mics.isHeadsetMic(real, of: defaultOutput()), let builtIn = Mics.builtIn { real = builtIn }
+        setDefaultInput(real)
     }
 
     // A second copy of this program that waits for the app to end and gives the real mic back if needed.

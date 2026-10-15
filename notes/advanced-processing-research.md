@@ -170,6 +170,168 @@ Mean of the 6 songs, going up:
   uses 2.5× the CPU and adds a 44 MB download. Its separation also has to cope with real songs it has never seen.
 - If the owner prefers the AI version by ear, it is ready on `v2-advanced3-ai`.
 
+## Bass fix (after 2.0.0, branch `v2-bass`)
+
+The owner: "improve low bass notes, especially at higher pitches. Target sounds that are 100 Hz or lower. The advanced
+processing seems to actually balance out the sounds better, but in the meantime it removes some of those low bass
+notes."
+
+**Test set** (never the owner's music): 16 clips. 5 made-up ones (a bass line with notes from 35 to 98 Hz, a kick drum,
+three long sub notes, and the bass line and sub notes mixed with chords and hi-hats), the 6 Apple Loops songs A-F, and
+the bass parts of A, B, C, D and F alone. Rendered with the engine itself (same output as `--render-file`).
+Measures: "lost bass" = the share of 100 ms moments where 20-100 Hz is more than 6 dB below the original (only moments
+where the original has bass); the median 20-100 Hz level; the same through an earbud-like curve; per-note levels; and
+the research's tone balance (tbDev) and 1/3-octave levels.
+
+**What removed low bass notes in 2.0.0 (going up):**
+1. **The tone EQ.** Since balanced3 it may cut up to 18 dB below 100 Hz, without smoothing, also going up. The fold
+   and its floor move bass notes into other 1/3-octave bands, and the EQ then cut them there because the original
+   had little in that band. Examples: the piano song's low notes at +8 (79 % of its bass moments more than 6 dB
+   down); an 82 Hz test tone at +8 came out 7 dB quieter than it went in.
+2. **The fold floor's split** (LR4 at 35 Hz × 2^((12-N)/12)). Its two sides end up an octave apart, so they add as
+   powers: up to 3.5 dB lost for notes within about 4 half-steps of the split, plus up to 7 dB more from the 30 Hz
+   high-pass on +4..+6. Its gentle slope also leaked the EDM song's 41 Hz sub down to 32 Hz (the +16 dB weak spot).
+3. Not the cause: the peak limiter (switched off: the same within 0.2 dB), Rubber Band itself (normal mode keeps
+   bass notes that stay under 100 Hz within 0.7 dB; it only "loses" them by moving them above 100 Hz).
+
+**The fix** (engine recipe 4, now the default; `advanced_tune(chain, "recipe", 3)` gives 2.0.0's output sample for
+sample, checked):
+- Going up, the EQ treats the bass like the rest (target smoothed over ±1 third-octave, cuts up to 9 dB). Going down
+  is unchanged.
+- Fold floor: a steep 8th-order Butterworth split, whose two sides keep the full power. The main path's upper band
+  goes through a matching all-pass, so the main path's two parts can't cancel (a plain steep split made a -14 dB
+  notch at 60 Hz at +4).
+- Floor at 45 Hz up to +8, easing to 35 Hz at +11 (at +9..+11 the fold moves bass down only 1-3 half-steps).
+- Unchanged: pitch-down, +12, the delay (engine 138 ms; live at +8: 201 ms total, 0 dropouts), normal mode
+  (byte-identical). CPU about +1 %.
+
+| N | lost bass moments | median bass level | earbud: lost | tbDev, 6 songs | EDM 32 Hz vs original |
+|---|---|---|---|---|---|
+| +3 | 15.5 → 14.3 % | -1.2 → -0.5 dB | 0.2 → 0.2 % | 3.7 → 3.7 | |
+| +4 | 15.4 → 15.8 % | -1.6 → -0.8 dB | 0.4 → 0.6 % | 3.9 → 3.8 | +4.5 → +0.2 dB |
+| +5 | 17.0 → 3.2 % | -1.8 → +0.6 dB | 2.5 → 1.0 % | 3.7 → 3.8 | +7.5 → +2.0 dB |
+| +6 | 12.0 → 2.4 % | -1.2 → +0.7 dB | 4.2 → 0.6 % | 3.7 → 3.8 | +6.3 → +1.1 dB |
+| +8 | 11.5 → 1.7 % | -1.5 → +0.1 dB | 2.9 → 0.4 % | 3.6 → 3.7 | +16.0 → +9.2 dB |
+| +9 | 8.0 → 1.3 % | -1.6 → -0.4 dB | 0.2 → 0.4 % | 3.4 → 3.6 | +16.7 → +15.6 dB |
+| +10 | 3.6 → 1.2 % | -1.3 → -0.4 dB | 0.8 → 0.3 % | 2.9 → 3.0 | +12.1 → +13.6 dB |
+| +11 | 0.3 → 1.0 % | -0.3 → +0.1 dB | 0.2 → 0.2 % | 2.4 → 2.3 | +8.5 → +6.4 dB |
+| +12, -5, -8 | identical | | | | |
+
+Tone balance above 100 Hz is unchanged at every amount; the small tbDev changes are in the bass bands.
+
+**Weak spots left:**
+- **Overtone collisions.** When a bass note's lowest part goes up with the main path (below the floor) and its 2nd
+  harmonic is folded down, both land on the same frequency from two different shifters and can cancel by chance.
+  2.0.0 had this too, for lower notes; the higher floor moves it into common bass notes (at +5: notes of 34-67 Hz,
+  was 26-52 Hz). Example: the funk bass part alone at +5 has 14.7 % lost moments (2.0.0: 5.0 %); the whole funk song
+  1.5 % (0.6 %). A 40 Hz floor avoids that case but leaves the EDM weak spot as bad as 2.0.0.
+- Bass is a little more often louder than the original (moments more than 6 dB above: +5 6.4 → 7.8 %, +8 5.1 → 6.1 %).
+- EDM sub bass at 32 Hz (see the table) and the piano left hand: better at most amounts, not solved.
+- Not checked by ear yet. Samples: `~/Downloads/Pitch Shift bass samples/` (5 test songs, original / 2.0.0 / new at
+  +5 and +8).
+
+## Tone fix (branch `v2-tone`)
+
+The owner, with Advanced processing on: going down the bass is too loud next to the mids and highs; going up the
+mids are slightly too loud; songs sometimes sound muffled, both ways, **compared with normal mode** (Advanced off).
+
+**Test set** (never the owner's music): the 6 Apple Loops songs A-F, each in 4 versions: normal level (-16 dBFS),
+"loud" (-9 LUFS through a peak limiter, like a store-bought master), "streaming" (cut above 16 kHz, like AAC) and
+both; 20 s of pink noise (shifted pink noise stays pink, so what is left is the engine's own error); 2 more songs
+(R&B, soul vocal) never used for tuning. Amounts -12, -8, -5, -3, +3, +5, +8, +12. Rendered with the engine itself
+(same output as `--render-file --advanced`). Every level below is after matching loudness, the first 3 s skipped.
+Compared with the original **and** with normal mode (installed 2.0.0).
+
+**What the numbers showed (recipe 4 = PR #3):**
+- *Bass going down:* the deepest bass, 25-32 Hz, was 8-10 dB above the original at -8 and -12. The shift moves the
+  original's 40-60 Hz down there, and the tone EQ boosted 62 Hz by up to 9 dB "where the sub used to be". The rest of
+  the bass (40-250 Hz) was not too loud (1.1 dB under the mids).
+- *Mids going up:* close to the original (MIDX -0.4 dB, 1 kHz band +1.2 dB at +8). Next to normal mode, though, the
+  top above 8 kHz was 1.6-2.7 dB lower, so the mids stand out more.
+- *Muffled*, the three suspects:
+  - (a) the EQ cutting the treble going up: **real, moderate.** The 11.3 kHz shelf sat at -4 to -5 dB at +8 and +12
+    (-5 on streaming copies). Against the original the top was right; normal mode keeps the extra brightness that the
+    shift adds, and the EQ was taking it away. Worst songs (hip hop, rock): treble vs mids 2.7-2.8 dB under normal.
+  - (b) the safety limiter: **real on loud songs, both ways.** On the loud versions it worked 65-75 % of the time
+    (worst song 90 %), up to 5-6 dB, pulling 2-8 kHz down by 0.5-0.8 dB on average and 2.4-3.6 dB in the worst 1 % of
+    moments. Going down it was mostly caused by the EQ's boosts (EQ off: 21-37 % of the time); going up by the shift
+    itself (normal mode's output on the same songs goes 0.3-3.4 dB over full scale; it has no limiter). On
+    normal-level songs: 0.1-2.8 % of the time (one song 15 % at -5).
+  - (c) the dip where the unshifted top joins in going down: **real, small.** -1.0 to -1.4 dB at 10-12.5 kHz on pink
+    noise (-3 to -8), -2.4 dB at 10 kHz in the songs at -3/-5. Going up there is no dip.
+  - Going down, Advanced is never duller than normal mode in the long-term sound (2-5 dB brighter, normal mode loses
+    the top). There "muffled" can only be the limiter on loud songs and the deep rumble.
+  - Not a cause: the EQ looking at a mono mix (mono vs left+right differ by up to 5 dB in single bands, the same in
+    normal mode: it comes from the shift itself).
+
+**The fix: engine recipe 5, now the default** (`advanced_tune(chain, "recipe", 4)` gives PR #3's output sample for
+sample, `3` gives 2.0.0's; knobs in `AdvancedTuning.h`):
+- The EQ knows which way the pitch went.
+  - Going down: a 4th-order high-pass on the shifted sound, 40 Hz at -8 and below (less at smaller amounts), so the
+    original's deep bass doesn't pile up under 32 Hz; the EQ may boost below 70 Hz by 3 dB at most (was 6); small
+    target changes (+1 dB at 100 Hz, +0.5 at 200 Hz, -0.5 at 800 Hz and 1.6 kHz).
+  - Going up: the EQ cuts at most 3 dB from 7 kHz up (keeps the top closer to normal mode), and -0.5 dB at 800 Hz and
+    1.6 kHz.
+  - The EQ's prediction now counts a frequency on a band edge in both bands, as its measurement does (it was nudging
+    the bass up by up to 1.2 dB).
+- Going down, the split to the unshifted top is a Butterworth 4 (its two halves add up to full power): no dip.
+- Limiter: after a short over (under 5 ms) the gain comes back in 25 ms instead of 120 ms. Longer overs keep 120 ms.
+- Tried and not kept: a "headroom guard" that turns down the EQ's bass boost while the limiter works. The bass boost
+  was not the main cause, and the guard changed the tone of loud songs (0.6-0.9 dB quieter, less bass).
+- Tuning: the target offsets were fitted from the measured leftovers (`fit_offsets.py`); after the changes above the
+  songs mostly disagreed on what was left, so only these few small offsets stayed.
+
+**Before → after (recipe 4 → recipe 5):**
+
+Going down (6 songs, normal level, vs the original):
+
+| N | deep bass 25-32 Hz | bass vs mids (BMR) | 60-150 Hz | tone error (tbDev) | 2 held-out songs: 25-32 Hz |
+|---|---|---|---|---|---|
+| -3 | +2.3 → +2.4 dB | -1.2 → -1.5 dB | -0.4 → -0.5 dB | 2.94 → 2.94 | +1.9 → +2.1 dB |
+| -5 | +3.5 → +2.4 dB | -1.1 → -1.3 dB | -0.5 → -0.8 dB | 4.05 → 3.97 | +3.8 → +3.9 dB |
+| -8 | +8.1 → +2.2 dB | -1.1 → -1.4 dB | -0.1 → -0.5 dB | 4.45 → 4.08 | +7.4 → +5.1 dB |
+| -12 | +9.6 → +1.2 dB | -0.2 → -0.8 dB | +0.3 → -0.2 dB | 4.69 → 4.50 | +8.2 → +3.0 dB |
+
+Going up (mids vs the original; top vs normal mode, on the streaming copies):
+
+| N | mids (MIDX) | 1 kHz band | treble vs mids, vs normal | above 8 kHz, vs normal | tone error (tbDev) |
+|---|---|---|---|---|---|
+| +3 | -0.5 → -0.5 dB | +0.7 → +0.5 dB | -0.6 → -0.4 dB | -1.6 → -1.4 dB | 3.72 → 3.70 |
+| +5 | -0.5 → -0.6 dB | +0.2 → -0.0 dB | -0.5 → -0.3 dB | -1.8 → -1.1 dB | 3.80 → 3.82 |
+| +8 | -0.4 → -0.7 dB | +1.2 → +0.7 dB | -0.5 → -0.1 dB | -2.7 → -1.4 dB | 3.70 → 3.77 |
+| +12 | +0.8 → +0.3 dB | +0.3 → -0.4 dB | +0.3 → +1.1 dB | -2.7 → -1.0 dB | 1.72 → 1.84 |
+
+Safety limiter (normal-level songs: share of time limiting, mean / worst song; loud songs: the same, and how much
+2-8 kHz is pulled down):
+
+| N | normal level | loud: time | loud: 2-8 kHz, mean | loud: worst 1 % |
+|---|---|---|---|---|
+| -12 | 1.2 / 6.1 % → 0.0 / 0.0 % | 65 → 23 % | -0.8 → -0.4 dB | -3.3 → -2.5 dB |
+| -8 | 1.4 / 5.2 % → 0.2 / 0.4 % | 70 → 26 % | -0.7 → -0.3 dB | -3.0 → -2.2 dB |
+| -5 | 2.8 / 15.4 % → 0.2 / 0.9 % | 72 → 27 % | -0.6 → -0.3 dB | -2.7 → -2.0 dB |
+| -3 | 0.6 / 3.5 % → 0.1 / 0.4 % | 75 → 27 % | -0.6 → -0.3 dB | -2.7 → -2.0 dB |
+| +3 | 0.5 / 1.4 % → 0.1 / 0.3 % | 73 → 25 % | -0.5 → -0.2 dB | -2.4 → -1.9 dB |
+| +5 | 0.1 / 0.8 % → 0.0 / 0.1 % | 65 → 20 % | -0.5 → -0.2 dB | -2.5 → -1.8 dB |
+| +8 | 0.5 / 3.0 % → 0.1 / 0.6 % | 66 → 27 % | -0.5 → -0.2 dB | -3.3 → -2.5 dB |
+| +12 | 1.4 / 7.0 % → 0.3 / 1.5 % | 71 → 26 % | -0.5 → -0.2 dB | -2.8 → -2.0 dB |
+
+- Going down, the top-end dip on pink noise: -1.4 → -0.2 dB (-5, -3), -1.0 → +0.3 dB (-8).
+- PR #3's lost-bass measure (16 bass clips): +5 3.25 → 3.54 %, +8 1.72 → 1.73 % (limit: 1 point worse).
+- Unchanged: normal mode (byte-identical with 2.0.0), the delay (138 ms engine within ±12, 225 ms past), CPU
+  (median +1.4 % at +5, 0 % at -8), no memory made while playing, Windows checks (27/27 on the Mac's copy).
+
+**Weak spots left:**
+- Going down, more of the low bass goes: on bass-only clips the 20-100 Hz level is 2.4 dB lower at -8 than with
+  recipe 4 (lost-bass moments 35 → 43 %). That is the deep rumble the owner called too loud, but listen for it.
+- The hip hop song's 50 Hz sub ends up near 31 Hz at -8, so its bass vs mids stays 6-7 dB under the original with both
+  recipes. Only moving that bass up an octave going down would fix it.
+- Held-out songs: the deep bass improved at -8/-12 (+7.4 → +5.1, +8.2 → +3.0 dB), not at -3/-5; at +8/+12 their tone
+  error grew a little (1.55 → 1.68, 0.85 → 1.23 dB) because the top now stays closer to normal mode.
+- Loud songs: the limiter still has to take 3.6-5 dB off the biggest shifted peaks (normal mode lets them go over full
+  scale instead). It now does it more briefly.
+- Not heard yet. Samples: `~/Downloads/Pitch Shift tone samples/` (4 test songs plus a loud, streaming-like pop song;
+  original / 2.0.0 / new at -5, -8, +5, +8; all at -18 LUFS).
+
 ## Not verified yet
 
 - Listening (all choices were made by measurements).
@@ -189,3 +351,11 @@ All at the same loudness (-18 LUFS). README.txt in the folder says what to liste
   code (normal or advanced); `--steps-at` changes the amount while it plays.
 - `PitchShift --test --pid N --steps N --advanced --watch [--record-out F.wav] [--steps-at ...]`: live test with a
   quiet tone; prints the delay parts every half second; `--record-out` saves what Advanced processing played.
+- Bass fix measurements: the harness, scripts and test-clip maker are in the git-ignored `research/advanced/bass/`
+  (`advrender.cpp` renders like `--render-file --advanced` with `advanced_tune` settings; `run.py` renders all clips
+  and measures; `cmp.py` compares setups; `synth.py` makes the made-up bass clips).
+- Tone fix measurements: `research/advanced/tone/` (git-ignored). `tools/tonerender.cpp` = the harness plus the EQ
+  gains and limiter numbers every second; `grid.py` renders a setup over songs × versions × amounts and keeps only the
+  measurements (`results/feat/`); `analyze.py` / `targets.py` / `muffled.py` / `report_*.py` make the tables;
+  `fit_offsets.py` fits the target offsets; `verify.sh`, `cpu.sh`, `live.sh`, `bassgate.sh` are the checks.
+  `make_variants.py` makes the loud / streaming versions and the pink noise, `make_heldout.py` the 2 extra songs.

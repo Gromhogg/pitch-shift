@@ -44,13 +44,15 @@ More help: [windows/README.md](windows/README.md).
 - Pick an app, or **All sound**.
 - Click the big number to type an exact amount, like `2.5` or `-1.25`. 12 is one octave. Or use **−**, **0** and **+**.
 - Turn on **Advanced processing** for music at bigger amounts: going up, the bass stays deep; going down, the top stays bright. A new amount takes a moment longer to kick in.
+- With Advanced processing on, slide from **Bass** to **Treble** to suit your headphones (Mac). Pitch Shift remembers it for each pair of headphones or speakers.
 
 **Your voice**
 
 - Pick your mic, turn it on, and slide from **Natural** (sounds like a different person) to **Cartoon** (chipmunk or monster). On Windows, choose Natural or Cartoon.
+- Turn on **Deeper when slow** and your voice goes lower while you talk slowly, then back when you talk normally (Mac).
 - In Discord, Zoom or any other app, choose **Pitch Shift Mic** as your microphone.
 - Press **Test** to record 5 seconds of your shifted voice and hear it back.
-- Press **Sounds** for the Soundboard (Mac): add sound files with **+**, then click one to play it into your call (click again to stop). You hear it too.
+- Press **Sounds** for the Soundboard (Mac): add sound files with **+**, then click one to play it into your call. You hear it too; on your Mac's own speakers your voice is muted while it plays, so it can't echo.
 - Use headphones in calls. If your voice cuts out, turn off the call app's noise suppression (like Krisp).
 
 Both can be on at the same time. Closing the window keeps Pitch Shift running. Quit it with ⌘Q.

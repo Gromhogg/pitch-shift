@@ -104,9 +104,15 @@ protocol HearPlayer: AnyObject {
     var skips: Int { get }
     func play(_ buffer: AVAudioPCMBuffer)
     func setHalfSteps(_ value: Float)
+    func setTone(bass: Double, treble: Double)
     func stop()
     // Where the delay comes from, in milliseconds: the cushion, the pitch shifting, and the speakers or headphones.
     var delays: (cushion: Double, shifter: Double, device: Double) { get }
+}
+
+// Bass and treble are an Advanced processing setting: normal mode ignores them.
+extension HearPlayer {
+    func setTone(bass: Double, treble: Double) {}
 }
 
 // Changes the pitch with Rubber Band and plays to one speaker or headphone device.
@@ -278,6 +284,25 @@ final class HearShifter {
     var advanced: Bool {
         didSet { if oldValue != advanced, running { restartCapture() } }
     }
+    // Advanced processing's "Bass ↔ Treble" for each speakers or headphones: device UID → tilt, from −1 (more bass)
+    // through 0 to +1 (more treble). Normal mode ignores it. A new player (other headphones, or past ±12) starts
+    // with the right one.
+    private(set) var tones: [String: Float]
+    func setTone(_ tilt: Float, for uid: String) {
+        tones[uid] = tilt
+        guard uid == playerKey else { return }
+        let db = toneDb(uid)
+        audioQueue.async { self.player?.setTone(bass: db.bass, treble: db.treble) }
+    }
+    // Checks only: --as-device UID uses that device's tone, whatever is playing; --tone-db B,T uses these dB everywhere.
+    var testOutputKey: String?
+    var fixedToneDb: (bass: Double, treble: Double)?
+    // The device whose tone the player uses.
+    var outputKey: String { testOutputKey ?? deviceUID(defaultOutput()) }
+    private var playerKey: String?
+    private func toneDb(_ key: String?) -> (bass: Double, treble: Double) {
+        fixedToneDb ?? AdvancedProcessor.toneDb(tilt: key.flatMap { tones[$0] } ?? 0)
+    }
     var onChange: () -> Void = {}
     var testPID: pid_t?
     var testRecordSeconds: Double = 0  // checks only: Advanced processing keeps what it plays (see saveTestRecording)
@@ -293,10 +318,11 @@ final class HearShifter {
     private var running = false
     private var rebuilds: [Date] = []
 
-    init(halfSteps: Float, source: HearSource, advanced: Bool = false) {
+    init(halfSteps: Float, source: HearSource, advanced: Bool = false, tones: [String: Float] = [:]) {
         self.halfSteps = halfSteps
         self.source = source
         self.advanced = advanced
+        self.tones = tones
     }
 
     var isOn: Bool { running }
@@ -334,12 +360,19 @@ final class HearShifter {
     }
 
     var report: String {
-        audioQueue.sync {
+        let tone = toneText
+        return audioQueue.sync {
             guard let player else { return "state=\(state), no player" }
             return "state=\(state), out=\(deviceName(player.device)) running=\(player.engine.isRunning), rate=\(Int(player.format.sampleRate)), " +
                 "frames=\(player.received), loudest=\(player.loudest), playing=\(player.isPlaying), processes=\(capturedProcesses)" +
-                ((player as? AdvancedPlayer).map { ", advanced out loudest=\($0.outputLoudest)" } ?? "")
+                ((player as? AdvancedPlayer).map { ", advanced out loudest=\($0.outputLoudest), \(tone($0))" } ?? "")
         }
+    }
+
+    // "tone=0.80 (bass -4.8 dB, treble +4.8 dB)": the slider for the player's device, and what the player really has.
+    private var toneText: (AdvancedPlayer) -> String {
+        let setting = fixedToneDb == nil ? String(format: "tone=%.2f", playerKey.flatMap { tones[$0] } ?? 0) : "tone=--tone-db"
+        return { player in setting + String(format: " (bass %+.1f dB, treble %+.1f dB)", player.tone.bass, player.tone.treble) }
     }
 
     // Checks only: saves what Advanced processing played (needs testRecordSeconds > 0 before start).
@@ -348,11 +381,13 @@ final class HearShifter {
     }
 
     var timing: String {
-        audioQueue.sync {
+        let tone = toneText
+        return audioQueue.sync {
             guard let player else { return "no player" }
             let t = player.delays
             let name = player is AdvancedPlayer ? "advanced" : "shifter"
-            return String(format: "cushion %.0f ms + %@ %.0f ms + %@ %.0f ms = %.0f ms  (dropouts %d, skips %d)", t.cushion, name, t.shifter, deviceName(player.device), t.device, t.cushion + t.shifter + t.device, player.dropouts, player.skips)
+            return String(format: "cushion %.0f ms + %@ %.0f ms + %@ %.0f ms = %.0f ms  (dropouts %d, skips %d)", t.cushion, name, t.shifter, deviceName(player.device), t.device, t.cushion + t.shifter + t.device, player.dropouts, player.skips) +
+                ((player as? AdvancedPlayer).map { "  " + tone($0) } ?? "")
         }
     }
 
@@ -368,6 +403,7 @@ final class HearShifter {
         capturedProcesses = []
         if let playerObserver { NotificationCenter.default.removeObserver(playerObserver) }
         playerObserver = nil
+        playerKey = nil
         audioQueue.sync { player?.stop(); player = nil }
     }
 
@@ -443,6 +479,9 @@ final class HearShifter {
         guard running, let format = capture?.format else { return }
         let device = defaultOutput()
         let steps = halfSteps
+        let key = testOutputKey ?? deviceUID(device)
+        let tone = toneDb(key)
+        playerKey = key
         let ring = capture?.ring
         if let playerObserver { NotificationCenter.default.removeObserver(playerObserver) }
         playerObserver = nil
@@ -450,7 +489,7 @@ final class HearShifter {
             player?.stop()
             player = nil
             let made: Result<HearPlayer, Error> = Result {
-                if let ring { return try AdvancedPlayer(device: device, format: format, halfSteps: steps, input: ring, recordSeconds: testRecordSeconds) }
+                if let ring { return try AdvancedPlayer(device: device, format: format, halfSteps: steps, tone: tone, input: ring, recordSeconds: testRecordSeconds) }
                 return try Player(device: device, format: format, halfSteps: steps)
             }
             if case .success(let p) = made { player = p }
