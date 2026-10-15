@@ -608,7 +608,7 @@ private final class FlippedView: NSView {
 
 // The small floating "Soundboard" window: a grid of sounds, + to add files, Stop. It floats above other apps and
 // stays open while the owner is in a call, and clicking it doesn't switch away from the call app.
-final class SoundboardPanel: NSObject, NSWindowDelegate {
+final class SoundboardPanel: NSObject, NSWindowDelegate, NSPopoverDelegate {
     let panel: NSPanel
     private let board: Soundboard
     private let scroll = NSScrollView()
@@ -803,6 +803,7 @@ final class SoundboardPanel: NSObject, NSWindowDelegate {
         popover.contentSize = content.frame.size
         popover.behavior = .transient
         popover.animates = preview == nil
+        popover.delegate = self
         popover.show(relativeTo: pad.bounds, of: pad, preferredEdge: .minY)
         volumePopover = popover
         if preview != nil, let window = content.window {  // pictures: under the desktop picture like the Soundboard
@@ -816,9 +817,18 @@ final class SoundboardPanel: NSObject, NSWindowDelegate {
     }
 
     private func closeVolume() {
+        volumePopover?.close()
+        volumeClosed()
+    }
+
+    // It also closes by itself on a click elsewhere in the app.
+    func popoverDidClose(_ notification: Notification) {
+        if notification.object as? NSPopover === volumePopover { volumeClosed() }
+    }
+
+    private func volumeClosed() {
         if let clickWatch { NSEvent.removeMonitor(clickWatch) }
         clickWatch = nil
-        volumePopover?.close()
         volumePopover = nil
     }
 
