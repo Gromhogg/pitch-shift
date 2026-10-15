@@ -148,7 +148,9 @@ The mic's own hardware delay is not in these numbers (the MacBook mic reports 30
   point has been steady for 2 s it drops everything beyond a 2 ms margin, with a 5 ms crossfade (never a hard jump).
   If the sound left over gets very low (Rubber Band slowly falling behind, which happens at 16 kHz −1), it replays a
   few ms with a crossfade instead of running dry, and keeps a bigger margin. If it ever runs dry it fades out and back
-  in (no click). Right after an amount change Rubber Band's pace wobbles; that doesn't count against the margin.
+  in (no click). When the amount changes, or "Deeper when slow" slides the pitch, Rubber Band can pause for a moment
+  (most of all when the pitch leaves exactly 0), so the waiting sound is topped up to 12 ms at the start of a change
+  (crossfaded) and only trimmed back after 6 s with no change; dips in that time don't grow the margin.
 - The shifter itself is unchanged: `--render-voice` output is byte-identical to before (male/female, +3, +3
   Cartoon, +3 middle style, −5, +7, +7 Cartoon).
 - `--test-voice --watch` prints the delay parts at the start and, once a second, the waiting sound, dry-outs,
@@ -162,4 +164,35 @@ The mic's own hardware delay is not in these numbers (the MacBook mic reports 30
   or with 1024-sample callbacks.
 - Amount changes while talking: one-step changes are smooth; only huge jumps (24+ half-steps at once) can still run
   dry once (faded), like before.
+- "Deeper when slow" (pitch sliding 5 or 8 half-steps down and back every 2.5 s, from +3, 0, ±0.5, +1, +7, −5):
+  no dry-outs, about one top-up and one trim a minute, delay at most 63–81 ms while sliding (old ring: 72–84 ms).
+  Without the 12 ms top-up it ran dry up to 11 times a minute when the set amount was 0.
 - The ring adds no clicks: same peak and same largest sample-to-sample step as Rubber Band's own output.
+
+### Before / after (mic → Pitch Shift Mic, built-in mic, 48 kHz)
+| amount | before: delay | before: Rubber Band + waiting | after: delay | after: Rubber Band + waiting |
+|---|---|---|---|---|
+| +3 Natural | 88 ms (87–89 over 60 s) | 66 ms | **57–58 ms** (live, 60 s) | 52 ms |
+| −5 | 98 ms (96–100) | 80 ms | ≈72 ms (model) | 66 ms (model) |
+| +7 | 82 ms (81–84) | 62 ms | ≈53 ms (model) | 47 ms (model) |
+| +3 Cartoon / middle style | 88–90 ms | 66 ms | same as +3 (style doesn't change timing) | 52 ms |
+
+- Before: callbacks of 512, 0 dry-outs and 0 skips in 60 s at +3/−5/+7, no growth.
+- After (live, +3, 60 s): callbacks of 128, 0 dry-outs, 1 overload at start-up only, one trim at 2 s, no growth, pitch
+  523.5 Hz (expected 523.3). The "model" numbers are Rubber Band + waiting from the offline model (the app's own
+  VoiceRing.swift with the real Rubber Band) plus the ~6 ms of 128-sample callbacks measured live.
+- Not re-run live after the merge with 2.0.1 (the Pitch Shift app stayed open, so the new test guard refused for 15
+  minutes): −5, +7, Cartoon, middle style, the 220 Hz pitch check, speech through Pitch Shift Mic vs the offline
+  render, and `--test-button`.
+
+### Test safety (2026-10-14 call echo)
+- During earlier voice tests the owner, in a browser call (Firefox, MacBook mic, Sony headphones in call mode),
+  heard their own voice echo. The system log showed the tests did not change any default device, sample rate or
+  another app's settings, Firefox never opened Pitch Shift Mic, and Firefox's mic stream ran unbroken through the
+  tests after the call had started. Another test's `--test-button` did play two 5 s test-tone recordings into the
+  headphones during the call. Firefox restarted its echo canceller about 10 times in 8 s at the start of the call
+  (switching between the headphones' mic and the MacBook mic): the most likely source, along with the far end.
+- Now the device tests (`--test`, `--test-voice`, `--test-button`, `--test-sounds`, `--test-default-mic`) refuse to
+  start while Pitch Shift Mic, the built-in mic or any Bluetooth mic is in use by another app, or while the Pitch
+  Shift app is open (with "Your voice" on it would wake on the real mic as soon as a test reads Pitch Shift Mic).
+  `--list` marks devices in use.
