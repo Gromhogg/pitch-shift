@@ -44,8 +44,8 @@ void advanced_set_tone(AdvancedChain *chain, double bassDb, double trebleDb);
 
 // Auto EQ: five sections, Sub (20-80 Hz), Bass (80-250), Mids (250-2k), Highs (2k-8k) and Air (8k and up), whose
 // levels are adjusted as the song plays so each stays near the original song's balance, whatever the amount (it looks
-// at loudness only; the overall loudness stays). Automatic gains are within +-6 dB; they follow a section that is too
-// loud within about 0.2 s and one that is too quiet within about 1 s. On the finished sound, before the bass and
+// at loudness only; the overall loudness stays). Automatic gains are within +-8 dB; they follow a section that is too
+// loud within about 0.3 s and one that is too quiet within about 1.5 s. On the finished sound, before the bass and
 // treble. No added delay.
 // on: 1 = automatic, 0 = not. offsetsDb: 5 manual offsets (-12..+12 dB, Sub first), added to the automatic gains
 // (the sum is held within +-15 dB); NULL = all 0. They glide 0.25 dB per 32 samples. Call any time on the processing

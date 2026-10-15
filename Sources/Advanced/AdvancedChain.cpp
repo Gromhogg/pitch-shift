@@ -599,7 +599,7 @@ struct ToneStage {
 //   weighted like a loudness meter (K-weighting at each section's middle), so the loudness heard stays and only the
 //   balance moves; the common level is solved again after the +-range limit. A section quiet in both (below `floor`)
 //   goes to 0 dB.
-// - Moves: a cut follows within `attack` (200 ms), a lift within `release` (1 s), smoothed in dB once per SB block;
+// - Moves: a cut follows within `attack` (300 ms), a lift within `release` (1.5 s), smoothed in dB once per SB block;
 //   the gain itself ramps sample by sample across the next block, so it never steps. The manual offsets (-12..+12 dB)
 //   glide 0.25 dB per 32 samples, are added on top, and the sum is held within +-15 dB.
 // - On / off: fades between the untouched sound and the stage's output over 50 ms (the split turns the phase, so a
@@ -647,7 +647,7 @@ struct AutoEQ5 {
     // settings (advanced_set_auto_eq, advanced_tune)
     bool on = false;
     double want[AEQB] = {};                         // manual offsets asked for (dB)
-    double range = 6, attackMs = 200, releaseMs = 1000, windowMs = 1000, floorDb = -60;
+    double range = 8, attackMs = 300, releaseMs = 1500, windowMs = 1000, floorDb = -60;
     double fc[AEQB - 1] = {80, 250, 2000, 8000};    // crossovers (Hz)
     bool weighted = true;                           // totals weighted like a loudness meter (else plain power)
     // the split: the sound (per channel) and the original (mono, measured only)
