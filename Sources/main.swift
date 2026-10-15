@@ -3,7 +3,7 @@
 //   --list                                     sound devices (and which are in use), Pitch Shift Mic, and which app each
 //                                              sound process belongs to
 // The device tests (--test, --test-voice, --test-button, --test-default-mic) refuse to start while Pitch Shift Mic,
-// the built-in mic or a Bluetooth mic is in use by another app (for example a call).
+// the built-in mic or a Bluetooth mic is in use by another app (for example a call), or the Pitch Shift app is open.
 //   --test [--pid N | --app BUNDLE_ID | --all] [--steps 2.5] [--seconds S]     "What you hear" for a few seconds
 //   --test-voice [--mic NAME] [--tone 440 | --file F] [--steps 3] [--cartoon | --cartoon-amount 0.5] [--seconds S]
 //                [--out F.caf]                 sends a tone or file through the voice chain and records Pitch Shift Mic
@@ -56,8 +56,16 @@ if let pid = arg("--watchdog").flatMap({ pid_t($0) }) { DefaultMic.watch(pid) }
 
 // Device tests share the Mac's microphones and Pitch Shift Mic with whatever the owner is doing. They only start
 // when Pitch Shift Mic, the built-in mic and every Bluetooth mic are idle (not used by any app, for example a call
-// in FaceTime, Discord or a browser). Otherwise they stop right away, before touching any device.
+// in FaceTime, Discord or a browser), and the Pitch Shift app itself isn't open: with "Your voice" on, a test
+// reading Pitch Shift Mic would wake the app's voice on the real mic, and the Test playback would send that to the
+// owner's headphones. Otherwise they stop right away, before touching any device.
 func refuseIfMicsBusy() {
+    let me = ProcessInfo.processInfo.processIdentifier
+    if NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "local.pitch-shift")
+        .contains(where: { $0.processIdentifier != me }) {
+        print("Not starting: the Pitch Shift app is open (its voice or sound would mix into the test). Nothing was changed; try again later.")
+        exit(2)
+    }
     let busy = allDevices().filter { id in
         guard streamCount(id, kAudioDevicePropertyScopeInput) > 0, isRunningSomewhere(id) else { return false }
         let transport = transportType(id)
