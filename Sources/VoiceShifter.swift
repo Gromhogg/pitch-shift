@@ -116,7 +116,6 @@ final class VoiceChain {
     let micUID: String
     let devices: [AudioDeviceID]  // the mic and both sides of Pitch Shift Mic, as Core Audio numbered them
     let sampleRate: Double
-    let cushion: Int  // sound kept ready beyond what one callback needs (Rubber Band hands it back in uneven pieces)
     private var aggregate = AudioObjectID(kAudioObjectUnknown)
     private var proc: AudioDeviceIOProcID?
     private let stretcher: VoiceStretcher
@@ -125,23 +124,21 @@ final class VoiceChain {
     private var applied: VoiceParams
     private let micOutputStreams: Int
     // Sound-thread buffers, made once up front (no memory is made on the sound thread).
+    // Callbacks are small (128 samples), so Rubber Band gets them whole; pieces of up to 4096 only matter for a
+    // device that insists on big callbacks, and the size of the pieces doesn't change the delay.
     private let maxPiece = 4096  // the most Rubber Band is given or asked for at once
     private let piece: UnsafeMutablePointer<Float>
-    private let ring: UnsafeMutablePointer<Float>
-    private let ringSize: Int
-    private var ringRead = 0
-    private var ringCount = 0
-    private var waiting = true      // filling the cushion before sound goes out
-    private var fresh = true        // just started: the first wait may overshoot, so trim it
-    private var lowest = Int.max    // least spare sound in the ring since the last check
-    private var sinceCheck = 0
-    private let checkEvery: Int
-    private let extraAllowed: Int
+    private let ring: VoiceRing  // shifted sound waiting to go out
     // For the command-line test: replaces the mic with a made-up sound.
     var testSource: ((UnsafeMutablePointer<Float>, Int) -> Void)?
     private(set) var firstInputTime: UInt64 = 0  // host time of the first mic sample (for the delay test)
+    private(set) var blockInputTime: UInt64 = 0  // host time of the current callback's first mic sample (for the delay test)
+    // Counts for --test-voice --watch, copied out after each callback without ever waiting on the sound thread.
+    let stats = OSAllocatedUnfairLock(initialState: VoiceStats())
+    private var counts = VoiceStats()
+    private var overloadListener: Listener?
 
-    init(mic: AudioDeviceID, feed: AudioDeviceID, params: OSAllocatedUnfairLock<VoiceParams>,
+    init(mic: AudioDeviceID, feed: AudioDeviceID, params: OSAllocatedUnfairLock<VoiceParams>, bufferFrames: UInt32? = nil,
          testSource: ((UnsafeMutablePointer<Float>, Int) -> Void)? = nil) throws {
         self.testSource = testSource  // set before the sound starts, so a test never sends the real mic
         micName = deviceName(mic)
@@ -164,14 +161,8 @@ final class VoiceChain {
             throw Problem(message: "Can't use \(micName).")
         }
         stretcher = made
-        // 20 ms is enough at every amount and callback size tried (16-96 kHz); more would only add delay.
-        cushion = Int(rate * 0.02)
-        extraAllowed = Int(rate * 0.005)
-        checkEvery = Int(rate * 0.5)
         piece = .allocate(capacity: maxPiece)
-        ringSize = Int(rate) + maxPiece  // about a second; it never gets close to full
-        ring = .allocate(capacity: ringSize)
-        ring.initialize(repeating: 0, count: ringSize)
+        ring = VoiceRing(rate: rate)
 
         let settings: [String: Any] = [
             kAudioAggregateDeviceNameKey: "Pitch Shift Voice",
@@ -188,15 +179,49 @@ final class VoiceChain {
         }
         let status = AudioDeviceCreateIOProcIDWithBlock(&proc, aggregate, nil) { [unowned self] _, input, inputTime, output, _ in
             if self.firstInputTime == 0 { self.firstInputTime = inputTime.pointee.mHostTime }
+            self.blockInputTime = inputTime.pointee.mHostTime
             self.render(input, output)
         }
         guard status == noErr, let proc else {
             throw Problem(message: "Can't use \(micName).")
         }
         turnOffMicOutputs(proc)
+        // Small callbacks: the sound waits one callback on the way in and one on the way out, so 128 samples
+        // (2.7 ms at 48 kHz) instead of the usual 512 (10.7 ms) cuts about 16 ms. Only this chain's own callbacks
+        // change; other apps using the same mic keep theirs.
+        var frames = bufferFrames ?? (rate > 48000 ? 256 : 128)
+        let range = getValue(aggregate, kAudioDevicePropertyBufferFrameSizeRange, default: AudioValueRange(mMinimum: 0, mMaximum: 0))
+        if range.mMaximum > 0 { frames = UInt32(min(max(Double(frames), range.mMinimum), range.mMaximum)) }
+        var sizeAddress = address(kAudioDevicePropertyBufferFrameSize)
+        AudioObjectSetPropertyData(aggregate, &sizeAddress, 0, nil, UInt32(MemoryLayout<UInt32>.size), &frames)
+        overloadListener = Listener(aggregate, kAudioDeviceProcessorOverload) { [weak self] in
+            self?.stats.withLock { $0.overloads += 1 }
+        }
         guard AudioDeviceStart(aggregate, proc) == noErr else {
             throw Problem(message: "Can't use \(micName).")
         }
+    }
+
+    // Where the delay comes from (for --test-voice --watch), in milliseconds.
+    var delayParts: String {
+        let rate = sampleRate
+        func ms(_ frames: UInt32) -> String { String(format: "%.1f", Double(frames) / rate * 1000) }
+        func io(_ id: AudioObjectID, _ scope: AudioObjectPropertyScope) -> String {
+            let latency = getValue(id, kAudioDevicePropertyLatency, scope, default: UInt32(0))
+            let safety = getValue(id, kAudioDevicePropertySafetyOffset, scope, default: UInt32(0))
+            let buffer = getValue(id, kAudioDevicePropertyBufferFrameSize, scope, default: UInt32(0))
+            let stream = getArray(id, kAudioDevicePropertyStreams, scope, of: AudioStreamID.self).first
+                .map { getValue($0, kAudioStreamPropertyLatency, default: UInt32(0)) } ?? 0
+            return "buffer \(buffer) (\(ms(buffer)) ms), latency \(ms(latency + stream)) ms, safety \(ms(safety)) ms"
+        }
+        let pad = rubberband_get_preferred_start_pad(shifter), start = rubberband_get_start_delay(shifter)
+        return """
+            combined device: in \(io(aggregate, kAudioDevicePropertyScopeInput)) | out \(io(aggregate, kAudioDevicePropertyScopeOutput))
+              mic \(micName): \(io(devices[0], kAudioDevicePropertyScopeInput))
+              hidden feed: \(io(devices[2], kAudioDevicePropertyScopeOutput)); Pitch Shift Mic: \(io(devices[1], kAudioDevicePropertyScopeInput))
+              Rubber Band: start delay \(ms(start)) ms, start pad \(ms(pad)) ms, pieces up to \(maxPiece)
+              waiting sound: starts at one callback + \(ms(UInt32(ring.startCushion))) ms, then kept \(ms(UInt32(ring.margin))) ms above the lowest point
+            """
     }
 
     // Some mics (like USB headsets) also have speakers; tell Core Audio this chain doesn't use them.
@@ -246,28 +271,44 @@ final class VoiceChain {
             for i in 0..<frames { source[i] = 0 }
         }
 
+        // At normal pitch the mic goes straight out; otherwise the shifted sound replaces it in the same buffer.
         let shifting = applied.halfSteps != 0
-        if shifting { shift(source, frames) }
+        if shifting {
+            shift(source, frames)
+            ring.read(into: source, frames)
+        }
         for i in 0..<frames {
-            var value: Float = 0
-            if !shifting {
-                value = source[i]
-            } else if !waiting {
-                if ringCount > 0 {
-                    value = ring[ringRead]
-                    ringRead = (ringRead + 1) % ringSize
-                    ringCount -= 1
-                } else {
-                    waiting = true  // ran dry (only right after a big amount change): build the cushion again
-                }
-            }
-            if applied.silent { value = 0 }
+            var value = applied.silent ? 0 : source[i]
             value = max(-1, min(1, value))
             for b in micOutputStreams..<outs.count {
                 guard let d = outs[b].mData?.assumingMemoryBound(to: Float.self) else { continue }
                 let ch = Int(outs[b].mNumberChannels)
                 for c in 0..<ch { d[i * ch + c] = value }
             }
+        }
+        publish(frames, shifting: shifting)
+    }
+
+    // Copies the counts out for --watch (never waits: if the main thread is reading, this callback is left out).
+    private func publish(_ frames: Int, shifting: Bool) {
+        counts.frames = frames
+        counts.ring = ring.count
+        counts.sending = shifting && !ring.waiting
+        counts.delay = counts.sending
+            ? counts.given - counts.returned + ring.count + Int(rubberband_get_start_delay(shifter)) - Int(rubberband_get_preferred_start_pad(shifter))
+            : 0
+        counts.margin = ring.margin
+        counts.dryOuts = ring.dryOuts
+        counts.trims = ring.trims
+        counts.trimmed = ring.trimmed
+        counts.replays = ring.replays
+        counts.replayed = ring.replayed
+        let now = counts
+        stats.withLockIfAvailable { s in
+            let overloads = s.overloads, lowest = s.lowest
+            s = now
+            s.overloads = overloads
+            s.lowest = now.sending ? min(lowest, now.ring) : lowest
         }
     }
 
@@ -280,38 +321,17 @@ final class VoiceChain {
             rubberband_process(shifter, &input, UInt32(count), 0)
             done += count
         }
+        counts.given += frames
         while true {
             let ready = min(Int(rubberband_available(shifter)), maxPiece)
             if ready <= 0 { break }
             var output: UnsafeMutablePointer<Float>? = piece
             let got = Int(rubberband_retrieve(shifter, &output, UInt32(ready)))
-            for j in 0..<got where ringCount < ringSize {
-                ring[(ringRead + ringCount) % ringSize] = piece[j]
-                ringCount += 1
-            }
+            if got <= 0 { break }
+            counts.returned += got
+            ring.write(piece, got)
         }
-        // Sound goes out once the ring holds this callback's worth plus the cushion.
-        if waiting && ringCount >= cushion + frames {
-            waiting = false
-            if fresh { skip(ringCount - cushion - frames) }  // the first piece can overshoot: don't keep that as delay
-            fresh = false
-            lowest = .max
-            sinceCheck = 0
-        }
-        // Twice a second: if the ring never got below the cushion (after the amount went up), skip the extra delay.
-        if !waiting { lowest = min(lowest, ringCount - frames) }
-        sinceCheck += frames
-        if sinceCheck >= checkEvery {
-            if !waiting && lowest != .max && lowest > cushion + extraAllowed { skip(lowest - cushion) }
-            lowest = .max
-            sinceCheck = 0
-        }
-    }
-
-    private func skip(_ count: Int) {
-        let n = max(0, min(count, ringCount))
-        ringRead = (ringRead + n) % ringSize
-        ringCount -= n
+        ring.settle(frames)
     }
 
     // A scratch buffer for one callback's worth of mic sound (made once, grown only if Core Audio asks for more).
@@ -328,11 +348,13 @@ final class VoiceChain {
 
     private func apply(_ latest: VoiceParams) {
         stretcher.set(cartoon: latest.cartoon)
+        let changed = latest.halfSteps != stretcher.halfSteps
         if stretcher.set(halfSteps: latest.halfSteps) {  // coming back from normal pitch: start fresh
-            ringRead = 0
-            ringCount = 0
-            waiting = true
-            fresh = true
+            counts.given = 0
+            counts.returned = 0
+            ring.reset()
+        } else if changed && latest.halfSteps != 0 {
+            ring.amountChanged()
         }
         applied = latest
     }
@@ -349,7 +371,6 @@ final class VoiceChain {
 
     private func cleanUp() {
         piece.deallocate()
-        ring.deallocate()
         scratch.deallocate()
     }
 
@@ -362,6 +383,24 @@ final class VoiceChain {
     }
 
     deinit { close() }
+}
+
+// What the voice chain is doing (for --test-voice --watch). Sizes are in samples.
+struct VoiceStats {
+    var frames = 0           // samples per callback
+    var ring = 0             // shifted sound waiting to go out, after the last callback
+    var lowest = Int.max     // the least waiting since the watch last looked (reset by the reader)
+    var sending = false      // shifted sound is going out (not filling up, not at normal pitch)
+    var delay = 0            // Rubber Band + the ring, from a mic sample to it going out
+    var given = 0            // samples given to Rubber Band
+    var returned = 0         // samples Rubber Band gave back
+    var margin = 0           // sound kept above the lowest point
+    var dryOuts = 0          // the ring ran dry (a short gap, faded out and back in)
+    var trims = 0            // extra waiting sound dropped (crossfaded) to cut the delay
+    var trimmed = 0
+    var replays = 0          // a few ms sent again (crossfaded) because the ring got very low
+    var replayed = 0
+    var overloads = 0        // Core Audio said a callback came too late
 }
 
 enum VoiceState: Equatable {
@@ -380,6 +419,7 @@ final class VoiceShifter {
     var micUID: String? { didSet { if oldValue != micUID { rebuild() } } }  // nil = the Mac's default mic
     var onChange: () -> Void = {}
     var testSource: ((UnsafeMutablePointer<Float>, Int) -> Void)?
+    var testBufferFrames: UInt32?  // --test-voice --buffer N: the callback size to ask for
     private(set) var state: VoiceState = .off
     private(set) var listening = false  // some app is using Pitch Shift Mic right now
     private(set) var chain: VoiceChain?
@@ -505,7 +545,7 @@ final class VoiceShifter {
             stopLater = nil
             if chain == nil {
                 do {
-                    let made = try VoiceChain(mic: mic, feed: feed, params: params, testSource: testSource)
+                    let made = try VoiceChain(mic: mic, feed: feed, params: params, bufferFrames: testBufferFrames, testSource: testSource)
                     chain = made
                 } catch {
                     setState(.problem((error as? Problem)?.message ?? "\(error)"))
@@ -564,6 +604,12 @@ final class Recorder {
         guard status == noErr, let proc, AudioDeviceStart(device, proc) == noErr else {
             throw Problem(message: "Can't record.")  // deinit cleans up
         }
+    }
+
+    // What has been recorded so far, from `start` on (for --test-voice --watch; may lag a callback behind).
+    func recorded(from start: Int) -> [Float] {
+        let end = count
+        return start < end ? Array(UnsafeBufferPointer(start: samples + start, count: end - start)) : []
     }
 
     // Stops and returns what was recorded (one channel).
