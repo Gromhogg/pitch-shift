@@ -606,13 +606,63 @@ private final class FlippedView: NSView {
     override var isFlipped: Bool { true }
 }
 
-// The small floating "Soundboard" window: a grid of sounds, + to add files, Stop. It floats above other apps and
+// The Soundboard's background: sound files dragged in from Finder (one or several) are added like with +. While
+// they're over it, a frame in the theme color shows they can be dropped. Other files are refused (no message).
+private final class DropArea: NSView {
+    var onDrop: ([URL]) -> Void = { _ in }
+    var highlighted = false { didSet { if oldValue != highlighted { needsDisplay = true } } }
+
+    override init(frame: NSRect) {
+        super.init(frame: frame)
+        registerForDraggedTypes([.fileURL])
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    // The sound files being dragged (by their file type; ones that still can't be read are skipped when added).
+    private func soundFiles(_ drag: NSDraggingInfo) -> [URL] {
+        drag.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [
+            .urlReadingFileURLsOnly: true,
+            .urlReadingContentsConformToTypes: [UTType.audio.identifier],
+        ]) as? [URL] ?? []
+    }
+
+    override func draggingEntered(_ drag: NSDraggingInfo) -> NSDragOperation {
+        highlighted = !soundFiles(drag).isEmpty
+        return highlighted ? .copy : []
+    }
+
+    override func draggingUpdated(_ drag: NSDraggingInfo) -> NSDragOperation { highlighted ? .copy : [] }
+    override func draggingExited(_ drag: NSDraggingInfo?) { highlighted = false }
+    override func draggingEnded(_ drag: NSDraggingInfo) { highlighted = false }
+
+    override func performDragOperation(_ drag: NSDraggingInfo) -> Bool {
+        highlighted = false
+        let urls = soundFiles(drag)
+        guard !urls.isEmpty else { return false }
+        onDrop(urls)
+        return true
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard highlighted else { return }
+        let frame = NSBezierPath(roundedRect: bounds.insetBy(dx: 5, dy: 5), xRadius: 8, yRadius: 8)
+        Theme.mid.withAlphaComponent(0.1).setFill()
+        frame.fill()
+        Theme.mid.setStroke()
+        frame.lineWidth = 2
+        frame.stroke()
+    }
+}
+
+// The small floating "Soundboard" window: a grid of sounds, + to add files (or drop them on it), Stop. It floats above other apps and
 // stays open while the owner is in a call, and clicking it doesn't switch away from the call app.
 final class SoundboardPanel: NSObject, NSWindowDelegate, NSPopoverDelegate {
     let panel: NSPanel
     private let board: Soundboard
     private let scroll = NSScrollView()
     private let grid = FlippedView()
+    private let dropArea = DropArea()
     private let addButton = NSButton()
     private let stopButton = NSButton(title: "Stop", target: nil, action: nil)
     private var pads: [SoundPad] = []
@@ -638,7 +688,8 @@ final class SoundboardPanel: NSObject, NSWindowDelegate, NSPopoverDelegate {
         panel.standardWindowButton(.zoomButton)?.isHidden = true
         panel.delegate = self
 
-        let content = NSView()
+        let content = dropArea
+        dropArea.onDrop = { [weak self] urls in self?.board.add(urls) }  // pictures: adds nothing (changes no settings)
         scroll.documentView = grid
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
@@ -763,6 +814,9 @@ final class SoundboardPanel: NSObject, NSWindowDelegate, NSPopoverDelegate {
 
     // For pictures: the first sound's name being changed.
     func showRenaming() { pads.first?.startRenaming() }
+
+    // For pictures: sound files being dragged over it.
+    func showDropping() { dropArea.highlighted = true }
 
     // For pictures: the first sound's volume slider, at 80%.
     func showVolume() {

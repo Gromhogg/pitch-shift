@@ -49,9 +49,10 @@ func arg(_ name: String) -> String? {
 // --preview STATES [--size 800x400] [--cartoon-amount 0.5] [--tone-amount -0.4]: show the window in a state for
 // screenshots, without touching any sound or settings, and without switching apps (states: hear-on, voice-on, waiting,
 // typing, recording, playing, listening, hover, menu, roll, resize, no-driver, advanced-alert, sounds, rename, volume,
-// light, tone, slow; --cartoon-amount sets the voice style slider; sounds opens the Soundboard with example names,
-// rename shows the first name being changed and volume the first sound's volume slider; "tone" shows Advanced
-// processing on, and --tone-amount sets the Bass ↔ Treble slider; slow turns on "Deeper when slow").
+// drop, light, tone, slow; --cartoon-amount sets the voice style slider; sounds opens the Soundboard with example
+// names, rename shows the first name being changed, volume the first sound's volume slider and drop files being
+// dragged over it; "tone" shows Advanced processing on, and --tone-amount sets the Bass ↔ Treble slider; slow turns
+// on "Deeper when slow").
 let preview = arg("--preview")
 
 var signalSources: [DispatchSourceSignal] = []

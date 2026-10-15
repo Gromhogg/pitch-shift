@@ -1655,7 +1655,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     // MARK: Showing state
 
     // For screenshots (--preview hear-on,voice-on,waiting,typing,recording,playing,listening,hover,menu,roll,
-    // resize,no-driver,advanced-alert,sounds,rename,volume,light,tone,slow [--size 800x400]): shows a state, no sound.
+    // resize,no-driver,advanced-alert,sounds,rename,volume,drop,light,tone,slow [--size 800x400]): shows a state,
+    // no sound.
     func showPreview() {
         guard let preview else { return }
         if preview.contains("light") {
@@ -1668,6 +1669,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             if preview.contains("hover") { soundboard.showHover() }
             if preview.contains("rename") { soundboard.showRenaming() }  // the first name being changed
             if preview.contains("volume") { soundboard.showVolume() }  // the first sound's volume slider
+            if preview.contains("drop") { soundboard.showDropping() }  // sound files dragged over it
         }
         if let cartoonArg { voice.cartoon = cartoonArg }  // where the style slider is (--cartoon-amount 0.5)
         if preview.contains("tone") { hear.advanced = true }  // Advanced processing on (nothing runs in pictures)
