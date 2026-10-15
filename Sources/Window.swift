@@ -3,6 +3,7 @@
 // by side (or one above the other in a tall, narrow window) and everything grows with the window.
 import AppKit
 import AVFoundation
+import CoreAudio
 
 // The icon's colors: purple to pink. Plus the shared control sizes and animation helpers.
 enum Theme {
@@ -969,6 +970,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     var footer: CardRow!
     private var installed: Bool?
     private var lastPhase: VoiceTest.Phase = .idle
+    private var deviceListeners: [Listener] = []  // keep the mic picker right when devices change
+    private let deviceDebounce = Debouncer(0.3)
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Keep the colorful icon in the Dock (macOS's dark icon style would otherwise turn it grey).
@@ -980,6 +983,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         hear.onChange = { [weak self] in self?.refresh() }
         voice.onChange = { [weak self] in self?.refresh() }
         test.onChange = { [weak self] in self?.refresh() }
+        deviceListeners = [kAudioHardwarePropertyDevices, kAudioHardwarePropertyDefaultInputDevice, kAudioHardwarePropertyDefaultOutputDevice].map {
+            Listener(system, $0) { [weak self] in self?.deviceDebounce.call { self?.refresh() } }
+        }
         refresh()
         showWindow()
         if preview != nil { showPreview(); return }
@@ -1345,6 +1351,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         picker.selectItem(at: mics.firstIndex { $0.uid == current } ?? 0)
     }
 
+    // The picker shows the mic the voice uses now; with none picked, that changes with the default mic and the
+    // headphones in use (a Bluetooth headset's own mic is passed over for the built-in one, see Mics.choose).
+    private func showCurrentMic() {
+        let picker = voiceCard.picker
+        let current = voice.currentMic.map(deviceUID)
+        guard (picker.selectedItem?.representedObject as? String) != current else { return }
+        if let i = picker.itemArray.firstIndex(where: { $0.representedObject as? String == current }) {
+            picker.selectItem(at: i)
+        } else {
+            rebuildMicMenu()
+        }
+    }
+
     // Clicking "All sound" picks everything; clicking an app ticks or unticks it.
     @objc func hearSourcePicked() {
         guard let clicked = hearCard.picker.selectedItem?.representedObject as? String else { return }
@@ -1558,6 +1577,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         voiceCard.show(on: voiceOn, value: voice.halfSteps, active: voiceOn && installed && hasMic)
         voiceCard.toggle.isEnabled = installed && hasMic
         voiceCard.picker.isEnabled = installed && hasMic
+        if hasMic { showCurrentMic() }
         style.value = voice.cartoon
         style.isEnabled = voiceOn && installed
         if case .problem(let message) = voice.state { voiceCard.amount.toolTip = message } else { voiceCard.amount.toolTip = nil }

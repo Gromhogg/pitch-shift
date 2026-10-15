@@ -1,6 +1,9 @@
 // Pitch Shift: plays an app's sound (or all sound) and/or your voice at a higher or lower pitch, live.
 // Checks from Terminal (inside "Pitch Shift.app/Contents/MacOS/PitchShift"):
-//   --list                                     sound devices, Pitch Shift Mic, and which app each sound process belongs to
+//   --list                                     sound devices, Pitch Shift Mic, the voice's mic, and which app each sound
+//                                              process belongs to
+//   --watch-output [--seconds 10]              once a second: the output's sample rate (Bluetooth call mode shows
+//                                              8000-24000 Hz), its own mic, and which apps record from which devices
 //   --test [--pid N | --app BUNDLE_ID | --all] [--steps 2.5] [--seconds S]     "What you hear" for a few seconds
 //   --test-voice [--mic NAME] [--tone 440 | --file F] [--steps 3] [--cartoon | --cartoon-amount 0.5] [--seconds S]
 //                [--out F.caf]                 sends a tone or file through the voice chain and records Pitch Shift Mic
@@ -72,6 +75,12 @@ if args.contains("--list") {
         print("Pitch Shift Mic: not installed")
     }
     print("Microphones to choose from: \(Mics.list().map(\.name))")
+    let picked = Mics.choose(nil)
+    let why = picked.skipped.map { " (skipped headset mic of the current output: \(deviceName($0)))" } ?? ""
+    print("Voice mic (default): \(picked.mic.map(deviceName) ?? "none")\(why)")
+    if let saved = UserDefaults.standard.string(forKey: Keys.voiceMic) {
+        print("Voice mic (picked in the app): \(Mics.resolve(saved).map(deviceName) ?? "none") (saved: \(saved))")
+    }
     print("Sound processes:")
     for process in getArray(system, kAudioHardwarePropertyProcessObjectList, of: AudioObjectID.self) {
         let pid = getValue(process, kAudioProcessPropertyPID, default: pid_t(-1))
@@ -82,6 +91,32 @@ if args.contains("--list") {
     }
     print("Apps in the list: \(Apps.scan().map { "\($0.name)\($0.isPlaying ? " (playing)" : "")" })")
     exit(0)
+}
+
+// Read only: once a second, the sound output's sample rate and streams, its own mic (Bluetooth headphones), and
+// every app that is recording and from which devices. Headphones in call mode show 8000-24000 Hz.
+if args.contains("--watch-output") {
+    let seconds = arg("--seconds").flatMap(Double.init) ?? 10
+    let started = Date()
+    func show() {
+        let out = defaultOutput()
+        var line = String(format: "%4.1fs  ", Date().timeIntervalSince(started))
+        line += "output \(deviceName(out)): \(Int(nominalRate(out))) Hz, in \(streamCount(out, kAudioDevicePropertyScopeInput)) out \(streamCount(out, kAudioDevicePropertyScopeOutput))"
+        if let mic = Mics.headsetMic(of: out) { line += " | its mic: \(Int(nominalRate(mic))) Hz, open: \(isRunningSomewhere(mic))" }
+        for process in getArray(system, kAudioHardwarePropertyProcessObjectList, of: AudioObjectID.self)
+        where getValue(process, kAudioProcessPropertyIsRunningInput, default: UInt32(0)) != 0 {
+            let pid = getValue(process, kAudioProcessPropertyPID, default: pid_t(-1))
+            let devices = getArray(process, kAudioProcessPropertyDevices, kAudioObjectPropertyScopeInput, of: AudioObjectID.self)
+            let bundleID = getString(process, kAudioProcessPropertyBundleID)
+            let name = bundleID.isEmpty ? Apps.ownerApp(of: pid)?.localizedName ?? "?" : bundleID
+            line += " | recording: \(name) (pid \(pid)) from \(devices.map { "\($0) \(deviceName($0))" })"
+        }
+        print(line)
+        if Date().timeIntervalSince(started) + 0.5 >= seconds { exit(0) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { show() }
+    }
+    show()
+    dispatchMain()
 }
 
 if let input = arg("--render-file") {
@@ -202,6 +237,7 @@ if args.contains("--test-voice") {
     }
     onQuitSignals { voice.stop(); exit(0) }
     voice.start()
+    voice.hold(true)  // runs the chain like the Test button does (no app is listening yet)
     guard let chain = voice.chain else { print("voice did not start: \(voice.state)"); exit(1) }
     let recorder = try! Recorder(device: virtualMic, seconds: seconds)
     DispatchQueue.main.asyncAfter(deadline: .now() + seconds + 0.2) {
@@ -257,10 +293,12 @@ if args.contains("--test-button") {
     let started = Date()
     test.onChange = {
         let silent = voice.params.withLock { $0.silent }
-        print(String(format: "%.1fs: %@ (voice %@, sending silence: %@)", Date().timeIntervalSince(started), "\(test.phase)", "\(voice.state)", "\(silent)"))
+        print(String(format: "%.1fs: %@ (voice %@, sending silence: %@, real mic open: %@)", Date().timeIntervalSince(started), "\(test.phase)",
+                     "\(voice.state)", "\(silent)", "\(voice.chain != nil)"))
         if test.phase == .idle { voice.stop(); exit(0) }
     }
     voice.start()
+    print("mic: \(voice.currentMic.map(deviceName) ?? "none")")
     test.click()
     DispatchQueue.main.asyncAfter(deadline: .now() + 15) { print("timed out"); exit(1) }
     dispatchMain()

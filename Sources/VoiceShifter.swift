@@ -30,13 +30,38 @@ enum Mics {
     }
 
     // The saved mic if it's plugged in, else the Mac's default mic, else the built-in one.
-    static func resolve(_ savedUID: String?) -> AudioDeviceID? {
+    static func resolve(_ savedUID: String?) -> AudioDeviceID? { choose(savedUID).mic }
+
+    // Like resolve, and also says which mic was passed over (for --list). With no saved mic, the mic of Bluetooth
+    // headphones that are also playing the Mac's sound is passed over for the built-in mic: opening it switches the
+    // headphones into call mode, where everything they play sounds thin and hollow. A mic picked on purpose is kept.
+    static func choose(_ savedUID: String?) -> (mic: AudioDeviceID?, skipped: AudioDeviceID?) {
         let choices = list()
-        if let savedUID, choices.contains(where: { $0.uid == savedUID }), let id = device(uid: savedUID) { return id }
+        if let savedUID, choices.contains(where: { $0.uid == savedUID }), let id = device(uid: savedUID) { return (id, nil) }
         // While Pitch Shift Mic is the Mac's default mic, the real one is the mic that was default before.
         let fallback = DefaultMic.realMic ?? defaultInput()
-        if choices.contains(where: { $0.uid == deviceUID(fallback) }) { return fallback }
-        return allDevices().first { transportType($0) == kAudioDeviceTransportTypeBuiltIn && streamCount($0, kAudioDevicePropertyScopeInput) > 0 }
+        guard choices.contains(where: { $0.uid == deviceUID(fallback) }) else { return (builtIn, nil) }
+        if let builtIn, isHeadsetMic(fallback, of: defaultOutput()) { return (builtIn, fallback) }
+        return (fallback, nil)
+    }
+
+    static var builtIn: AudioDeviceID? {
+        allDevices().first { transportType($0) == kAudioDeviceTransportTypeBuiltIn && streamCount($0, kAudioDevicePropertyScopeInput) > 0 }
+    }
+
+    // True when `mic` belongs to the same Bluetooth headphones as `output` (macOS shows them as two devices with
+    // the same address, like "AC-80-0A-E9-3A-03:input" and "AC-80-0A-E9-3A-03:output", and the same name).
+    static func isHeadsetMic(_ mic: AudioDeviceID, of output: AudioDeviceID) -> Bool {
+        let bluetooth = [kAudioDeviceTransportTypeBluetooth, kAudioDeviceTransportTypeBluetoothLE]
+        guard mic != 0, output != 0, bluetooth.contains(transportType(mic)), bluetooth.contains(transportType(output)) else { return false }
+        func address(_ uid: String) -> String { String(uid.split(separator: ":").first ?? "") }
+        let micAddress = address(deviceUID(mic))
+        return mic == output || (!micAddress.isEmpty && micAddress == address(deviceUID(output))) || deviceName(mic) == deviceName(output)
+    }
+
+    // The mic of the Bluetooth headphones `output`, if they have one (for --watch-output).
+    static func headsetMic(of output: AudioDeviceID) -> AudioDeviceID? {
+        allDevices().first { streamCount($0, kAudioDevicePropertyScopeInput) > 0 && isHeadsetMic($0, of: output) }
     }
 }
 
@@ -403,9 +428,13 @@ final class VoiceShifter {
     func start() {
         guard !running else { return }
         running = true
+        // With no mic picked, the mic follows the Mac's default mic, and the headphones in use (see Mics.choose).
         listeners = [
             Listener(system, kAudioHardwarePropertyDevices) { [weak self] in self?.devicesChanged() },
             Listener(system, kAudioHardwarePropertyDefaultInputDevice) { [weak self] in
+                if self?.micUID == nil { self?.devicesChanged() }
+            },
+            Listener(system, kAudioHardwarePropertyDefaultOutputDevice) { [weak self] in
                 if self?.micUID == nil { self?.devicesChanged() }
             },
         ]
@@ -424,10 +453,11 @@ final class VoiceShifter {
         setState(.off)
     }
 
-    // Keep the chain on while the Test button is recording (even if no app is listening).
+    // Keep the chain on while the Test button is recording (even if no app is listening). When Test is done and no
+    // app is listening, the mic is closed right away.
     func hold(_ on: Bool) {
         holdCount = max(0, holdCount + (on ? 1 : -1))
-        update()
+        update(closeNow: !on)
     }
 
     func setSilent(_ silent: Bool) {
@@ -485,7 +515,8 @@ final class VoiceShifter {
     }
 
     // Run the chain only when it's on, everything needed is there, and someone is listening (or Test is running).
-    func update() {
+    // Otherwise the real mic is closed, so Bluetooth headphones go back to full quality.
+    func update(closeNow: Bool = false) {
         guard running else { return }
         guard Mics.driverInstalled, let virtualMic = Mics.virtualMic, let feed = Mics.virtualFeed else {
             closeChain()
@@ -498,7 +529,7 @@ final class VoiceShifter {
             setState(.noMic)
             return
         }
-        if listening || holdCount > 0 || testSource != nil {
+        if listening || holdCount > 0 {
             stopLater?.cancel()
             stopLater = nil
             if chain == nil {
@@ -513,6 +544,11 @@ final class VoiceShifter {
             }
             setState(.live)
         } else {
+            if closeNow {
+                stopLater?.cancel()
+                stopLater = nil
+                closeChain()
+            }
             // Wait a moment before stopping: apps often stop and restart the mic right away.
             if chain != nil && stopLater == nil {
                 let work = DispatchWorkItem { [weak self] in
@@ -522,7 +558,7 @@ final class VoiceShifter {
                     self.setState(.ready)
                 }
                 stopLater = work
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: work)
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
             }
             if chain == nil { setState(.ready) } else { onChange() }
         }
