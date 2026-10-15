@@ -67,6 +67,7 @@ final class AdvancedProcessor {
     private let chain: OpaquePointer
     private var halfSteps: Float
     private var tone = (bass: 0.0, treble: 0.0)
+    private var autoEQ: (on: Bool, offsets: [Double]) = (false, AdvancedProcessor.noOffsets)
     // Made for -12..+12 (less delay); a bigger amount needs a version made with fullRange (more delay).
     let fullRange: Bool
     private let ins = UnsafeMutablePointer<UnsafePointer<Float>?>.allocate(capacity: 2)
@@ -114,6 +115,30 @@ final class AdvancedProcessor {
         advanced_set_tone(chain, bass, treble)
     }
 
+    // Auto EQ: five sections (Sub, Bass, Mids, Highs, Air) kept near the original song's balance as it plays.
+    // on: the automatic part; offsets: a manual offset per section in dB (−12 … 12, Sub first), added on top. Off with
+    // all offsets 0 (the default) the sound is untouched. Makes no memory, so it is safe on the processing thread.
+    static let sections = ["Sub", "Bass", "Mids", "Highs", "Air"]
+    static let noOffsets = [Double](repeating: 0, count: 5)
+    func setAutoEQ(on: Bool, offsets: [Double]) {
+        guard on != autoEQ.on || offsets != autoEQ.offsets else { return }
+        autoEQ = (on, offsets)
+        var five = (0.0, 0.0, 0.0, 0.0, 0.0)
+        withUnsafeMutableBytes(of: &five) { raw in
+            let values = raw.bindMemory(to: Double.self)
+            for i in 0..<min(5, offsets.count) { values[i] = offsets[i] }
+            advanced_set_auto_eq(chain, on ? 1 : 0, values.baseAddress)
+        }
+    }
+
+    // Auto EQ's live values, Sub first: the automatic gain now (dB, without the offsets) and each section's level
+    // coming out (dBFS, −120 while Auto EQ is off). Safe from any thread, also while `process` runs.
+    func readAutoEQ() -> (auto: [Float], level: [Float]) {
+        var gains = [Double](repeating: 0, count: 5), levels = [Double](repeating: 0, count: 5)
+        advanced_get_auto_eq(chain, &gains, &levels)
+        return (gains.map(Float.init), levels.map(Float.init))
+    }
+
     // `frames` in, the same number out (delayed by latencyFrames). At most maxFrames per call.
     func process(_ left: UnsafePointer<Float>, _ right: UnsafePointer<Float>,
                  _ outLeft: UnsafeMutablePointer<Float>, _ outRight: UnsafeMutablePointer<Float>, _ frames: Int) {
@@ -134,8 +159,9 @@ final class AdvancedPlayer: HearPlayer {
     private var stopped = false
 
     // recordSeconds > 0 (checks only): also keeps what is sent to the speakers, for `saveRecording`.
-    // tone: bass and treble in dB (see setTone), so a rebuilt player keeps them.
+    // tone: bass and treble in dB (see setTone), autoEQ: Auto EQ (see setAutoEQ), so a rebuilt player keeps them.
     init(device: AudioDeviceID, format: AVAudioFormat, halfSteps: Float, tone: (bass: Double, treble: Double) = (0, 0),
+         autoEQ: (on: Bool, offsets: [Double]) = (false, AdvancedProcessor.noOffsets),
          input: SoundRing, recordSeconds: Double = 0) throws {
         self.device = device
         self.format = format
@@ -143,7 +169,9 @@ final class AdvancedPlayer: HearPlayer {
             throw Problem(message: "Could not start Advanced processing.")
         }
         processor.setTone(bass: tone.bass, treble: tone.treble)
-        let wanted = AdvancedWanted(halfSteps: halfSteps, bassDb: tone.bass, trebleDb: tone.treble)
+        processor.setAutoEQ(on: autoEQ.on, offsets: autoEQ.offsets)
+        let wanted = AdvancedWanted(halfSteps: halfSteps, bassDb: tone.bass, trebleDb: tone.treble,
+                                    autoEQOn: autoEQ.on, autoEQOffsets: autoEQ.offsets)
         worker = AdvancedWorker(processor: processor, input: input, wanted: wanted, recordFrames: Int(recordSeconds * format.sampleRate))
         // The cushion before the speakers: like normal mode (starts at 50 ms, at most 150 ms).
         let ring = worker.output.ring
@@ -175,6 +203,9 @@ final class AdvancedPlayer: HearPlayer {
     func setHalfSteps(_ value: Float) { worker.wanted.withLock { $0.halfSteps = value } }
     func setTone(bass: Double, treble: Double) { worker.wanted.withLock { $0.bassDb = bass; $0.trebleDb = treble } }
     var tone: (bass: Double, treble: Double) { worker.wanted.withLock { ($0.bassDb, $0.trebleDb) } }
+    func setAutoEQ(on: Bool, offsets: [Double]) { worker.wanted.withLock { $0.autoEQOn = on; $0.autoEQOffsets = offsets } }
+    // Auto EQ's live values for the window (see AdvancedProcessor.readAutoEQ). Any thread.
+    var autoEQReadout: (auto: [Float], level: [Float]) { worker.processor.readAutoEQ() }
 
     // Not used live (the capture writes straight into the ring), but handy for tests.
     func play(_ buffer: AVAudioPCMBuffer) {
@@ -211,11 +242,13 @@ final class AdvancedPlayer: HearPlayer {
     }
 }
 
-// What the worker should use next: the amount, and the bass and treble in dB.
+// What the worker should use next: the amount, the bass and treble in dB, and Auto EQ.
 struct AdvancedWanted: Equatable {
     var halfSteps: Float
     var bassDb: Double = 0
     var trebleDb: Double = 0
+    var autoEQOn = false
+    var autoEQOffsets = AdvancedProcessor.noOffsets
 }
 
 // The worker thread: waits for grabbed sound, processes it, and hands it to the speakers' ring.
@@ -277,6 +310,7 @@ final class AdvancedWorker {
             if value != current {
                 processor.setHalfSteps(value.halfSteps)
                 processor.setTone(bass: value.bassDb, treble: value.trebleDb)
+                processor.setAutoEQ(on: value.autoEQOn, offsets: value.autoEQOffsets)
                 current = value
             }
             while true {
@@ -302,13 +336,15 @@ final class AdvancedWorker {
 }
 
 // --render-file IN OUT [--steps N] [--advanced] [--steps-at "SECONDS:N,SECONDS:N"] [--tone-db B,T | --tone-amount T]
-//               [--tone-at "SECONDS:T,SECONDS:T"]
+//               [--tone-at "SECONDS:T,SECONDS:T"] [--auto-eq] [--eq-offsets a,b,c,d,e]
 // Shifts a sound file offline with the app's own code (normal mode or Advanced processing), for listening
 // samples and checks. The output lines up with the input (the delay is taken out) and has the same length.
 // --steps-at changes the amount while it plays, like moving the amount live. --tone-db: Advanced processing's bass
 // and treble in dB; --tone-amount: the Bass ↔ Treble slider (−1 … 1); --tone-at moves the slider while it plays.
+// --auto-eq / --eq-offsets: Advanced processing's Auto EQ on, and its manual offsets in dB (Sub … Air).
 func renderFile(input: String, output: String, halfSteps: Float, advanced: Bool, changes: [(Double, Float)],
-                tone: (bass: Double, treble: Double) = (0, 0), toneChanges: [(Double, Float)] = []) throws {
+                tone: (bass: Double, treble: Double) = (0, 0), toneChanges: [(Double, Float)] = [],
+                autoEQ: (on: Bool, offsets: [Double]) = (false, AdvancedProcessor.noOffsets)) throws {
     let file = try AVAudioFile(forReading: URL(fileURLWithPath: input))
     let rate = file.processingFormat.sampleRate
     let length = Int(file.length)
@@ -334,6 +370,7 @@ func renderFile(input: String, output: String, halfSteps: Float, advanced: Bool,
             throw Problem(message: "Could not start Advanced processing.")
         }
         processor.setTone(bass: tone.bass, treble: tone.treble)
+        processor.setAutoEQ(on: autoEQ.on, offsets: autoEQ.offsets)
         let latency = processor.latencyFrames
         var position = 0, written = -latency
         while written < length {

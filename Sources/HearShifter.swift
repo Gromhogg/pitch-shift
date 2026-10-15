@@ -105,14 +105,16 @@ protocol HearPlayer: AnyObject {
     func play(_ buffer: AVAudioPCMBuffer)
     func setHalfSteps(_ value: Float)
     func setTone(bass: Double, treble: Double)
+    func setAutoEQ(on: Bool, offsets: [Double])
     func stop()
     // Where the delay comes from, in milliseconds: the cushion, the pitch shifting, and the speakers or headphones.
     var delays: (cushion: Double, shifter: Double, device: Double) { get }
 }
 
-// Bass and treble are an Advanced processing setting: normal mode ignores them.
+// Bass and treble and Auto EQ are Advanced processing settings: normal mode ignores them.
 extension HearPlayer {
     func setTone(bass: Double, treble: Double) {}
+    func setAutoEQ(on: Bool, offsets: [Double]) {}
 }
 
 // Changes the pitch with Rubber Band and plays to one speaker or headphone device.
@@ -293,6 +295,17 @@ final class HearShifter {
         guard uid == playerKey else { return }
         let db = toneDb(uid)
         audioQueue.async { self.player?.setTone(bass: db.bass, treble: db.treble) }
+    }
+    // Advanced processing's Auto EQ (see AdvancedProcessor.setAutoEQ): on, and a manual offset per section in dB.
+    // Normal mode ignores it. A new player starts with it.
+    private(set) var autoEQ: (on: Bool, offsets: [Double]) = (false, AdvancedProcessor.noOffsets)
+    func setAutoEQ(on: Bool, offsets: [Double]) {
+        autoEQ = (on, offsets)
+        audioQueue.async { self.player?.setAutoEQ(on: on, offsets: offsets) }
+    }
+    // Auto EQ's live values (Sub … Air): the automatic gain (dB) and the level (dBFS). nil in normal mode.
+    var autoEQReadout: (auto: [Float], level: [Float])? {
+        audioQueue.sync { (player as? AdvancedPlayer)?.autoEQReadout }
     }
     // Checks only: --as-device UID uses that device's tone, whatever is playing; --tone-db B,T uses these dB everywhere.
     var testOutputKey: String?
@@ -481,6 +494,7 @@ final class HearShifter {
         let steps = halfSteps
         let key = testOutputKey ?? deviceUID(device)
         let tone = toneDb(key)
+        let eq = autoEQ
         playerKey = key
         let ring = capture?.ring
         if let playerObserver { NotificationCenter.default.removeObserver(playerObserver) }
@@ -489,7 +503,7 @@ final class HearShifter {
             player?.stop()
             player = nil
             let made: Result<HearPlayer, Error> = Result {
-                if let ring { return try AdvancedPlayer(device: device, format: format, halfSteps: steps, tone: tone, input: ring, recordSeconds: testRecordSeconds) }
+                if let ring { return try AdvancedPlayer(device: device, format: format, halfSteps: steps, tone: tone, autoEQ: eq, input: ring, recordSeconds: testRecordSeconds) }
                 return try Player(device: device, format: format, halfSteps: steps)
             }
             if case .success(let p) = made { player = p }

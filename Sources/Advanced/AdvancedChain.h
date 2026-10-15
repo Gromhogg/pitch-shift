@@ -9,8 +9,9 @@
 // Plain C API, so Swift can call it through the bridging header.
 // Threading: create, use and delete from one thread at a time (the engine also runs one helper thread of its own
 // that tidies up spare Rubber Band shifters; it never touches the sound).
-// Real-time safe: advanced_process, advanced_set_semis, advanced_set_tone and advanced_reset make no memory, take no
-// locks and do no file or console I/O. Everything is set up in advanced_new.
+// Real-time safe: advanced_process, advanced_set_semis, advanced_set_tone, advanced_set_auto_eq,
+// advanced_get_auto_eq and advanced_reset make no memory, take no locks and do no file or console I/O. Everything is
+// set up in advanced_new. advanced_get_auto_eq may also be called from another thread.
 #ifndef ADVANCED_CHAIN_H
 #define ADVANCED_CHAIN_H
 
@@ -41,7 +42,24 @@ void advanced_set_semis(AdvancedChain *chain, double semis);
 // before any sound comes out. At 0 and 0 the sound is exactly as without it.
 void advanced_set_tone(AdvancedChain *chain, double bassDb, double trebleDb);
 
-// Forget all sound (for example after a pause). Keeps the amount and the bass and treble.
+// Auto EQ: five sections, Sub (20-80 Hz), Bass (80-250), Mids (250-2k), Highs (2k-8k) and Air (8k and up), whose
+// levels are adjusted as the song plays so each stays near the original song's balance, whatever the amount (it looks
+// at loudness only; the overall loudness stays). Automatic gains are within +-6 dB; they follow a section that is too
+// loud within about 0.2 s and one that is too quiet within about 1 s. On the finished sound, before the bass and
+// treble. No added delay.
+// on: 1 = automatic, 0 = not. offsetsDb: 5 manual offsets (-12..+12 dB, Sub first), added to the automatic gains
+// (the sum is held within +-15 dB); NULL = all 0. They glide 0.25 dB per 32 samples. Call any time on the processing
+// thread. Switching on or off fades over 50 ms. Off with all offsets 0 (the default): the sound is exactly as without
+// it, once that fade is done.
+void advanced_set_auto_eq(AdvancedChain *chain, int on, const double offsetsDb[5]);
+
+// Auto EQ's live values, Sub first, updated every 256 samples (512 above 64 kHz): autoDb = the automatic gain now
+// (dB, without the offsets); levelDb = each section's level coming out (dBFS over the last second, a full-scale sine
+// = 0, after its gain; -120 while Auto EQ is off). Either may be NULL. Safe to call from any thread at any time, also
+// while advanced_process runs: it never makes the processing wait.
+void advanced_get_auto_eq(const AdvancedChain *chain, double autoDb[5], double levelDb[5]);
+
+// Forget all sound (for example after a pause). Keeps the amount, the bass and treble and the Auto EQ settings.
 void advanced_reset(AdvancedChain *chain);
 
 // in: `channels` pointers to `frames` samples. keep: NULL, or `channels` pointers to a part of `in` that must stay

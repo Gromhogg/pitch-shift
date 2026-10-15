@@ -24,14 +24,17 @@
 //                                              --stop-after S: press Stop S seconds after the sound starts.
 //                                              --hear-out F.caf: save the owner's copy (with --hear).
 //   --test ... --advanced [--record-out F.wav] [--steps-at "3:8,6:-5"] [--tone-amount 0.5] [--tone-at "2:1,4:-1"]
-//              [--as-device UID] [--tone-db 6,-6]
+//              [--as-device UID] [--tone-db 6,-6] [--auto-eq] [--eq-offsets 0,0,0,0,0]
 //                                              "What you hear" with Advanced processing on (--watch prints the delay;
 //                                              --record-out saves what it played; --steps-at changes the amount live;
 //                                              --tone-amount sets the Bass ↔ Treble slider, −1 … 1, for the output;
 //                                              --tone-at moves it live; --as-device uses that device's saved Bass ↔
-//                                              Treble as if it were playing; --tone-db sets bass and treble in dB)
+//                                              Treble as if it were playing; --tone-db sets bass and treble in dB;
+//                                              --auto-eq turns on Auto EQ, --eq-offsets gives its five manual offsets
+//                                              in dB, Sub, Bass, Mids, Highs, Air; --watch then also prints its gains)
 //   --render-file IN OUT [--steps 5] [--advanced] [--steps-at "4:8,8:-5"] [--tone-amount 0.5] [--tone-at "2:1,4:-1"]
-//                [--tone-db 6,-6]              shifts a sound file with the app's own code (normal or advanced)
+//                [--tone-db 6,-6] [--auto-eq] [--eq-offsets 0,0,0,0,0]
+//                                              shifts a sound file with the app's own code (normal or advanced)
 import AppKit
 import AVFoundation
 import CoreAudio
@@ -73,6 +76,13 @@ let toneChanges: [(Double, Float)] = (arg("--tone-at") ?? "").split(separator: "
     guard parts.count == 2, let t = Double(parts[0]), let value = parseTilt(parts[1]) else { return nil }
     return (t, value)
 }
+
+// --auto-eq: Advanced processing's Auto EQ on. --eq-offsets "a,b,c,d,e": its manual offsets in dB (Sub, Bass, Mids,
+// Highs, Air; −12 … 12; missing ones are 0).
+let autoEQArg: (on: Bool, offsets: [Double]) = {
+    let given = (arg("--eq-offsets") ?? "").split(separator: ",").compactMap { Double($0) }.filter(\.isFinite).map { max(-12, min(12, $0)) }
+    return (args.contains("--auto-eq"), Array((given + AdvancedProcessor.noOffsets).prefix(5)))
+}()
 
 func fourCC(_ value: UInt32) -> String {
     String(bytes: [24, 16, 8, 0].map { UInt8((value >> $0) & 0xFF) }, encoding: .ascii) ?? "\(value)"
@@ -163,7 +173,7 @@ if args.contains("--watch-output") {
 
 if let input = arg("--render-file") {
     let i = args.firstIndex(of: "--render-file")!
-    guard i + 2 < args.count else { print("usage: --render-file IN OUT [--steps N] [--advanced]"); exit(1) }
+    guard i + 2 < args.count else { print("usage: --render-file IN OUT [--steps N] [--advanced] [--auto-eq] [--eq-offsets a,b,c,d,e]"); exit(1) }
     // "4:8,8:-5" = at 4 s go to +8, at 8 s go to -5
     let changes: [(Double, Float)] = (arg("--steps-at") ?? "").split(separator: ",").compactMap { item in
         let parts = item.split(separator: ":")
@@ -174,7 +184,8 @@ if let input = arg("--render-file") {
     do {
         try renderFile(input: input, output: args[i + 2], halfSteps: arg("--steps").flatMap(Float.init) ?? 2,
                        advanced: args.contains("--advanced"), changes: changes,
-                       tone: toneDbArg ?? AdvancedProcessor.toneDb(tilt: toneArg ?? 0), toneChanges: toneChanges)
+                       tone: toneDbArg ?? AdvancedProcessor.toneDb(tilt: toneArg ?? 0), toneChanges: toneChanges,
+                       autoEQ: autoEQArg)
         print(String(format: "wrote %@ (%.1f s)", args[i + 2], Date().timeIntervalSince(started)))
         exit(0)
     } catch {
@@ -212,6 +223,8 @@ if args.contains("--test") {
     shifter.testOutputKey = arg("--as-device")
     shifter.fixedToneDb = toneDbArg
     if let toneArg { shifter.setTone(toneArg, for: shifter.outputKey) }
+    let showAutoEQ = autoEQArg.on || autoEQArg.offsets.contains { $0 != 0 }
+    if showAutoEQ { shifter.setAutoEQ(on: autoEQArg.on, offsets: autoEQArg.offsets) }
     for (t, value) in toneChanges {
         DispatchQueue.main.asyncAfter(deadline: .now() + t) { shifter.setTone(value, for: shifter.outputKey) }
     }
@@ -235,7 +248,12 @@ if args.contains("--test") {
     if args.contains("--watch") {  // print the delay every half second
         let started = Date()
         Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
-            print(String(format: "%5.1fs  ", Date().timeIntervalSince(started)) + shifter.timing)
+            var line = String(format: "%5.1fs  ", Date().timeIntervalSince(started)) + shifter.timing
+            if showAutoEQ, let eq = shifter.autoEQReadout {
+                line += "  auto EQ dB" + eq.auto.map { String(format: " %+.1f", $0) }.joined() +
+                    "  levels" + eq.level.map { String(format: " %.0f", $0) }.joined()
+            }
+            print(line)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { finish() }
         RunLoop.main.run()
