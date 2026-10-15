@@ -18,6 +18,7 @@ final class VoiceRing {
     private var fresh = true           // just started: the first fill may overshoot, so trim it
     private var played = 0             // samples sent since the start (how far back a replay may reach)
     let startCushion: Int              // sound kept beyond one callback when sending starts
+    private let changeCushion: Int     // sound kept waiting when the amount starts to change
     private(set) var margin: Int       // sound kept beyond one callback at the lowest point
     private let marginStep: Int
     private let marginMax: Int
@@ -27,7 +28,7 @@ final class VoiceRing {
     private var lowest = Int.max       // least sound left over after a callback, since the last check
     private var recent: [Int]          // the last few checks' lowest points (2 s)
     private var recentCount = 0
-    private var settling = 0           // samples left in the unsteady moment after an amount change
+    private var settling = 0           // samples left in the unsteady time after an amount change
     private let fade: Int              // length of fades and crossfades
     private var fadeIn = 0
     private var crossfade = 0          // samples of crossfade left
@@ -43,6 +44,7 @@ final class VoiceRing {
         buffer = .allocate(capacity: size)
         buffer.initialize(repeating: 0, count: size)
         startCushion = Int(rate * 0.02)
+        changeCushion = Int(rate * 0.012)
         margin = Int(rate * 0.002)
         marginStep = Int(rate * 0.002)
         marginMax = Int(rate * 0.02)
@@ -101,7 +103,7 @@ final class VoiceRing {
         recentCount += 1
         lowest = .max
         sinceCheck = 0
-        guard recentCount >= recent.count, crossfade == 0 else { return }
+        guard recentCount >= recent.count, crossfade == 0, settling == 0 else { return }
         let least = recent.min()!
         if least > margin + slack {
             trim(least - margin)
@@ -109,9 +111,12 @@ final class VoiceRing {
         }
     }
 
-    // The amount changed: Rubber Band hands sound back at a new pace for a moment, so watch the lowest point anew.
+    // The amount changed (or "Deeper when slow" is moving the pitch): Rubber Band hands sound back at a new pace for
+    // a moment and can pause briefly (most of all when the pitch leaves exactly 0). At the start of a change, top the
+    // waiting sound up to `changeCushion` by replaying a little; the extra is dropped again once things are steady.
     func amountChanged() {
-        settling = checkEvery * 4
+        if settling == 0 && !waiting && crossfade == 0 && count < changeCushion { _ = replay(changeCushion - count) }
+        settling = checkEvery * 12  // nothing is trimmed until 6 s after the last change ("Deeper when slow" moves often)
         restartWatch()
     }
 
