@@ -1,27 +1,45 @@
 // Pitch Shift: plays an app's sound (or all sound) and/or your voice at a higher or lower pitch, live.
 // Checks from Terminal (inside "Pitch Shift.app/Contents/MacOS/PitchShift"):
-//   --list                                     sound devices (and which are in use), Pitch Shift Mic, and which app each
+//   --list                                     sound devices (with model UIDs; and which are in use), Pitch Shift Mic,
+//                                              the saved Bass ↔ Treble per output, the voice's mic, and which app each
 //                                              sound process belongs to
-// The device tests (--test, --test-voice, --test-button, --test-default-mic) refuse to start while Pitch Shift Mic,
-// the built-in mic or a Bluetooth mic is in use by another app (for example a call), or the Pitch Shift app is open.
+//   --watch-output [--seconds 10]              once a second: the output's sample rate (Bluetooth call mode shows
+//                                              8000-24000 Hz), its own mic, and which apps record from which devices
+// The device tests (--test, --test-voice, --test-button, --test-sounds, --test-default-mic) refuse to start while Pitch
+// Shift Mic, the built-in mic or a Bluetooth mic is in use by another app (for example a call), or the Pitch Shift app
+// is open.
 //   --test [--pid N | --app BUNDLE_ID | --all] [--steps 2.5] [--seconds S]     "What you hear" for a few seconds
 //   --test-voice [--mic NAME] [--tone 440 | --file F] [--steps 3] [--cartoon | --cartoon-amount 0.5] [--seconds S]
-//                [--out F.caf] [--watch] [--buffer N]
+//                [--slow-deeper] [--out F.caf] [--watch] [--buffer N]
 //                                              sends a tone or file through the voice chain and records Pitch Shift Mic
-//                                              (voice style from 0 = Natural, the default, to 1 = Cartoon; --cartoon = 1).
+//                                              (voice style from 0 = Natural, the default, to 1 = Cartoon; --cartoon = 1;
+//                                              --slow-deeper turns on "Deeper when slow" and prints the speaking rate
+//                                              and the extra shift once a second).
 //                                              --watch: the tone plays for half of every second; once a second it prints
 //                                              the sound waiting to go out, the dry-outs/trims/replays and the delay from
 //                                              the mic to Pitch Shift Mic (the delay parts are printed at the start).
 //                                              --buffer N: callback size to ask for (default 128, or 256 above 48 kHz)
-//   --render-voice IN OUT [--steps 3] [--cartoon | --cartoon-amount 0.5] [--cartoon-at "1:1,2:0"]
+//   --render-voice IN OUT [--steps 3] [--cartoon | --cartoon-amount 0.5] [--cartoon-at "1:1,2:0"] [--slow-deeper]
 //                                              shifts a sound file with the voice's own settings (offline, no devices;
 //                                              --cartoon-at "1:1,2:0" moves the style to 1 at 1 s and back to 0 at 2 s)
 //   --test-button [--mic NAME] [--volume 0.03] presses Test with a quiet tone as the voice (record 5 s, play back)
-//   --test ... --advanced [--record-out F.wav] [--steps-at "3:8,6:-5"]
+//   --test-sounds FILE [--speakers] [--seconds S] [--out F.caf] [--mic NAME] [--steps 3] [--volume 0.05] [--hear 0.02]
+//                                              Soundboard: plays FILE into Pitch Shift Mic 1 s in, with a quiet tone as
+//                                              the voice, records Pitch Shift Mic and checks it (one copy of the sound,
+//                                              its level; --speakers: as if on the Mac's speakers, so the voice must
+//                                              stop while it plays). --hear: also play it here at that volume.
+//                                              --recording F.caf: check a recording saved with --out (no devices).
+//                                              --stop-after S: press Stop S seconds after the sound starts.
+//                                              --hear-out F.caf: save the owner's copy (with --hear).
+//   --test ... --advanced [--record-out F.wav] [--steps-at "3:8,6:-5"] [--tone-amount 0.5] [--tone-at "2:1,4:-1"]
+//              [--as-device UID] [--tone-db 6,-6]
 //                                              "What you hear" with Advanced processing on (--watch prints the delay;
-//                                              --record-out saves what it played; --steps-at changes the amount live)
-//   --render-file IN OUT [--steps 5] [--advanced] [--steps-at "4:8,8:-5"]
-//                                              shifts a sound file with the app's own code (normal or advanced)
+//                                              --record-out saves what it played; --steps-at changes the amount live;
+//                                              --tone-amount sets the Bass ↔ Treble slider, −1 … 1, for the output;
+//                                              --tone-at moves it live; --as-device uses that device's saved Bass ↔
+//                                              Treble as if it were playing; --tone-db sets bass and treble in dB)
+//   --render-file IN OUT [--steps 5] [--advanced] [--steps-at "4:8,8:-5"] [--tone-amount 0.5] [--tone-at "2:1,4:-1"]
+//                [--tone-db 6,-6]              shifts a sound file with the app's own code (normal or advanced)
 import AppKit
 import AVFoundation
 import CoreAudio
@@ -31,10 +49,11 @@ func arg(_ name: String) -> String? {
     guard let i = args.firstIndex(of: name), i + 1 < args.count else { return nil }
     return args[i + 1]
 }
-// --preview STATES [--size 800x400] [--cartoon-amount 0.5]: show the window in a state for screenshots, without
-// touching any sound or settings, and without switching apps (states: hear-on, voice-on, waiting, typing, recording,
-// playing, listening, hover, menu, roll, resize, no-driver, advanced-alert, light; --cartoon-amount sets the voice
-// style slider).
+// --preview STATES [--size 800x400] [--cartoon-amount 0.5] [--tone-amount -0.4]: show the window in a state for
+// screenshots, without touching any sound or settings, and without switching apps (states: hear-on, voice-on, waiting,
+// typing, recording, playing, listening, hover, menu, roll, resize, no-driver, advanced-alert, sounds, light, tone,
+// slow; --cartoon-amount sets the voice style slider; sounds opens the Soundboard with example names; "tone" shows
+// Advanced processing on, and --tone-amount sets the Bass ↔ Treble slider; slow turns on "Deeper when slow").
 let preview = arg("--preview")
 
 var signalSources: [DispatchSourceSignal] = []
@@ -48,6 +67,21 @@ func onQuitSignals(_ handler: @escaping () -> Void) {
     }
 }
 
+// --tone-db "B,T": Advanced processing's bass and treble in dB (not --tone, which is a frequency in --test-voice).
+let toneDbArg: (bass: Double, treble: Double)? = {
+    let parts = (arg("--tone-db") ?? "").split(separator: ",").compactMap { Double($0) }
+    return parts.count == 2 ? (parts[0], parts[1]) : nil
+}()
+// --tone-amount T: the Bass ↔ Treble slider, −1 (more bass) … 0 (middle) … 1 (more treble). In --preview it sets
+// where the slider is. --tone-at "2:1,4:-1": moves it to 1 at 2 s, then to −1 at 4 s.
+func parseTilt(_ text: Substring) -> Float? { Float(text).flatMap { $0.isFinite ? max(-1, min(1, $0)) : nil } }
+let toneArg: Float? = arg("--tone-amount").flatMap { parseTilt(Substring($0)) }
+let toneChanges: [(Double, Float)] = (arg("--tone-at") ?? "").split(separator: ",").compactMap { item in
+    let parts = item.split(separator: ":")
+    guard parts.count == 2, let t = Double(parts[0]), let value = parseTilt(parts[1]) else { return nil }
+    return (t, value)
+}
+
 func fourCC(_ value: UInt32) -> String {
     String(bytes: [24, 16, 8, 0].map { UInt8((value >> $0) & 0xFF) }, encoding: .ascii) ?? "\(value)"
 }
@@ -55,6 +89,8 @@ func fourCC(_ value: UInt32) -> String {
 // Voice style from the command line: --cartoon = 1 (Cartoon), --cartoon-amount X (0 = Natural ... 1 = Cartoon).
 // In --preview it sets where the slider is.
 let cartoonArg: Float? = args.contains("--cartoon") ? 1 : arg("--cartoon-amount").flatMap(Float.init).map { max(0, min(1, $0)) }
+// "Deeper when slow" on, for --test-voice and --render-voice.
+let slowDeeperArg = args.contains("--slow-deeper")
 
 // The watchdog: a second copy of the app that gives the real mic back if the app ends without doing it.
 if let pid = arg("--watchdog").flatMap({ pid_t($0) }) { DefaultMic.watch(pid) }
@@ -82,7 +118,8 @@ func refuseIfMicsBusy() {
         exit(2)
     }
 }
-if ["--test", "--test-voice", "--test-button", "--test-default-mic"].contains(where: { args.contains($0) }) { refuseIfMicsBusy() }
+if ["--test", "--test-voice", "--test-button", "--test-default-mic"].contains(where: { args.contains($0) })
+    || (args.contains("--test-sounds") && !args.contains("--recording")) { refuseIfMicsBusy() }
 
 // Makes Pitch Shift Mic the default mic and then waits, so a test can force-quit it and check the watchdog.
 if args.contains("--test-default-mic") {
@@ -97,7 +134,16 @@ if args.contains("--list") {
     print("Devices:")
     for id in allDevices() {
         let flags = (id == out ? " [default output]" : "") + (id == inp ? " [default input]" : "") + (isRunningSomewhere(id) ? " [in use]" : "")
-        print("  \(id) \(deviceName(id)) | \(deviceUID(id)) | \(Int(nominalRate(id))) Hz | \(fourCC(transportType(id))) | in \(streamCount(id, kAudioDevicePropertyScopeInput)) out \(streamCount(id, kAudioDevicePropertyScopeOutput))\(flags)")
+        let model = modelUID(id)
+        print("  \(id) \(deviceName(id)) | \(deviceUID(id)) | model \(model.isEmpty ? "-" : model) | \(Int(nominalRate(id))) Hz | \(fourCC(transportType(id))) | in \(streamCount(id, kAudioDevicePropertyScopeInput)) out \(streamCount(id, kAudioDevicePropertyScopeOutput))\(flags)")
+    }
+    // The Bass ↔ Treble slider (Advanced processing), as saved for each speakers or headphones (read only).
+    let tones = AppDelegate.savedTones(UserDefaults.standard)
+    print("Bass ↔ Treble saved per output (-1 bass … 1 treble):\(tones.isEmpty ? " none" : "")")
+    for (uid, tilt) in tones.sorted(by: { $0.key < $1.key }) {
+        let id = device(uid: uid)
+        let name = id.map { deviceName($0) } ?? "not connected"
+        print(String(format: "  %@ (%@): %.2f", uid, name, tilt) + (id == out ? " [default output]" : ""))
     }
     if let mic = Mics.virtualMic, let feed = Mics.virtualFeed {
         print("Pitch Shift Mic: \(mic) (\(Int(nominalRate(mic))) Hz, in use: \(isRunningSomewhere(mic))), hidden feed: \(feed) (hidden: \(getValue(feed, kAudioDevicePropertyIsHidden, default: UInt32(0)) != 0))")
@@ -105,6 +151,12 @@ if args.contains("--list") {
         print("Pitch Shift Mic: not installed")
     }
     print("Microphones to choose from: \(Mics.list().map(\.name))")
+    let picked = Mics.choose(nil)
+    let why = picked.skipped.map { " (skipped headset mic of the current output: \(deviceName($0)))" } ?? ""
+    print("Voice mic (default): \(picked.mic.map(deviceName) ?? "none")\(why)")
+    if let saved = UserDefaults.standard.string(forKey: Keys.voiceMic) {
+        print("Voice mic (picked in the app): \(Mics.resolve(saved).map(deviceName) ?? "none") (saved: \(saved))")
+    }
     print("Sound processes:")
     for process in getArray(system, kAudioHardwarePropertyProcessObjectList, of: AudioObjectID.self) {
         let pid = getValue(process, kAudioProcessPropertyPID, default: pid_t(-1))
@@ -115,6 +167,32 @@ if args.contains("--list") {
     }
     print("Apps in the list: \(Apps.scan().map { "\($0.name)\($0.isPlaying ? " (playing)" : "")" })")
     exit(0)
+}
+
+// Read only: once a second, the sound output's sample rate and streams, its own mic (Bluetooth headphones), and
+// every app that is recording and from which devices. Headphones in call mode show 8000-24000 Hz.
+if args.contains("--watch-output") {
+    let seconds = arg("--seconds").flatMap(Double.init) ?? 10
+    let started = Date()
+    func show() {
+        let out = defaultOutput()
+        var line = String(format: "%4.1fs  ", Date().timeIntervalSince(started))
+        line += "output \(deviceName(out)): \(Int(nominalRate(out))) Hz, in \(streamCount(out, kAudioDevicePropertyScopeInput)) out \(streamCount(out, kAudioDevicePropertyScopeOutput))"
+        if let mic = Mics.headsetMic(of: out) { line += " | its mic: \(Int(nominalRate(mic))) Hz, open: \(isRunningSomewhere(mic))" }
+        for process in getArray(system, kAudioHardwarePropertyProcessObjectList, of: AudioObjectID.self)
+        where getValue(process, kAudioProcessPropertyIsRunningInput, default: UInt32(0)) != 0 {
+            let pid = getValue(process, kAudioProcessPropertyPID, default: pid_t(-1))
+            let devices = getArray(process, kAudioProcessPropertyDevices, kAudioObjectPropertyScopeInput, of: AudioObjectID.self)
+            let bundleID = getString(process, kAudioProcessPropertyBundleID)
+            let name = bundleID.isEmpty ? Apps.ownerApp(of: pid)?.localizedName ?? "?" : bundleID
+            line += " | recording: \(name) (pid \(pid)) from \(devices.map { "\($0) \(deviceName($0))" })"
+        }
+        print(line)
+        if Date().timeIntervalSince(started) + 0.5 >= seconds { exit(0) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { show() }
+    }
+    show()
+    dispatchMain()
 }
 
 if let input = arg("--render-file") {
@@ -129,7 +207,8 @@ if let input = arg("--render-file") {
     let started = Date()
     do {
         try renderFile(input: input, output: args[i + 2], halfSteps: arg("--steps").flatMap(Float.init) ?? 2,
-                       advanced: args.contains("--advanced"), changes: changes)
+                       advanced: args.contains("--advanced"), changes: changes,
+                       tone: toneDbArg ?? AdvancedProcessor.toneDb(tilt: toneArg ?? 0), toneChanges: toneChanges)
         print(String(format: "wrote %@ (%.1f s)", args[i + 2], Date().timeIntervalSince(started)))
         exit(0)
     } catch {
@@ -140,7 +219,7 @@ if let input = arg("--render-file") {
 
 if let input = arg("--render-voice") {
     let i = args.firstIndex(of: "--render-voice")!
-    guard i + 2 < args.count else { print("usage: --render-voice IN OUT [--steps N] [--cartoon-amount X]"); exit(1) }
+    guard i + 2 < args.count else { print("usage: --render-voice IN OUT [--steps N] [--cartoon-amount X] [--slow-deeper]"); exit(1) }
     // "1:1,2:0" = at 1 s go to Cartoon, at 2 s back to Natural
     let changes: [(Double, Float)] = (arg("--cartoon-at") ?? "").split(separator: ",").compactMap { item in
         let parts = item.split(separator: ":")
@@ -149,7 +228,7 @@ if let input = arg("--render-voice") {
     }
     do {
         try renderVoiceFile(input: input, output: args[i + 2], halfSteps: arg("--steps").flatMap(Float.init) ?? 3,
-                            cartoon: cartoonArg ?? 0, changes: changes)
+                            cartoon: cartoonArg ?? 0, changes: changes, slowDeeper: slowDeeperArg)
         print("wrote \(args[i + 2])")
         exit(0)
     } catch {
@@ -160,8 +239,16 @@ if let input = arg("--render-voice") {
 
 if args.contains("--test") {
     let source: HearSource = args.contains("--all") ? .all : HearSource(saved: arg("--app") ?? "com.apple.Music")
-    let shifter = HearShifter(halfSteps: arg("--steps").flatMap(Float.init) ?? 2, source: source, advanced: args.contains("--advanced"))
+    // Uses the saved Bass ↔ Treble for the output, like the app (only read; --tone-amount changes it for this test).
+    let shifter = HearShifter(halfSteps: arg("--steps").flatMap(Float.init) ?? 2, source: source, advanced: args.contains("--advanced"),
+                              tones: AppDelegate.savedTones(UserDefaults.standard))
     shifter.testPID = arg("--pid").flatMap { pid_t($0) }
+    shifter.testOutputKey = arg("--as-device")
+    shifter.fixedToneDb = toneDbArg
+    if let toneArg { shifter.setTone(toneArg, for: shifter.outputKey) }
+    for (t, value) in toneChanges {
+        DispatchQueue.main.asyncAfter(deadline: .now() + t) { shifter.setTone(value, for: shifter.outputKey) }
+    }
     let seconds = arg("--seconds").flatMap(Double.init) ?? 3
     // --record-out F (Advanced processing only): saves what it played. --steps-at "2:8,4:-5": change the amount live.
     let recordPath = arg("--record-out")
@@ -194,7 +281,7 @@ if args.contains("--test") {
 if args.contains("--test-voice") {
     let steps = arg("--steps").flatMap(Float.init) ?? 3
     let micUID = arg("--mic").flatMap { name in Mics.list().first { $0.name == name }?.uid }
-    let voice = VoiceShifter(halfSteps: steps, cartoon: cartoonArg ?? 0, micUID: micUID)
+    let voice = VoiceShifter(halfSteps: steps, cartoon: cartoonArg ?? 0, slowDeeper: slowDeeperArg, micUID: micUID)
     guard let mic = voice.currentMic, let virtualMic = Mics.virtualMic else { print("No mic or Pitch Shift Mic not installed"); exit(1) }
     let rate = nominalRate(mic)
     let seconds = arg("--seconds").flatMap(Double.init) ?? 3
@@ -247,6 +334,7 @@ if args.contains("--test-voice") {
     }
     onQuitSignals { voice.stop(); exit(0) }
     voice.start()
+    voice.hold(true)  // runs the chain like the Test button does (no app is listening yet)
     guard let chain = voice.chain else { print("voice did not start: \(voice.state)"); exit(1) }
     let recorder = try! Recorder(device: virtualMic, seconds: seconds)
     var delays: [Double] = []  // --watch: mic to Pitch Shift Mic, once per tone start (ms)
@@ -290,6 +378,15 @@ if args.contains("--test-voice") {
             if Date().timeIntervalSince(started) < seconds - 0.5 { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { look() } }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { look() }
+    }
+    if slowDeeperArg {  // once a second: the speaking rate and the extra shift in use
+        let started = Date()
+        func report() {
+            let reading = chain.slowReading.withLock { $0 }
+            print(String(format: "%4.1fs  rate %.1f syllables/s  extra %+.1f half-steps", Date().timeIntervalSince(started), reading.rate, reading.extra))
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { report() }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { report() }
     }
     DispatchQueue.main.asyncAfter(deadline: .now() + seconds + 0.2) {
         let recorded = recorder.finish()
@@ -350,12 +447,112 @@ if args.contains("--test-button") {
     let started = Date()
     test.onChange = {
         let silent = voice.params.withLock { $0.silent }
-        print(String(format: "%.1fs: %@ (voice %@, sending silence: %@)", Date().timeIntervalSince(started), "\(test.phase)", "\(voice.state)", "\(silent)"))
+        print(String(format: "%.1fs: %@ (voice %@, sending silence: %@, real mic open: %@)", Date().timeIntervalSince(started), "\(test.phase)",
+                     "\(voice.state)", "\(silent)", "\(voice.chain != nil)"))
         if test.phase == .idle { voice.stop(); exit(0) }
     }
     voice.start()
+    print("mic: \(voice.currentMic.map(deviceName) ?? "none")")
     test.click()
     DispatchQueue.main.asyncAfter(deadline: .now() + 15) { print("timed out"); exit(1) }
+    dispatchMain()
+}
+
+// Soundboard check: a quiet tone is the voice, FILE plays into Pitch Shift Mic 1 s in, Pitch Shift Mic is recorded.
+if let path = arg("--test-sounds") {
+    let steps = arg("--steps").flatMap(Float.init) ?? 3
+    let toneHz = 440.0
+    // --recording F.caf: checks a recording saved earlier with --out (no devices are used).
+    if let saved = arg("--recording") {
+        guard let file = try? AVAudioFile(forReading: URL(fileURLWithPath: saved)),
+              let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length)),
+              (try? file.read(into: buffer)) != nil,
+              let reference = try? SoundClip(url: URL(fileURLWithPath: path), rate: file.processingFormat.sampleRate) else {
+            print("Can't read \(saved) or \(path)")
+            exit(1)
+        }
+        let recorded = Array(UnsafeBufferPointer(start: buffer.floatChannelData![0], count: Int(buffer.frameLength)))
+        let samples = Array(UnsafeBufferPointer(start: reference.samples, count: reference.count))
+        soundTestReport(recorded: recorded, reference: samples, rate: reference.rate,
+                        toneHz: toneHz * pow(2, Double(steps) / 12)).forEach { print($0) }
+        exit(0)
+    }
+    let micUID = arg("--mic").flatMap { name in Mics.list().first { $0.name == name }?.uid }
+    let voice = VoiceShifter(halfSteps: steps, cartoon: 0, micUID: micUID)
+    guard let mic = voice.currentMic, let virtualMic = Mics.virtualMic else { print("No mic or Pitch Shift Mic not installed"); exit(1) }
+    let rate = nominalRate(mic)
+    let volume = arg("--volume").flatMap(Double.init) ?? 0.05
+    var phase = 0.0
+    voice.testSource = { buffer, frames in
+        for i in 0..<frames { buffer[i] = Float(volume * sin(phase)); phase += 2 * .pi * toneHz / rate }
+    }
+    let board = Soundboard(voice: voice, files: [], saves: false)
+    board.speakers = args.contains("--speakers")
+    board.hearVolume = arg("--hear").flatMap(Float.init) ?? 0
+    // --hear-out: the owner's copy, as its player makes it (collected on the main thread).
+    var heard: [Float] = []
+    var heardRate = 0.0
+    if arg("--hear-out") != nil {
+        board.hearTap = { buffer, _ in
+            guard let data = buffer.floatChannelData else { return }
+            let piece = Array(UnsafeBufferPointer(start: data[0], count: Int(buffer.frameLength)))
+            let rate = buffer.format.sampleRate
+            DispatchQueue.main.async { heard += piece; heardRate = rate }
+        }
+    }
+    board.ready = board.hearVolume > 0  // like the open Soundboard: the owner's player is already running
+    let url = URL(fileURLWithPath: path)
+    let clip: SoundClip
+    do { clip = try SoundClip(url: url, rate: rate) } catch { print("Can't read \(path)"); exit(1) }
+    let seconds = arg("--seconds").flatMap(Double.init) ?? (1 + clip.seconds + 2)
+    let started = Date()
+    board.onChange = {
+        print(String(format: "%.2fs: %@", Date().timeIntervalSince(started), board.playing.map { "playing \($0)" } ?? "stopped"))
+    }
+    onQuitSignals { voice.stop(); exit(0) }
+    voice.start()
+    voice.hold(true)  // runs the chain like the Test button does (no app is listening yet)
+    guard let chain = voice.chain else { print("voice did not start: \(voice.state)"); exit(1) }
+    let recorder = try! Recorder(device: virtualMic, seconds: seconds)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+        let asked = Date()
+        board.play(clip, as: url.lastPathComponent)
+        if board.hearVolume > 0 { print(String(format: "the owner's copy took %.0f ms to start", Date().timeIntervalSince(asked) * 1000)) }
+    }
+    if let stopAfter = arg("--stop-after").flatMap(Double.init) {  // presses Stop part way through
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1 + stopAfter) { board.stop() }
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + seconds + 0.2) {
+        let recorded = recorder.finish()
+        voice.stop()
+        print(String(format: "sound test: file=%@ (%.2f s) mic=%@ rate=%d steps=%g speakers=%@ tone=%g",
+                     url.lastPathComponent, clip.seconds, chain.micName, Int(chain.sampleRate), steps,
+                     board.speakers == true ? "yes" : "no", volume))
+        // The file as the chain plays it, at the recording's rate.
+        let reference = recorder.sampleRate == clip.rate ? clip : (try? SoundClip(url: url, rate: recorder.sampleRate))
+        if let reference {
+            let samples = Array(UnsafeBufferPointer(start: reference.samples, count: reference.count))
+            let shifted = toneHz * pow(2, Double(steps) / 12)
+            soundTestReport(recorded: recorded, reference: samples, rate: recorder.sampleRate, toneHz: shifted).forEach { print($0) }
+        }
+        if let out = arg("--out"), let format = AVAudioFormat(standardFormatWithSampleRate: recorder.sampleRate, channels: 1),
+           let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(recorded.count)) {
+            buffer.frameLength = AVAudioFrameCount(recorded.count)
+            for (i, x) in recorded.enumerated() { buffer.floatChannelData![0][i] = x }
+            if (try? AVAudioFile(forWriting: URL(fileURLWithPath: out), settings: format.settings).write(from: buffer)) != nil {
+                print("wrote \(out)")
+            }
+        }
+        if let out = arg("--hear-out"), heardRate > 0, let format = AVAudioFormat(standardFormatWithSampleRate: heardRate, channels: 1),
+           let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(max(1, heard.count))) {
+            buffer.frameLength = AVAudioFrameCount(heard.count)
+            for (i, x) in heard.enumerated() { buffer.floatChannelData![0][i] = x }
+            if (try? AVAudioFile(forWriting: URL(fileURLWithPath: out), settings: format.settings).write(from: buffer)) != nil {
+                print("wrote \(out) (the owner's copy)")
+            }
+        }
+        exit(0)
+    }
     dispatchMain()
 }
 
