@@ -1,6 +1,6 @@
 # Pitch Shift
 
-Change the pitch of **what you hear** (any app, like Spotify, Apple Music or YouTube) and of **your voice** (as a mic called "Pitch Shift Mic" for Discord, Zoom and others), live. For Mac, and Windows (beta).
+Change the pitch of **what you hear** (any app, like Spotify, Apple Music or YouTube) and of **your voice** (as a mic called "Pitch Shift Mic" for Discord, Zoom and others), live, or turn your voice into a woman's or a man's (Mac). For Mac, and Windows (beta).
 
 ## Install on a Mac
 
@@ -57,7 +57,14 @@ More help: [windows/README.md](windows/README.md).
 - The Soundboard works with **Your voice** off too: your mic then goes into the call unchanged.
 - Use headphones in calls. If your voice cuts out, turn off the call app's noise suppression (like Krisp).
 
-Both can be on at the same time. Closing the window keeps Pitch Shift running. Quit it with ⌘Q.
+**Voice changer** (Mac)
+
+- Turn it on and pick **Woman** (for a man's voice) or **Man** (for a woman's voice). It turns on **Your voice** too.
+- Slide from **Light** to **Full** to choose how strong the change is.
+- Turn on **Realistic** for an AI voice that sounds more like a real person (Macs with Apple silicon). It adds about a quarter of a second of delay. The first time, it takes up to half a minute to get ready; the plain voice changer plays meanwhile.
+- While a voice is on, it sets your pitch: the amount and the **Natural**…**Cartoon** slider are not used. **Deeper when slow**, **Test** and the Soundboard still work.
+
+All of them can be on at the same time. Closing the window keeps Pitch Shift running. Quit it with ⌘Q.
 
 ## If something goes wrong
 
@@ -87,7 +94,11 @@ brew install rubberband
 - **Advanced processing:** going up, the bass is shifted an octave less so it stays bass; going down, the song's very top is kept; and a slow tone control keeps the song's overall balance like the original's. Details: [notes/advanced-processing-research.md](notes/advanced-processing-research.md).
 - **Your voice:** your mic goes through Rubber Band's low-delay live shifter into "Pitch Shift Mic", a virtual mic built from [BlackHole](https://github.com/ExistentialAudio/BlackHole) that comes with Pitch Shift (you don't need to install BlackHole). It only runs while an app is listening to Pitch Shift Mic.
 - **Soundboard:** sounds are added to Pitch Shift Mic after your voice, at their normal pitch and an even loudness; each sound also has its own volume (0–150%). On your Mac's own speakers, your mic is muted while a sound plays, so the call never hears it twice.
+- **Voice changer:** Pitch Shift follows the pitch of your voice and moves it to a typical woman's or man's pitch (about 200 or 112 Hz, keeping your ups and downs), and Rubber Band also changes the shape of the voice (its formants) the way a smaller or larger throat would. A light tone control then moves the sound toward the average woman's or man's voice. It adds no delay.
+- **Realistic voice changer:** an AI voice model (RVC v2 with the ContentVec speech reader) says your words again in the new voice. It runs on your Mac with Core ML (nothing goes online), only on Apple silicon, and waits about 0.28 s to have enough of your voice to work with. If it ever falls behind, the plain voice changer fills in, so the call never hears silence or your own voice. The voices are blends of 8 speakers each from a public speech collection (VCTK), not copies of a real person. Details: [notes/voice-changer-plan.md](notes/voice-changer-plan.md).
 
 ## Credits and license
 
 GPL-3.0-or-later. See [LICENSE](LICENSE). Pitch Shift uses Rubber Band by Breakfast Quay (GPL). On Mac it also uses libsamplerate by Erik de Castro Lopo (BSD-2-Clause), and BlackHole by Existential Audio (GPL-3) for Pitch Shift Mic.
+
+The voice changer's Woman and Man voices are made from the CSTR VCTK Corpus 0.92 (Centre for Speech Technology Research, University of Edinburgh, [CC BY 4.0](https://datashare.ed.ac.uk/handle/10283/3443)). Realistic mode uses [RVC v2](https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI) and its pretrained models (MIT) and [ContentVec](https://github.com/auspicious3000/contentvec) (MIT). Details: [voices/CREDITS.txt](voices/CREDITS.txt).
