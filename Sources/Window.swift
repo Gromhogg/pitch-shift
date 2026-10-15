@@ -351,6 +351,300 @@ final class GradientSlider: NSView {
     }
 }
 
+// One of Auto EQ's five sections (Sub, Bass, Mids, Highs or Air): a thin upright slider with its name under it. The
+// knob shows the section's gain now, from −15 dB (bottom) through 0 (the middle mark) to +15 dB (top): the automatic
+// part, which moves on its own while music plays, plus the owner's offset. A bar in the section's color runs from the
+// middle mark to the knob. Dragging the knob sets the offset (−12 … 12 dB, back to 0 when close to it); a
+// double-click puts it back to 0; with "Keyboard navigation" on, ↑ ↓ move it 1 dB.
+final class EQBand: NSView {
+    static let most: Float = 15  // the sound processing keeps the automatic gain plus the offset within ±15 dB
+    var onChange: (Float) -> Void = { _ in }  // the new offset
+    private let name: String
+    private let color: NSColor
+    var isEnabled = true {
+        didSet {
+            guard oldValue != isEnabled else { return }
+            if !isEnabled && window?.firstResponder === self { window?.makeFirstResponder(nil) }
+            needsDisplay = true
+        }
+    }
+    var auto: Float = 0 { didSet { if oldValue != auto { changed() } } }      // the automatic gain now, in dB
+    var offset: Float = 0 { didSet { if oldValue != offset { changed() } } }  // the owner's offset, in dB
+    // Sizes for the window's scale (1 = smallest window).
+    var scale: CGFloat = 1 {
+        didSet {
+            guard oldValue != scale else { return }
+            invalidateIntrinsicContentSize()
+            noteFocusRingMaskChanged()
+            needsDisplay = true
+        }
+    }
+    private var grab: CGFloat?  // where on the knob the mouse took hold (so the knob doesn't jump)
+
+    init(name: String, color: NSColor) {
+        self.name = name
+        self.color = color
+        super.init(frame: NSRect(x: 0, y: 0, width: 36, height: 60))
+        setAccessibilityElement(true)
+        setAccessibilityRole(.slider)
+        setAccessibilityLabel(name)
+        setAccessibilityMinValue(NSNumber(value: -Self.most))
+        setAccessibilityMaxValue(NSNumber(value: Self.most))
+        changed()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    var total: Float { max(-Self.most, min(Self.most, auto + offset)) }
+
+    private func changed() {
+        setAccessibilityValue(NSNumber(value: total))
+        setAccessibilityValueDescription(String(format: "%+.1f dB, automatic %+.1f, yours %+.1f", total, auto, offset))
+        needsDisplay = true
+    }
+
+    // The knob and track: a little smaller than the other sliders' (bigger once the window is 1.3 times bigger).
+    private var large: Bool { Theme.controlSize(scale) == .large }
+    private var knobSize: CGFloat { large ? 16 : 12 }
+    private var trackWidth: CGFloat { large ? 5 : 4 }
+    private var labelFont: NSFont { .systemFont(ofSize: 11 + (scale - 1) * 2.5) }
+    private var labelHeight: CGFloat { (labelFont.ascender - labelFont.descender).rounded(.up) }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: (52 * scale).rounded() + 2 + labelHeight)
+    }
+
+    // The slider, above the name. `middle` is the 0 dB line; the knob's middle goes up to `reach` above and below it.
+    private var slider: NSRect {
+        NSRect(x: bounds.minX, y: bounds.minY + labelHeight + 2, width: bounds.width, height: max(0, bounds.height - labelHeight - 2))
+    }
+    var middle: CGFloat { slider.midY.rounded() }
+    private var reach: CGFloat { max(1, slider.height / 2 - knobSize / 2) }
+
+    private var track: NSRect {
+        NSRect(x: (bounds.midX - trackWidth / 2).rounded(), y: slider.minY + 1, width: trackWidth, height: max(0, slider.height - 2))
+    }
+
+    private var knob: NSRect {
+        let y = middle + CGFloat(total / Self.most) * reach
+        return NSRect(x: (bounds.midX - knobSize / 2).rounded(), y: (y - knobSize / 2).rounded(), width: knobSize, height: knobSize)
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let t = track, k = knob
+        let round = t.width / 2
+        NSColor.quaternaryLabelColor.withAlphaComponent(0.22).setFill()
+        NSBezierPath(roundedRect: t, xRadius: round, yRadius: round).fill()
+
+        // The bar from the middle mark to the knob.
+        if abs(k.midY - middle) >= 1 {
+            color.withAlphaComponent(isEnabled ? 1 : 0.35).setFill()
+            let bar = NSRect(x: t.minX, y: min(middle, k.midY), width: t.width, height: abs(k.midY - middle))
+            NSBezierPath(roundedRect: bar, xRadius: round, yRadius: round).fill()
+        }
+
+        // The middle mark (0 dB): a short line each side of the track, inside the knob's width (so the knob covers it
+        // when it's there).
+        (isEnabled ? NSColor.secondaryLabelColor : NSColor.tertiaryLabelColor).setFill()
+        let side = knobSize / 2 - 1 - t.width / 2
+        NSBezierPath(rect: NSRect(x: t.minX - side, y: middle - 1, width: side, height: 2)).fill()
+        NSBezierPath(rect: NSRect(x: t.maxX, y: middle - 1, width: side, height: 2)).fill()
+
+        // The knob, like the other sliders': white, a soft shadow and a thin edge.
+        NSGraphicsContext.saveGraphicsState()
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor.black.withAlphaComponent(isEnabled ? 0.3 : 0.15)
+        shadow.shadowBlurRadius = 2
+        shadow.shadowOffset = NSSize(width: 0, height: -1)
+        shadow.set()
+        NSColor.white.withAlphaComponent(isEnabled ? 1 : 0.7).setFill()
+        NSBezierPath(ovalIn: k).fill()
+        NSGraphicsContext.restoreGraphicsState()
+        let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        (dark ? NSColor.white : NSColor.black).withAlphaComponent((dark ? 0.25 : 0.14) * (isEnabled ? 1 : 0.6)).setStroke()
+        let edge = NSBezierPath(ovalIn: k.insetBy(dx: 0.5, dy: 0.5))
+        edge.lineWidth = 1
+        edge.stroke()
+
+        // The name, centered under the slider; in the section's color while the owner's offset is in use.
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: labelFont,
+            .foregroundColor: !isEnabled ? NSColor.tertiaryLabelColor : offset != 0 ? color : NSColor.secondaryLabelColor]
+        let width = (name as NSString).size(withAttributes: attributes).width
+        (name as NSString).draw(at: NSPoint(x: (bounds.midX - width / 2).rounded(), y: bounds.minY), withAttributes: attributes)
+    }
+
+    // Reachable with Tab when "Keyboard navigation" is on in the Mac's settings (like the switches).
+    override var acceptsFirstResponder: Bool { isEnabled && NSApp.isFullKeyboardAccessEnabled }
+    override var focusRingMaskBounds: NSRect {
+        NSRect(x: (bounds.midX - knobSize / 2).rounded(), y: track.minY, width: knobSize, height: track.height)
+    }
+    override func drawFocusRingMask() {
+        let ring = focusRingMaskBounds
+        NSBezierPath(roundedRect: ring, xRadius: ring.width / 2, yRadius: ring.width / 2).fill()
+    }
+
+    override func keyDown(with event: NSEvent) {
+        guard isEnabled else { super.keyDown(with: event); return }
+        switch event.specialKey {
+        case .downArrow?: set(offset - 1)
+        case .upArrow?: set(offset + 1)
+        default: super.keyDown(with: event)
+        }
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard isEnabled else { return }
+        window?.makeFirstResponder(acceptsFirstResponder ? self : nil)  // also stops typing in a number
+        if event.clickCount > 1 { grab = nil; set(0); return }  // double-click: back to automatic
+        let point = convert(event.locationInWindow, from: nil)
+        let k = knob
+        guard point.y >= slider.minY - 2 || k.contains(point) else { grab = nil; return }  // a click on the name
+        grab = k.insetBy(dx: -4, dy: -2).contains(point) ? point.y - k.midY : 0
+        follow(point)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        guard grab != nil else { return }
+        follow(convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseUp(with event: NSEvent) { grab = nil }
+
+    // The knob goes where the mouse is: the offset is that place minus the automatic gain.
+    private func follow(_ point: NSPoint) {
+        let db = Float((point.y - (grab ?? 0) - middle) / reach) * Self.most
+        set(max(-Self.most, min(Self.most, db)) - auto)
+    }
+
+    override func accessibilityPerformIncrement() -> Bool {
+        guard isEnabled else { return false }
+        set(offset + 1)
+        return true
+    }
+
+    override func accessibilityPerformDecrement() -> Bool {
+        guard isEnabled else { return false }
+        set(offset - 1)
+        return true
+    }
+
+    // Steps of 0.5 dB from −12 to 12, and 0 (automatic) within 0.75 dB of it.
+    private func set(_ new: Float) {
+        let clean: Float = abs(new) < 0.75 ? 0 : max(-12, min(12, (new * 2).rounded() / 2))
+        guard clean != offset else { return }
+        offset = clean
+        onChange(clean)
+    }
+}
+
+// Auto EQ's five sections side by side (see EQBand), and a small Auto button at the right that puts all five back
+// to automatic (dimmed while they already are).
+final class AutoEQStrip: NSView {
+    var onChange: ([Float]) -> Void = { _ in }  // the owner's five offsets, Sub first
+    let bands: [EQBand]
+    let reset = NSButton(title: "Auto", target: nil, action: nil)
+    var isEnabled = true {
+        didSet {
+            bands.forEach { $0.isEnabled = isEnabled }
+            updateReset()
+        }
+    }
+    // Sizes for the window's scale (1 = smallest window).
+    var scale: CGFloat = 1 {
+        didSet {
+            guard oldValue != scale else { return }
+            bands.forEach { $0.scale = scale }
+            styleReset()
+            invalidateIntrinsicContentSize()
+            needsLayout = true
+        }
+    }
+
+    init() {
+        bands = AdvancedProcessor.sections.enumerated().map { i, name in
+            EQBand(name: name, color: Theme.purple.blended(withFraction: CGFloat(i) / 4, of: Theme.pink)!)
+        }
+        super.init(frame: NSRect(x: 0, y: 0, width: 232, height: 60))
+        setAccessibilityElement(true)
+        setAccessibilityRole(.group)
+        setAccessibilityLabel("Auto EQ")
+        setContentHuggingPriority(.defaultLow, for: .horizontal)
+        for band in bands {
+            band.onChange = { [weak self] _ in self?.changed() }
+            addSubview(band)
+        }
+        reset.bezelStyle = .rounded
+        reset.target = self
+        reset.action = #selector(resetAll)
+        reset.setAccessibilityLabel("All back to automatic")
+        addSubview(reset)
+        styleReset()
+        updateReset()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    var offsets: [Float] {
+        get { bands.map(\.offset) }
+        set {
+            for (band, value) in zip(bands, newValue) { band.offset = value }
+            updateReset()
+        }
+    }
+
+    // The automatic gains now (dB, Sub first). Tiny moves are skipped, so the sliders aren't redrawn for nothing.
+    var auto: [Float] {
+        get { bands.map(\.auto) }
+        set {
+            for (band, value) in zip(bands, newValue) where abs(band.auto - value) >= 0.05 || (value == 0 && band.auto != 0) {
+                band.auto = value
+            }
+        }
+    }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: bands[0].intrinsicContentSize.height)
+    }
+
+    // The five sliders share the width left of the Auto button, which sits level with their middle marks.
+    override func layout() {
+        super.layout()
+        let button = reset.intrinsicContentSize
+        let buttonWidth = max(button.width, (44 * scale).rounded())
+        let width = max(0, bounds.width - buttonWidth - (6 * scale).rounded()) / 5
+        for (i, band) in bands.enumerated() {
+            let left = (CGFloat(i) * width).rounded(), right = (CGFloat(i + 1) * width).rounded()
+            band.frame = NSRect(x: left, y: 0, width: right - left, height: bounds.height)
+        }
+        reset.frame = NSRect(x: bounds.maxX - buttonWidth, y: (bands[0].middle - button.height / 2).rounded(),
+                             width: buttonWidth, height: button.height)
+    }
+
+    // Small in a small window, regular once everything is 1.3 times bigger; its word in the icon's middle color.
+    private func styleReset() {
+        let large = Theme.controlSize(scale) == .large
+        reset.controlSize = large ? .regular : .small
+        reset.attributedTitle = NSAttributedString(string: "Auto", attributes: [
+            .foregroundColor: Theme.mid, .font: NSFont.systemFont(ofSize: large ? 13 : 11, weight: .medium)])
+        needsLayout = true
+    }
+
+    private func updateReset() { reset.isEnabled = isEnabled && offsets.contains { $0 != 0 } }
+
+    private func changed() {
+        updateReset()
+        onChange(offsets)
+    }
+
+    @objc private func resetAll() {
+        window?.makeFirstResponder(nil)
+        guard offsets.contains(where: { $0 != 0 }) else { return }
+        offsets = [Float](repeating: 0, count: 5)
+        onChange(offsets)
+    }
+}
+
 // The big number. Shows "+2" / "−1.5" / "0"; click it to type any amount from −24 to 24, Return to apply, Esc to
 // cancel, ↑ ↓ to step by 1 while typing. A new number rolls in: up when higher, down when lower.
 final class AmountField: NSTextField, NSTextFieldDelegate {
@@ -961,6 +1255,9 @@ enum Keys {
     // Advanced processing's Bass ↔ Treble for each speakers or headphones: [device UID: −1 (bass) … 0 … 1 (treble)].
     // Only what was picked on the slider is stored.
     static let hearTone = "hearTone"
+    // Advanced processing's Auto EQ for each speakers or headphones: [device UID: ["on": Bool, "offsets": five Floats,
+    // dB, Sub … Air]]. Only what the owner changed is stored; anything missing is off with no offsets.
+    static let hearAutoEQ = "hearAutoEQ"
     static let voiceOn = "voiceOn", voiceSteps = "voiceSteps", voiceMic = "voiceMic"
     static let voiceCartoon = "voiceCartoon"  // voice style, 0 (Natural) to 1 (Cartoon)
     static let voiceNatural = "voiceNatural"  // the old Natural/Cartoon switch (version 2.0), read once to carry over
@@ -973,7 +1270,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         halfSteps: defaults.object(forKey: Keys.halfSteps) as? Float ?? 2,
         source: HearSource(saved: defaults.string(forKey: Keys.hearSource) ?? defaults.string(forKey: "source")),
         advanced: defaults.bool(forKey: Keys.hearAdvanced),
-        tones: AppDelegate.savedTones(defaults))
+        tones: AppDelegate.savedTones(defaults),
+        autoEQs: AppDelegate.savedAutoEQs(defaults))
     lazy var voice = VoiceShifter(
         halfSteps: defaults.object(forKey: Keys.voiceSteps) as? Float ?? 3,
         cartoon: AppDelegate.savedCartoon(defaults),
@@ -1010,6 +1308,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         return tones
     }
 
+    // The saved Auto EQ per speakers or headphones (device UID → on, and the five offsets in dB).
+    static func savedAutoEQs(_ defaults: UserDefaults) -> [String: AutoEQSetting] {
+        var settings: [String: AutoEQSetting] = [:]
+        for (uid, saved) in defaults.dictionary(forKey: Keys.hearAutoEQ) ?? [:] {
+            guard let saved = saved as? [String: Any] else { continue }
+            let offsets = (saved["offsets"] as? [Any] ?? []).map { ($0 as? NSNumber)?.floatValue ?? 0 }
+            settings[uid] = AutoEQSetting(on: (saved["on"] as? NSNumber)?.boolValue ?? false, offsets: offsets)
+        }
+        return settings
+    }
+
     var window: NSWindow!
     var hearCard: ShiftCard!
     var voiceCard: ShiftCard!
@@ -1023,6 +1332,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let percent = Int(((value * 2 - 1) * 100).rounded())
         return percent == 0 ? "Middle" : "\(abs(percent)) percent more \(percent < 0 ? "bass" : "treble")"
     }
+    // Auto EQ (Advanced processing), also kept for each speakers or headphones: a switch, and while it's on, five
+    // small sliders that follow the sound (see updateAutoEQTimer).
+    let autoEQSwitch = GradientSwitch()
+    let autoEQStrip = AutoEQStrip()
+    private var autoEQRow: CardRow!
+    private var autoEQTimer: Timer?
     // The speakers or headphones playing now (followed even while What you hear is off).
     private var outputListener: Listener?
     private var outputUID = "", outputName = ""
@@ -1159,6 +1474,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             tone.rowHeight = Theme.controlSize(scale) == .large ? 22 : 19  // like the Advanced processing switch
         }
         hearCard.addRow(toneRow, tight: true)
+        // Auto EQ: keeps Sub, Bass, Mids, Highs and Air near the song's own balance. While it's on, five small sliders
+        // show its gains as they move and take a nudge. Kept for each speakers or headphones.
+        autoEQSwitch.onChange = { [weak self] on in self?.autoEQPicked(on: on) }
+        hearCard.addRow(ShiftCard.switchRow("Auto EQ", autoEQSwitch))
+        autoEQStrip.onChange = { [weak self] offsets in self?.autoEQPicked(offsets: offsets) }
+        autoEQRow = CardRow(views: [autoEQStrip])
+        autoEQRow.isHidden = true
+        autoEQRow.onScale = { [unowned self] scale in autoEQStrip.scale = scale }
+        hearCard.addRow(autoEQRow, tight: true)
 
         style.onChange = { [weak self] value in self?.stylePicked(value) }
         testButton.bezelStyle = .rounded
@@ -1226,7 +1550,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         background.addSubview(voiceCard)
 
         // Tab goes through one card, then the other.
-        let order = hearCard.keyViews + [advancedSwitch, tone] + voiceCard.keyViews
+        let autoEQViews: [NSView] = [autoEQSwitch] + autoEQStrip.bands + [autoEQStrip.reset]
+        let order = hearCard.keyViews + [advancedSwitch, tone] + autoEQViews + voiceCard.keyViews
             + [style, testButton, slowSwitch, installButton, soundsButton]
         background.nextKeyView = order[0]
         for (view, next) in zip(order, order.dropFirst() + [order[0]]) { view.nextKeyView = next }
@@ -1270,7 +1595,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         minSide = NSSize(width: 2 * ShiftCard.baseWidth + gap + 2 * margin, height: max(hearHeight, voiceHeight) + 2 * margin)
         minStacked = NSSize(width: ShiftCard.baseWidth + 2 * margin, height: hearHeight + voiceHeight + gap + 2 * margin)
         window.contentMinSize = NSSize(width: minStacked.width, height: minSide.height)
-        window.contentMaxSize = NSSize(width: 1000, height: 640)
+        // Taller than 640 only when the cards one above the other need it (Auto EQ's sliders showing).
+        window.contentMaxSize = NSSize(width: 1000, height: max(640, minStacked.height))
+    }
+
+    // A row was shown or hidden: works out the smallest sizes again, and makes the window bigger if it's now too
+    // small (its top edge stays where it is).
+    private func refit() {
+        measure()
+        let size = window.contentView?.bounds.size ?? minSide
+        let fixed = allowed(size, narrow: size.width < minSide.width)
+        if fixed != size {
+            var frame = window.frameRect(forContentRect: NSRect(origin: .zero, size: fixed))
+            frame.origin = NSPoint(x: window.frame.minX, y: window.frame.maxY - frame.height)
+            window.setFrame(frame, display: true)
+        }
+        arrange()
     }
 
     // A window can be small and wide (cards side by side) or narrow and tall (one above the other), not both.
@@ -1496,7 +1836,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         defaults.set(hear.tones, forKey: Keys.hearTone)
     }
 
-    // The speakers or headphones changed: the tone slider shows theirs.
+    // Auto EQ switched on or off, or a section nudged: kept for the speakers or headphones playing now.
+    func autoEQPicked(on: Bool? = nil, offsets: [Float]? = nil) {
+        guard !outputUID.isEmpty else { return }
+        let now = hear.autoEQ(for: outputUID)
+        hear.setAutoEQ(on: on ?? now.on, offsets: offsets ?? now.offsets, for: outputUID)
+        if preview == nil {  // pictures change nothing
+            defaults.set(hear.autoEQs.mapValues { ["on": $0.on, "offsets": $0.offsets] }, forKey: Keys.hearAutoEQ)
+        }
+        if on != nil { refresh() }  // shows or hides the sliders (a nudge has already moved its slider)
+    }
+
+    // Auto EQ's sliders follow the sound about 15 times a second, but only while they can move and be seen: Auto EQ
+    // on for these speakers or headphones, Advanced processing playing, and the window showing.
+    private func updateAutoEQTimer() {
+        let running = hear.isOn && hear.advanced && hear.autoEQ(for: outputUID).on
+        let live = preview == nil && running && window.isVisible && window.occlusionState.contains(.visible)
+        if live, autoEQTimer == nil {
+            let timer = Timer(timeInterval: 1.0 / 15, repeats: true) { [weak self] _ in self?.readAutoEQ() }
+            timer.tolerance = 0.02
+            RunLoop.main.add(timer, forMode: .common)  // also while the window is being resized
+            autoEQTimer = timer
+            readAutoEQ()
+        } else if !live, let timer = autoEQTimer {
+            timer.invalidate()
+            autoEQTimer = nil
+        }
+        if !running { autoEQStrip.auto = [Float](repeating: 0, count: 5) }  // nothing automatic now
+    }
+
+    private func readAutoEQ() {
+        guard window.occlusionState.contains(.visible) else { updateAutoEQTimer(); return }
+        autoEQStrip.auto = hear.autoEQReadout?.auto ?? [Float](repeating: 0, count: 5)
+    }
+
+    func windowDidChangeOcclusionState(_ notification: Notification) { updateAutoEQTimer() }
+
+    // The speakers or headphones changed: the tone slider and Auto EQ show theirs.
     func outputMoved() {
         let id = defaultOutput()
         outputUID = deviceUID(id)
@@ -1620,7 +1996,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     // MARK: Showing state
 
     // For screenshots (--preview hear-on,voice-on,waiting,typing,recording,playing,listening,hover,menu,roll,
-    // resize,no-driver,advanced-alert,sounds,light,tone,slow [--size 800x400]): shows a state, no sound.
+    // resize,no-driver,advanced-alert,sounds,light,tone,slow,eq [--size 800x400]): shows a state, no sound.
     func showPreview() {
         guard let preview else { return }
         if preview.contains("light") {
@@ -1636,6 +2012,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         if preview.contains("tone") { hear.advanced = true }  // Advanced processing on (nothing runs in pictures)
         if let toneArg, !outputUID.isEmpty { hear.setTone(toneArg, for: outputUID) }  // the tone slider (--tone-amount -0.4)
         if preview.contains("slow") { voice.slowDeeper = true }  // "Deeper when slow" on
+        if !outputUID.isEmpty {  // Auto EQ on with "eq" (--eq-offsets 3,-2,0,1,-1 sets its sliders), off without
+            hear.setAutoEQ(on: preview.contains("eq"), offsets: autoEQArg.offsets.map(Float.init), for: outputUID)
+        }
         refresh()
         if preview.contains("typing") {
             window.makeFirstResponder(hearCard.amount)
@@ -1704,6 +2083,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         tone.value = (((hear.tones[outputUID] ?? 0) + 1) / 2 * 100).rounded() / 100
         tone.isEnabled = hear.advanced && hearOn
         tone.toolTip = outputName.isEmpty ? nil : "For \(outputName)"
+        let eq = hear.autoEQ(for: outputUID)
+        autoEQSwitch.isOn = eq.on
+        autoEQSwitch.isEnabled = hear.advanced && hearOn
+        autoEQStrip.offsets = eq.offsets
+        autoEQStrip.isEnabled = hear.advanced && hearOn
+        if autoEQRow.isHidden == eq.on {  // the sliders show while Auto EQ is on
+            Theme.crossfade(hearCard, 0.2)
+            autoEQRow.isHidden = !eq.on
+            refit()
+        }
+        updateAutoEQTimer()
         switch hear.state {
         case .playing(let speakers): hearCard.amount.toolTip = "Playing to \(speakers)"
         case .problem(let message): hearCard.amount.toolTip = message

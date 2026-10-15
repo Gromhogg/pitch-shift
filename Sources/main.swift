@@ -1,7 +1,8 @@
 // Pitch Shift: plays an app's sound (or all sound) and/or your voice at a higher or lower pitch, live.
 // Checks from Terminal (inside "Pitch Shift.app/Contents/MacOS/PitchShift"):
 //   --list                                     sound devices (with model UIDs), Pitch Shift Mic, the saved Bass ↔ Treble
-//                                              per output, the voice's mic, and which app each sound process belongs to
+//                                              and Auto EQ per output, the voice's mic, and which app each sound
+//                                              process belongs to
 //   --watch-output [--seconds 10]              once a second: the output's sample rate (Bluetooth call mode shows
 //                                              8000-24000 Hz), its own mic, and which apps record from which devices
 //   --test [--pid N | --app BUNDLE_ID | --all] [--steps 2.5] [--seconds S]     "What you hear" for a few seconds
@@ -29,9 +30,10 @@
 //                                              --record-out saves what it played; --steps-at changes the amount live;
 //                                              --tone-amount sets the Bass ↔ Treble slider, −1 … 1, for the output;
 //                                              --tone-at moves it live; --as-device uses that device's saved Bass ↔
-//                                              Treble as if it were playing; --tone-db sets bass and treble in dB;
-//                                              --auto-eq turns on Auto EQ, --eq-offsets gives its five manual offsets
-//                                              in dB, Sub, Bass, Mids, Highs, Air; --watch then also prints its gains)
+//                                              Treble and Auto EQ as if it were playing; --tone-db sets bass and
+//                                              treble in dB; --auto-eq turns on Auto EQ, --eq-offsets gives its five
+//                                              manual offsets in dB, Sub, Bass, Mids, Highs, Air, instead of the saved
+//                                              Auto EQ; --watch also prints its gains and levels while it's in use)
 //   --render-file IN OUT [--steps 5] [--advanced] [--steps-at "4:8,8:-5"] [--tone-amount 0.5] [--tone-at "2:1,4:-1"]
 //                [--tone-db 6,-6] [--auto-eq] [--eq-offsets 0,0,0,0,0]
 //                                              shifts a sound file with the app's own code (normal or advanced)
@@ -44,11 +46,13 @@ func arg(_ name: String) -> String? {
     guard let i = args.firstIndex(of: name), i + 1 < args.count else { return nil }
     return args[i + 1]
 }
-// --preview STATES [--size 800x400] [--cartoon-amount 0.5] [--tone-amount -0.4]: show the window in a state for
-// screenshots, without touching any sound or settings, and without switching apps (states: hear-on, voice-on, waiting,
-// typing, recording, playing, listening, hover, menu, roll, resize, no-driver, advanced-alert, sounds, light, tone,
-// slow; --cartoon-amount sets the voice style slider; sounds opens the Soundboard with example names; "tone" shows
-// Advanced processing on, and --tone-amount sets the Bass ↔ Treble slider; slow turns on "Deeper when slow").
+// --preview STATES [--size 800x400] [--cartoon-amount 0.5] [--tone-amount -0.4] [--eq-offsets 3,-2,0,1,-1]: show
+// the window in a state for screenshots, without touching any sound or settings, and without switching apps (states:
+// hear-on, voice-on, waiting, typing, recording, playing, listening, hover, menu, roll, resize, no-driver,
+// advanced-alert, sounds, light, tone, slow, eq; --cartoon-amount sets the voice style slider; sounds opens the
+// Soundboard with example names; "tone" shows Advanced processing on, and --tone-amount sets the Bass ↔ Treble
+// slider; slow turns on "Deeper when slow"; eq turns on Auto EQ, and --eq-offsets sets its five sliders, which show
+// only the offsets since no sound plays; without eq, Auto EQ shows off).
 let preview = arg("--preview")
 
 var signalSources: [DispatchSourceSignal] = []
@@ -120,6 +124,15 @@ if args.contains("--list") {
         let id = device(uid: uid)
         let name = id.map { deviceName($0) } ?? "not connected"
         print(String(format: "  %@ (%@): %.2f", uid, name, tilt) + (id == out ? " [default output]" : ""))
+    }
+    // Auto EQ (Advanced processing), as saved for each speakers or headphones (read only).
+    let eqs = AppDelegate.savedAutoEQs(UserDefaults.standard)
+    print("Auto EQ saved per output (offsets in dB: Sub, Bass, Mids, Highs, Air):\(eqs.isEmpty ? " none" : "")")
+    for (uid, eq) in eqs.sorted(by: { $0.key < $1.key }) {
+        let id = device(uid: uid)
+        let name = id.map { deviceName($0) } ?? "not connected"
+        print("  \(uid) (\(name)): \(eq.on ? "on" : "off"), " + eq.offsets.map { String(format: "%+.1f", $0) }.joined(separator: " ")
+            + (id == out ? " [default output]" : ""))
     }
     if let mic = Mics.virtualMic, let feed = Mics.virtualFeed {
         print("Pitch Shift Mic: \(mic) (\(Int(nominalRate(mic))) Hz, in use: \(isRunningSomewhere(mic))), hidden feed: \(feed) (hidden: \(getValue(feed, kAudioDevicePropertyIsHidden, default: UInt32(0)) != 0))")
@@ -216,15 +229,17 @@ if let input = arg("--render-voice") {
 
 if args.contains("--test") {
     let source: HearSource = args.contains("--all") ? .all : HearSource(saved: arg("--app") ?? "com.apple.Music")
-    // Uses the saved Bass ↔ Treble for the output, like the app (only read; --tone-amount changes it for this test).
+    // Uses the saved Bass ↔ Treble and Auto EQ for the output, like the app (only read; --tone-amount changes the tone
+    // for this test, --auto-eq / --eq-offsets replace the Auto EQ).
     let shifter = HearShifter(halfSteps: arg("--steps").flatMap(Float.init) ?? 2, source: source, advanced: args.contains("--advanced"),
-                              tones: AppDelegate.savedTones(UserDefaults.standard))
+                              tones: AppDelegate.savedTones(UserDefaults.standard), autoEQs: AppDelegate.savedAutoEQs(UserDefaults.standard))
     shifter.testPID = arg("--pid").flatMap { pid_t($0) }
     shifter.testOutputKey = arg("--as-device")
     shifter.fixedToneDb = toneDbArg
     if let toneArg { shifter.setTone(toneArg, for: shifter.outputKey) }
-    let showAutoEQ = autoEQArg.on || autoEQArg.offsets.contains { $0 != 0 }
-    if showAutoEQ { shifter.setAutoEQ(on: autoEQArg.on, offsets: autoEQArg.offsets) }
+    if args.contains("--auto-eq") || arg("--eq-offsets") != nil { shifter.fixedAutoEQ = autoEQArg }
+    let usedEQ = shifter.fixedAutoEQ ?? shifter.autoEQ(for: shifter.outputKey).engine
+    let showAutoEQ = usedEQ.on || usedEQ.offsets.contains { $0 != 0 }
     for (t, value) in toneChanges {
         DispatchQueue.main.asyncAfter(deadline: .now() + t) { shifter.setTone(value, for: shifter.outputKey) }
     }

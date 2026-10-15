@@ -204,6 +204,7 @@ final class AdvancedPlayer: HearPlayer {
     func setTone(bass: Double, treble: Double) { worker.wanted.withLock { $0.bassDb = bass; $0.trebleDb = treble } }
     var tone: (bass: Double, treble: Double) { worker.wanted.withLock { ($0.bassDb, $0.trebleDb) } }
     func setAutoEQ(on: Bool, offsets: [Double]) { worker.wanted.withLock { $0.autoEQOn = on; $0.autoEQOffsets = offsets } }
+    var autoEQ: (on: Bool, offsets: [Double]) { worker.wanted.withLock { ($0.autoEQOn, $0.autoEQOffsets) } }
     // Auto EQ's live values for the window (see AdvancedProcessor.readAutoEQ). Any thread.
     var autoEQReadout: (auto: [Float], level: [Float]) { worker.processor.readAutoEQ() }
 

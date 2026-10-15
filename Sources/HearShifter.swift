@@ -266,6 +266,22 @@ enum HearState: Equatable {
     case problem(String)
 }
 
+// Advanced processing's Auto EQ for one speakers or headphones: on or off, and the owner's offset for each section
+// (Sub, Bass, Mids, Highs, Air) in dB, −12 … 12. The offsets are kept while it's off, for when it's turned back on.
+struct AutoEQSetting: Equatable {
+    var on: Bool
+    var offsets: [Float]
+
+    init(on: Bool = false, offsets: [Float] = []) {
+        self.on = on
+        let clean = offsets.prefix(5).map { $0.isFinite ? max(-12, min(12, $0)) : 0 }
+        self.offsets = clean + [Float](repeating: 0, count: 5 - clean.count)
+    }
+
+    // What the sound processing gets: off means the stage is skipped (offsets 0, so the sound is untouched).
+    var engine: (on: Bool, offsets: [Double]) { on ? (true, offsets.map(Double.init)) : (false, AdvancedProcessor.noOffsets) }
+}
+
 // Keeps a Capture and a Player going, and rebuilds them when the app opens or quits or the speakers change.
 final class HearShifter {
     var halfSteps: Float {
@@ -296,25 +312,34 @@ final class HearShifter {
         let db = toneDb(uid)
         audioQueue.async { self.player?.setTone(bass: db.bass, treble: db.treble) }
     }
-    // Advanced processing's Auto EQ (see AdvancedProcessor.setAutoEQ): on, and a manual offset per section in dB.
-    // Normal mode ignores it. A new player starts with it.
-    private(set) var autoEQ: (on: Bool, offsets: [Double]) = (false, AdvancedProcessor.noOffsets)
-    func setAutoEQ(on: Bool, offsets: [Double]) {
-        autoEQ = (on, offsets)
-        audioQueue.async { self.player?.setAutoEQ(on: on, offsets: offsets) }
+    // Advanced processing's Auto EQ for each speakers or headphones: device UID → on, and the owner's offset per
+    // section (see AutoEQSetting); a device that isn't listed has it off. Normal mode ignores it. A new player
+    // (other headphones, or past ±12) starts with the right one.
+    private(set) var autoEQs: [String: AutoEQSetting]
+    func autoEQ(for uid: String) -> AutoEQSetting { autoEQs[uid] ?? AutoEQSetting() }
+    func setAutoEQ(on: Bool, offsets: [Float], for uid: String) {
+        autoEQs[uid] = AutoEQSetting(on: on, offsets: offsets)
+        guard uid == playerKey else { return }
+        let eq = autoEQValue(uid)
+        audioQueue.async { self.player?.setAutoEQ(on: eq.on, offsets: eq.offsets) }
     }
     // Auto EQ's live values (Sub … Air): the automatic gain (dB) and the level (dBFS). nil in normal mode.
     var autoEQReadout: (auto: [Float], level: [Float])? {
         audioQueue.sync { (player as? AdvancedPlayer)?.autoEQReadout }
     }
-    // Checks only: --as-device UID uses that device's tone, whatever is playing; --tone-db B,T uses these dB everywhere.
+    // Checks only: --as-device UID uses that device's tone and Auto EQ, whatever is playing; --tone-db B,T uses these
+    // dB everywhere; --auto-eq / --eq-offsets use this Auto EQ everywhere, as given.
     var testOutputKey: String?
     var fixedToneDb: (bass: Double, treble: Double)?
-    // The device whose tone the player uses.
+    var fixedAutoEQ: (on: Bool, offsets: [Double])?
+    // The device whose tone and Auto EQ the player uses.
     var outputKey: String { testOutputKey ?? deviceUID(defaultOutput()) }
     private var playerKey: String?
     private func toneDb(_ key: String?) -> (bass: Double, treble: Double) {
         fixedToneDb ?? AdvancedProcessor.toneDb(tilt: key.flatMap { tones[$0] } ?? 0)
+    }
+    private func autoEQValue(_ key: String?) -> (on: Bool, offsets: [Double]) {
+        fixedAutoEQ ?? (key.flatMap { autoEQs[$0] } ?? AutoEQSetting()).engine
     }
     var onChange: () -> Void = {}
     var testPID: pid_t?
@@ -331,11 +356,13 @@ final class HearShifter {
     private var running = false
     private var rebuilds: [Date] = []
 
-    init(halfSteps: Float, source: HearSource, advanced: Bool = false, tones: [String: Float] = [:]) {
+    init(halfSteps: Float, source: HearSource, advanced: Bool = false, tones: [String: Float] = [:],
+         autoEQs: [String: AutoEQSetting] = [:]) {
         self.halfSteps = halfSteps
         self.source = source
         self.advanced = advanced
         self.tones = tones
+        self.autoEQs = autoEQs
     }
 
     var isOn: Bool { running }
@@ -382,10 +409,15 @@ final class HearShifter {
         }
     }
 
-    // "tone=0.80 (bass -4.8 dB, treble +4.8 dB)": the slider for the player's device, and what the player really has.
+    // "tone=0.80 (bass -4.8 dB, treble +4.8 dB), auto EQ on (+3.0 -2.0 +0.0 +1.0 -1.0 dB)": the slider for the
+    // player's device, and what the player really has.
     private var toneText: (AdvancedPlayer) -> String {
         let setting = fixedToneDb == nil ? String(format: "tone=%.2f", playerKey.flatMap { tones[$0] } ?? 0) : "tone=--tone-db"
-        return { player in setting + String(format: " (bass %+.1f dB, treble %+.1f dB)", player.tone.bass, player.tone.treble) }
+        return { player in
+            let eq = player.autoEQ
+            return setting + String(format: " (bass %+.1f dB, treble %+.1f dB)", player.tone.bass, player.tone.treble) +
+                ", auto EQ \(eq.on ? "on" : "off") (" + eq.offsets.map { String(format: "%+.1f", $0) }.joined(separator: " ") + " dB)"
+        }
     }
 
     // Checks only: saves what Advanced processing played (needs testRecordSeconds > 0 before start).
@@ -494,7 +526,7 @@ final class HearShifter {
         let steps = halfSteps
         let key = testOutputKey ?? deviceUID(device)
         let tone = toneDb(key)
-        let eq = autoEQ
+        let eq = autoEQValue(key)
         playerKey = key
         let ring = capture?.ring
         if let playerObserver { NotificationCenter.default.removeObserver(playerObserver) }
