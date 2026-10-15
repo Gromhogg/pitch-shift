@@ -161,12 +161,16 @@ final class GradientSwitch: NSView {
     }
 }
 
-// The voice style: a slider from Natural (left, 0) to Cartoon (right, 1). The track shows the icon's purple-to-pink
-// colors from end to end, with a round white knob (like GradientSwitch's) and small "Natural" and "Cartoon" labels
-// under its ends. Click or drag to set it; with "Keyboard navigation" on, the arrow keys move it in steps of 0.1.
+// A slider from 0 (left) to 1 (right), like the voice style (Natural ... Cartoon) or the tone (Bass ... Treble). The
+// track shows the icon's purple-to-pink colors from end to end, with a round white knob (like GradientSwitch's) and
+// small labels under its ends. `middleMark` adds a small mark at the middle, and the knob snaps to it when close.
+// Click or drag to set it; with "Keyboard navigation" on, the arrow keys move it in steps of 0.1.
 // Nothing moves on its own, so it's the same with Reduce Motion.
 final class GradientSlider: NSView {
     var onChange: (Float) -> Void = { _ in }
+    var middleMark = false { didSet { needsDisplay = true } }
+    private let left: String, right: String
+    private let describe: (Float) -> String  // what VoiceOver says for a value
     var isEnabled = true {
         didSet {
             guard oldValue != isEnabled else { return }
@@ -178,7 +182,7 @@ final class GradientSlider: NSView {
         didSet {
             guard oldValue != value else { return }
             setAccessibilityValue(NSNumber(value: value))
-            setAccessibilityValueDescription(Self.describe(value))
+            setAccessibilityValueDescription(describe(value))
             needsDisplay = true
         }
     }
@@ -188,23 +192,23 @@ final class GradientSlider: NSView {
     var rowHeight: CGFloat = 24 { didSet { if oldValue != rowHeight { resized() } } }
     private var grab: CGFloat?  // where on the knob the mouse took hold (so the knob doesn't jump)
 
-    init() {
+    // left / right: the labels under the ends; name: what VoiceOver calls it.
+    init(left: String, right: String, name: String, describe: @escaping (Float) -> String) {
+        self.left = left
+        self.right = right
+        self.describe = describe
         super.init(frame: NSRect(x: 0, y: 0, width: 150, height: 40))
         setAccessibilityElement(true)
         setAccessibilityRole(.slider)
-        setAccessibilityLabel("Voice style")
+        setAccessibilityLabel(name)
         setAccessibilityMinValue(NSNumber(value: 0))
         setAccessibilityMaxValue(NSNumber(value: 1))
         setAccessibilityValue(NSNumber(value: 0))
-        setAccessibilityValueDescription(Self.describe(0))
+        setAccessibilityValueDescription(describe(0))
         setContentHuggingPriority(.defaultLow, for: .horizontal)
     }
 
     required init?(coder: NSCoder) { fatalError() }
-
-    static func describe(_ value: Float) -> String {
-        value <= 0 ? "Natural" : value >= 1 ? "Cartoon" : "\(Int((value * 100).rounded())) percent Cartoon"
-    }
 
     private func resized() {
         invalidateIntrinsicContentSize()
@@ -244,13 +248,22 @@ final class GradientSlider: NSView {
         Theme.gradient.draw(in: shape, angle: 0)
         NSGraphicsContext.restoreGraphicsState()
 
-        // "Natural" under the left end, "Cartoon" under the right end.
+        // The labels: one under the left end ("Natural"), one under the right end ("Cartoon").
         let attributes: [NSAttributedString.Key: Any] = [
             .font: labelFont, .foregroundColor: isEnabled ? NSColor.secondaryLabelColor : NSColor.tertiaryLabelColor]
         let top = middle - knobSize / 2 - 1  // just under the knob
-        for (text, left) in [("Natural", true), ("Cartoon", false)] {
+        for (text, left) in [(left, true), (right, false)] {
             let width = (text as NSString).size(withAttributes: attributes).width
             (text as NSString).draw(at: NSPoint(x: left ? bounds.minX : bounds.maxX - width, y: top - labelHeight), withAttributes: attributes)
+        }
+
+        // The middle mark: a short line across the track's middle, just inside the knob's height (so the knob covers
+        // it when it's there).
+        if middleMark {
+            (isEnabled ? NSColor.secondaryLabelColor : NSColor.tertiaryLabelColor).setFill()
+            let reach = knobSize / 2 - 1
+            NSBezierPath(rect: NSRect(x: (bounds.midX - 1).rounded(), y: middle - reach, width: 2, height: reach - trackHeight / 2)).fill()
+            NSBezierPath(rect: NSRect(x: (bounds.midX - 1).rounded(), y: middle + trackHeight / 2, width: 2, height: reach - trackHeight / 2)).fill()
         }
 
         // The knob, with a soft shadow and a thin edge (so it stands out on a white card too).
@@ -321,9 +334,10 @@ final class GradientSlider: NSView {
         return true
     }
 
-    // Steps of 0.01 from 0 to 1.
+    // Steps of 0.01 from 0 to 1 (and to the middle mark when within 0.03 of it).
     private func set(_ new: Float) {
-        let clean = max(0, min(1, (new * 100).rounded() / 100))
+        var clean = max(0, min(1, (new * 100).rounded() / 100))
+        if middleMark && abs(clean - 0.5) < 0.031 { clean = 0.5 }
         guard clean != value else { return }
         value = clean
         onChange(clean)
@@ -700,6 +714,7 @@ final class ShiftCard: NSView {
     private let buttons: NSStackView
     private let stack = NSStackView()
     private var rows: [NSView] = []
+    private var tightAfter: [NSView] = []  // rows followed by a tight row (see addRow)
     private var widths: [NSLayoutConstraint] = []
     private var buttonWidths: [NSLayoutConstraint] = []
     private var heights: [Int: CGFloat] = [:]  // height needed at each scale
@@ -755,7 +770,15 @@ final class ShiftCard: NSView {
     }
 
     // Adds a full-width row at the bottom of the card (for example `ShiftCard.switchRow`). Add rows while
-    // building the window, before it's laid out.
+    // building the window, before it's laid out. `tight`: closer to the row above (it belongs with it).
+    func addRow(_ row: NSView, tight: Bool) {
+        if tight, let above = stack.arrangedSubviews.last {
+            tightAfter.append(above)
+            if scale > 0 { stack.setCustomSpacing((6 * scale).rounded(), after: above) }
+        }
+        addRow(row)
+    }
+
     func addRow(_ row: NSView) {
         stack.addArrangedSubview(row)
         widen(row)
@@ -805,6 +828,7 @@ final class ShiftCard: NSView {
             stack.edgeInsets = NSEdgeInsets(top: (14 * s).rounded(), left: 0, bottom: (16 * s).rounded(), right: 0)
             stack.spacing = (12 * s).rounded()
             stack.setCustomSpacing((8 * s).rounded(), after: amount)
+            tightAfter.forEach { stack.setCustomSpacing((6 * s).rounded(), after: $0) }
             rows.forEach { ($0 as? CardRow)?.onScale(s) }
             needsDisplay = true
         }
@@ -925,6 +949,9 @@ final class ShiftCard: NSView {
 enum Keys {
     static let hearOn = "hearOn", hearSource = "hearSource", halfSteps = "halfSteps", hearAdvanced = "hearAdvanced"
     static let hideAdvancedAlert = "hideAdvancedAlert"  // "Don't show again" was ticked
+    // Advanced processing's Bass ↔ Treble for each speakers or headphones: [device UID: −1 (bass) … 0 … 1 (treble)].
+    // Only what was picked on the slider is stored.
+    static let hearTone = "hearTone"
     static let voiceOn = "voiceOn", voiceSteps = "voiceSteps", voiceMic = "voiceMic"
     static let voiceCartoon = "voiceCartoon"  // voice style, 0 (Natural) to 1 (Cartoon)
     static let voiceNatural = "voiceNatural"  // the old Natural/Cartoon switch (version 2.0), read once to carry over
@@ -935,7 +962,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     lazy var hear = HearShifter(
         halfSteps: defaults.object(forKey: Keys.halfSteps) as? Float ?? 2,
         source: HearSource(saved: defaults.string(forKey: Keys.hearSource) ?? defaults.string(forKey: "source")),
-        advanced: defaults.bool(forKey: Keys.hearAdvanced))
+        advanced: defaults.bool(forKey: Keys.hearAdvanced),
+        tones: AppDelegate.savedTones(defaults))
     lazy var voice = VoiceShifter(
         halfSteps: defaults.object(forKey: Keys.voiceSteps) as? Float ?? 3,
         cartoon: AppDelegate.savedCartoon(defaults),
@@ -957,11 +985,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         return max(0, min(1, value))
     }
 
+    // The saved Bass ↔ Treble per speakers or headphones (device UID → −1 … 1).
+    static func savedTones(_ defaults: UserDefaults) -> [String: Float] {
+        var tones: [String: Float] = [:]
+        for (uid, saved) in defaults.dictionary(forKey: Keys.hearTone) ?? [:] {
+            guard let value = (saved as? NSNumber)?.floatValue, value.isFinite else { continue }
+            tones[uid] = max(-1, min(1, value))
+        }
+        return tones
+    }
+
     var window: NSWindow!
     var hearCard: ShiftCard!
     var voiceCard: ShiftCard!
     let advancedSwitch = GradientSwitch()
-    let style = GradientSlider()  // voice style: Natural ... Cartoon
+    let style = GradientSlider(left: "Natural", right: "Cartoon", name: "Voice style") { value in
+        value <= 0 ? "Natural" : value >= 1 ? "Cartoon" : "\(Int((value * 100).rounded())) percent Cartoon"
+    }
+    // Advanced processing's tone for the speakers or headphones playing now: 0 = more bass, 0.5 = middle, 1 = more treble.
+    let tone = GradientSlider(left: "Bass", right: "Treble", name: "Tone") { value in
+        let percent = Int(((value * 2 - 1) * 100).rounded())
+        return percent == 0 ? "Middle" : "\(abs(percent)) percent more \(percent < 0 ? "bass" : "treble")"
+    }
+    // The speakers or headphones playing now (followed even while What you hear is off).
+    private var outputListener: Listener?
+    private var outputUID = "", outputName = ""
     let testButton = NSButton(title: "Test", target: nil, action: nil)
     let dot = StatusDot()
     let micName = NSTextField(labelWithString: "Pitch Shift Mic")
@@ -977,6 +1025,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
         buildMenu()
         buildWindow()
+        // The tone slider shows the setting of the speakers or headphones playing now, and follows a change.
+        outputListener = Listener(system, kAudioHardwarePropertyDefaultOutputDevice) { [weak self] in self?.outputMoved() }
+        outputMoved()
         hear.onChange = { [weak self] in self?.refresh() }
         voice.onChange = { [weak self] in self?.refresh() }
         test.onChange = { [weak self] in self?.refresh() }
@@ -1076,6 +1127,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         // Advanced processing (music): keeps the song balanced at big shifts. Turning it on asks first.
         advancedSwitch.onChange = { [weak self] on in self?.advancedPicked(on) }
         hearCard.addRow(ShiftCard.switchRow("Advanced processing", advancedSwitch))
+        // Its tone, Bass ... Treble, kept for each speakers or headphones.
+        tone.middleMark = true
+        tone.onChange = { [weak self] value in self?.tonePicked(value) }
+        let toneRow = CardRow(views: [tone])
+        toneRow.onScale = { [unowned self] scale in
+            tone.scale = scale
+            tone.rowHeight = Theme.controlSize(scale) == .large ? 22 : 19  // like the Advanced processing switch
+        }
+        hearCard.addRow(toneRow, tight: true)
 
         style.onChange = { [weak self] value in self?.stylePicked(value) }
         testButton.bezelStyle = .rounded
@@ -1125,7 +1185,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         background.addSubview(voiceCard)
 
         // Tab goes through one card, then the other.
-        let order = hearCard.keyViews + [advancedSwitch] + voiceCard.keyViews + [style, testButton, installButton]
+        let order = hearCard.keyViews + [advancedSwitch, tone] + voiceCard.keyViews + [style, testButton, installButton]
         background.nextKeyView = order[0]
         for (view, next) in zip(order, order.dropFirst() + [order[0]]) { view.nextKeyView = next }
 
@@ -1373,6 +1433,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         defaults.set(value, forKey: Keys.voiceCartoon)
     }
 
+    // The tone slider moved: it's kept for the speakers or headphones playing now.
+    func tonePicked(_ value: Float) {
+        guard !outputUID.isEmpty else { return }
+        hear.setTone(((value * 2 - 1) * 100).rounded() / 100, for: outputUID)
+        guard preview == nil else { return }  // pictures change nothing
+        defaults.set(hear.tones, forKey: Keys.hearTone)
+    }
+
+    // The speakers or headphones changed: the tone slider shows theirs.
+    func outputMoved() {
+        let id = defaultOutput()
+        outputUID = deviceUID(id)
+        outputName = deviceName(id)
+        refresh()
+    }
+
     @objc func testClicked() { test.click() }
 
     // MARK: Advanced processing
@@ -1387,6 +1463,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
         hear.advanced = on
         defaults.set(on, forKey: Keys.hearAdvanced)
+        refresh()  // the tone slider works only with it on
     }
 
     // A sheet on the window: Turn On, or Cancel (the switch goes back off and nothing is saved).
@@ -1476,11 +1553,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     // MARK: Showing state
 
     // For screenshots (--preview hear-on,voice-on,waiting,typing,recording,playing,listening,hover,menu,roll,
-    // resize,no-driver,advanced-alert,light [--size 800x400]): shows a state, no sound.
+    // resize,no-driver,advanced-alert,light,tone [--size 800x400]): shows a state, no sound.
     func showPreview() {
         guard let preview else { return }
         if preview.contains("light") { window.appearance = NSAppearance(named: .aqua) }
         if let cartoonArg { voice.cartoon = cartoonArg }  // where the style slider is (--cartoon-amount 0.5)
+        if preview.contains("tone") { hear.advanced = true }  // Advanced processing on (nothing runs in pictures)
+        if let toneArg, !outputUID.isEmpty { hear.setTone(toneArg, for: outputUID) }  // the tone slider (--tone-amount -0.4)
         refresh()
         if preview.contains("typing") {
             window.makeFirstResponder(hearCard.amount)
@@ -1545,6 +1624,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let waiting = preview.map { $0.contains("waiting") } ?? (hear.state == .waiting)
         hearCard.show(on: hearOn, value: hear.halfSteps, active: hearOn, waiting: waiting)
         if advancedAlert == nil { advancedSwitch.isOn = hear.advanced }  // stays on while the alert asks
+        tone.value = (((hear.tones[outputUID] ?? 0) + 1) / 2 * 100).rounded() / 100
+        tone.isEnabled = hear.advanced && hearOn
+        tone.toolTip = outputName.isEmpty ? nil : "For \(outputName)"
         switch hear.state {
         case .playing(let speakers): hearCard.amount.toolTip = "Playing to \(speakers)"
         case .problem(let message): hearCard.amount.toolTip = message

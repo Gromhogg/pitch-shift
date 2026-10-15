@@ -99,6 +99,14 @@ final class AdvancedProcessor {
         advanced_set_semis(chain, Double(value))
     }
 
+    // The "Bass ↔ Treble" slider: a tilt from −1 (more bass) through 0 (untouched) to +1 (more treble) moves the bass
+    // and the treble this many dB, opposite ways.
+    static let toneDb = 6.0
+    static func toneDb(tilt: Float) -> (bass: Double, treble: Double) {
+        let db = Double(tilt) * toneDb
+        return db == 0 ? (0, 0) : (-db, db)
+    }
+
     // Bass and treble in dB (0, 0 = untouched). They glide, so moving them doesn't click.
     func setTone(bass: Double, treble: Double) {
         guard bass != tone.bass || treble != tone.treble else { return }
@@ -166,6 +174,7 @@ final class AdvancedPlayer: HearPlayer {
 
     func setHalfSteps(_ value: Float) { worker.wanted.withLock { $0.halfSteps = value } }
     func setTone(bass: Double, treble: Double) { worker.wanted.withLock { $0.bassDb = bass; $0.trebleDb = treble } }
+    var tone: (bass: Double, treble: Double) { worker.wanted.withLock { ($0.bassDb, $0.trebleDb) } }
 
     // Not used live (the capture writes straight into the ring), but handy for tests.
     func play(_ buffer: AVAudioPCMBuffer) {
@@ -292,13 +301,14 @@ final class AdvancedWorker {
     }
 }
 
-// --render-file IN OUT [--steps N] [--advanced] [--steps-at "SECONDS:N,SECONDS:N"] [--tone-db B,T]
+// --render-file IN OUT [--steps N] [--advanced] [--steps-at "SECONDS:N,SECONDS:N"] [--tone-db B,T | --tone-amount T]
+//               [--tone-at "SECONDS:T,SECONDS:T"]
 // Shifts a sound file offline with the app's own code (normal mode or Advanced processing), for listening
 // samples and checks. The output lines up with the input (the delay is taken out) and has the same length.
 // --steps-at changes the amount while it plays, like moving the amount live. --tone-db: Advanced processing's bass
-// and treble in dB.
+// and treble in dB; --tone-amount: the Bass ↔ Treble slider (−1 … 1); --tone-at moves the slider while it plays.
 func renderFile(input: String, output: String, halfSteps: Float, advanced: Bool, changes: [(Double, Float)],
-                tone: (bass: Double, treble: Double) = (0, 0)) throws {
+                tone: (bass: Double, treble: Double) = (0, 0), toneChanges: [(Double, Float)] = []) throws {
     let file = try AVAudioFile(forReading: URL(fileURLWithPath: input))
     let rate = file.processingFormat.sampleRate
     let length = Int(file.length)
@@ -329,6 +339,10 @@ func renderFile(input: String, output: String, halfSteps: Float, advanced: Bool,
         while written < length {
             let n = min(block, max(1, length + latency - position))
             processor.setHalfSteps(amount(at: position))
+            if let moved = toneChanges.last(where: { Int($0.0 * rate) <= position }) {
+                let db = AdvancedProcessor.toneDb(tilt: moved.1)
+                processor.setTone(bass: db.bass, treble: db.treble)
+            }
             let take = max(0, min(n, length - position))
             // Past the end of the file, zeros push the last of the sound out.
             var inL = zeros, inR = zeros
