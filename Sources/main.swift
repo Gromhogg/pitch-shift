@@ -16,7 +16,7 @@
 //                                              --cartoon-at "1:1,2:0" moves the style to 1 at 1 s and back to 0 at 2 s)
 //   --test-button [--mic NAME] [--volume 0.03] presses Test with a quiet tone as the voice (record 5 s, play back)
 //   --test-sounds FILE [--speakers] [--seconds S] [--out F.caf] [--mic NAME] [--steps 3] [--volume 0.05] [--hear 0.02]
-//                [--sound-volume 0.5]
+//                [--sound-volume 0.5] [--voice-off]
 //                                              Soundboard: plays FILE into Pitch Shift Mic 1 s in, with a quiet tone as
 //                                              the voice, records Pitch Shift Mic and checks it (one copy of the sound,
 //                                              its level; --speakers: as if on the Mac's speakers, so the voice must
@@ -26,6 +26,8 @@
 //                                              --hear-out F.caf: save the owner's copy (with --hear).
 //                                              --sound-volume V: the sound's own volume (0 ... 1.5, Volume… on its
 //                                              button), so its level in Pitch Shift Mic should be V x the file.
+//                                              --voice-off: as with "Your voice" off and the Soundboard open: the
+//                                              tone must come through at its own pitch (440 Hz), no shift.
 //   --test ... --advanced [--record-out F.wav] [--steps-at "3:8,6:-5"] [--tone-amount 0.5] [--tone-at "2:1,4:-1"]
 //              [--as-device UID] [--tone-db 6,-6]
 //                                              "What you hear" with Advanced processing on (--watch prints the delay;
@@ -370,8 +372,10 @@ if args.contains("--test-button") {
 }
 
 // Soundboard check: a quiet tone is the voice, FILE plays into Pitch Shift Mic 1 s in, Pitch Shift Mic is recorded.
+// --voice-off: as with "Your voice" off and the Soundboard open (the voice goes through unchanged).
 if let path = arg("--test-sounds") {
-    let steps = arg("--steps").flatMap(Float.init) ?? 3
+    let voiceOff = args.contains("--voice-off")
+    let steps = voiceOff ? 0 : arg("--steps").flatMap(Float.init) ?? 3
     let toneHz = 440.0
     // --recording F.caf: checks a recording saved earlier with --out (no devices are used).
     if let saved = arg("--recording") {
@@ -421,8 +425,8 @@ if let path = arg("--test-sounds") {
     board.onChange = {
         print(String(format: "%.2fs: %@", Date().timeIntervalSince(started), board.playing.map { "playing \($0)" } ?? "stopped"))
     }
-    onQuitSignals { voice.stop(); exit(0) }
-    voice.start()
+    onQuitSignals { voice.stopAll(); exit(0) }
+    if voiceOff { voice.keepForSounds(true) } else { voice.start() }
     voice.hold(true)  // runs the chain like the Test button does (no app is listening yet)
     guard let chain = voice.chain else { print("voice did not start: \(voice.state)"); exit(1) }
     let recorder = try! Recorder(device: virtualMic, seconds: seconds)
@@ -436,9 +440,9 @@ if let path = arg("--test-sounds") {
     }
     DispatchQueue.main.asyncAfter(deadline: .now() + seconds + 0.2) {
         let recorded = recorder.finish()
-        voice.stop()
-        print(String(format: "sound test: file=%@ (%.2f s) mic=%@ rate=%d steps=%g speakers=%@ tone=%g sound volume=%g",
-                     url.lastPathComponent, clip.seconds, chain.micName, Int(chain.sampleRate), steps,
+        voice.stopAll()
+        print(String(format: "sound test: file=%@ (%.2f s) mic=%@ rate=%d voice=%@ steps=%g speakers=%@ tone=%g sound volume=%g",
+                     url.lastPathComponent, clip.seconds, chain.micName, Int(chain.sampleRate), voiceOff ? "off" : "on", steps,
                      board.speakers == true ? "yes" : "no", volume, soundVolume))
         // The file as the chain plays it, at the recording's rate.
         let reference = recorder.sampleRate == clip.rate ? clip : (try? SoundClip(url: url, rate: recorder.sampleRate))
@@ -474,7 +478,7 @@ let delegate = AppDelegate()
 app.delegate = delegate
 onQuitSignals {
     delegate.hear.stop()
-    delegate.voice.stop()
+    delegate.voice.stopAll()
     DefaultMic.giveBack()
     exit(0)
 }

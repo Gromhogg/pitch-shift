@@ -1055,6 +1055,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         voice.onChange = { [weak self] in self?.refresh() }
         test.onChange = { [weak self] in self?.refresh() }
         board.onChange = { [weak self] in self?.soundboard.update() }
+        soundboard.onClose = { [weak self] in self?.soundboardClosed() }
         deviceListeners = [kAudioHardwarePropertyDevices, kAudioHardwarePropertyDefaultInputDevice, kAudioHardwarePropertyDefaultOutputDevice].map {
             Listener(system, $0) { [weak self] in self?.deviceDebounce.call { self?.refresh() } }
         }
@@ -1083,7 +1084,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     func applicationWillTerminate(_ notification: Notification) {
         hear.stop()
-        voice.stop()
+        voice.stopAll()
         DefaultMic.giveBack()
     }
 
@@ -1518,7 +1519,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     // Opens the Soundboard next to the window, or closes it.
     @objc func soundsClicked() {
-        if soundboard.isOpen { soundboard.close() } else { soundboard.open(beside: window) }
+        if soundboard.isOpen {
+            soundboard.close()
+            return
+        }
+        soundboard.open(beside: window)
+        guard preview == nil else { return }  // pictures change nothing
+        // Sounds go out through the voice chain, so with the voice off it runs as if the voice were on with no
+        // pitch change, and Pitch Shift Mic becomes the Mac's default mic (like turning the voice on).
+        soundsOff?.cancel()
+        soundsOff = nil
+        voice.keepForSounds(true)
+        if !voice.isOn { DefaultMic.takeOver() }
+        refresh()
+    }
+
+    private var soundsOff: DispatchWorkItem?
+
+    // The Soundboard closed: with the voice off, the chain stops and the real mic is given back a second later
+    // (like when an app stops listening; a sound that was just stopped fades out first).
+    func soundboardClosed() {
+        guard preview == nil else { return }
+        soundsOff?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            soundsOff = nil
+            voice.keepForSounds(false)
+            if !voice.isOn { DefaultMic.giveBack() }
+            refresh()
+        }
+        soundsOff = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
     }
 
     // MARK: Advanced processing
@@ -1570,9 +1601,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     func setVoice(_ on: Bool) {
         guard on else {
-            soundboard.close()  // stops its sound too
-            voice.stop()
-            DefaultMic.giveBack()
+            voice.stop()  // with the Soundboard open, its sounds still go out (the voice unchanged)
+            if !voice.runsForSounds { DefaultMic.giveBack() }
             defaults.set(false, forKey: Keys.voiceOn)
             refresh()
             return
@@ -1608,12 +1638,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         guard error == nil else { return }
         // The Mac's sound system restarted; reconnect everything.
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [self] in
-            let hearOn = hear.isOn, voiceOn = voice.isOn
+            let hearOn = hear.isOn, voiceOn = voice.isOn, sounds = voice.runsForSounds
             hear.stop()
-            voice.stop()
+            voice.stopAll()
             if hearOn { hear.start() }
-            if voiceOn {
-                voice.start()
+            if voiceOn || sounds {
+                if voiceOn { voice.start() }
+                voice.keepForSounds(sounds)
                 DefaultMic.takeOver()
             }
             rebuildMicMenu()
@@ -1728,11 +1759,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         style.isEnabled = voiceOn && installed
         slowSwitch.isOn = voice.slowDeeper
         slowSwitch.isEnabled = voiceOn && installed
-        soundsButton.isEnabled = voiceOn && installed && hasMic
+        soundsButton.isEnabled = installed && hasMic  // the Soundboard works with the voice off too
         if case .problem(let message) = voice.state { voiceCard.amount.toolTip = message } else { voiceCard.amount.toolTip = nil }
 
         let listening = preview.map { $0.contains("listening") } ?? voice.listening
-        dot.isLive = voiceOn && installed && listening
+        dot.isLive = (voiceOn || voice.runsForSounds) && installed && listening
         footer.toolTip = dot.isLive ? "An app is using Pitch Shift Mic" : "Choose Pitch Shift Mic as the microphone in Discord, Zoom or any app"
         micName.setAccessibilityValue(dot.isLive ? "Pitch Shift Mic, in use" : "Pitch Shift Mic, not in use")
 

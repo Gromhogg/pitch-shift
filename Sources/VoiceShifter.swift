@@ -772,7 +772,9 @@ enum VoiceState: Equatable {
     case problem(String)
 }
 
-// Decides when the voice chain runs, which mic it uses, and rebuilds it when devices change.
+// Decides when the voice chain runs, which mic it uses, and rebuilds it when devices change. It runs while "Your
+// voice" is on, and also while the Soundboard is open with the voice off: then the mic goes into Pitch Shift Mic
+// unchanged (no pitch change, so Rubber Band isn't used and there's almost no delay), with the sounds mixed in.
 final class VoiceShifter {
     var halfSteps: Float { didSet { pushParams() } }
     var cartoon: Float { didSet { pushParams() } }  // voice style: 0 = Natural, 1 = Cartoon
@@ -785,7 +787,9 @@ final class VoiceShifter {
     private(set) var chain: VoiceChain?
     let params: OSAllocatedUnfairLock<VoiceParams>
     let sounds = OSAllocatedUnfairLock(uncheckedState: SoundPlay())  // the Soundboard's sound, for the chain
-    private var running = false
+    private var running = false      // the chain may run (the voice is on, or the Soundboard is open)
+    private var voiceSwitch = false  // "Your voice" is on
+    private(set) var runsForSounds = false  // the Soundboard is open (with the voice off: no pitch change)
     private var holdCount = 0
     private var listeners: [Listener] = []
     private var micListeners: [Listener] = []
@@ -801,10 +805,40 @@ final class VoiceShifter {
         params = OSAllocatedUnfairLock(initialState: VoiceParams(halfSteps: halfSteps, cartoon: cartoon, slowDeeper: slowDeeper, silent: false))
     }
 
-    var isOn: Bool { running }
+    var isOn: Bool { voiceSwitch }
     var currentMic: AudioDeviceID? { Mics.resolve(micUID) }
 
+    // "Your voice" on.
     func start() {
+        guard !voiceSwitch else { return }
+        voiceSwitch = true
+        begin()
+    }
+
+    // "Your voice" off. With the Soundboard open, the chain keeps going with no pitch change.
+    func stop() {
+        guard voiceSwitch else { return }
+        voiceSwitch = false
+        pushParams()
+        if runsForSounds { onChange() } else { end() }
+    }
+
+    // The Soundboard opened or closed: while it's open the chain runs even with the voice off.
+    func keepForSounds(_ on: Bool) {
+        guard on != runsForSounds else { return }
+        runsForSounds = on
+        if on { begin() } else if !voiceSwitch { end() }
+    }
+
+    // Everything off (quitting).
+    func stopAll() {
+        runsForSounds = false
+        stop()
+        end()
+    }
+
+    private func begin() {
+        pushParams()
         guard !running else { return }
         running = true
         // With no mic picked, the mic follows the Mac's default mic, and the headphones in use (see Mics.choose).
@@ -821,7 +855,7 @@ final class VoiceShifter {
         update()
     }
 
-    func stop() {
+    private func end() {
         guard running else { return }
         running = false
         listeners = []
@@ -843,8 +877,9 @@ final class VoiceShifter {
         params.withLock { $0.silent = silent }
     }
 
+    // With the voice off (only the Soundboard running) the voice goes through unchanged.
     private func pushParams() {
-        let steps = halfSteps, cartoon = cartoon, slowDeeper = slowDeeper
+        let steps = voiceSwitch ? halfSteps : 0, cartoon = cartoon, slowDeeper = voiceSwitch && slowDeeper
         params.withLock { $0.halfSteps = steps; $0.cartoon = cartoon; $0.slowDeeper = slowDeeper }
     }
 

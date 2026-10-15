@@ -616,6 +616,7 @@ final class SoundboardPanel: NSObject, NSWindowDelegate {
     private let addButton = NSButton()
     private let stopButton = NSButton(title: "Stop", target: nil, action: nil)
     private var pads: [SoundPad] = []
+    var onClose: () -> Void = {}
     private var volumePopover: NSPopover?
     private var clickWatch: Any?  // closes the volume popover on a click in another app
     private let columns = 3, padSize = NSSize(width: 120, height: 40), gap: CGFloat = 8, margin: CGFloat = 16
@@ -700,6 +701,7 @@ final class SoundboardPanel: NSObject, NSWindowDelegate {
         pads.forEach { $0.finishRenaming(keep: true) }
         board.stop()
         board.ready = false
+        onClose()
     }
 
     // Typing a new name ends when the owner goes back to another app.

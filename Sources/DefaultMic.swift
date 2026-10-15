@@ -1,6 +1,7 @@
-// While "Your voice" is on, Pitch Shift Mic becomes the Mac's default microphone, so apps set to the default mic
-// (Discord's "Default", Zoom's "Same as System", ...) get the shifted voice. The real mic is put back when the
-// voice is switched off or the app quits, and by a small watchdog process if the app ever crashes.
+// While "Your voice" is on (or the Soundboard is open), Pitch Shift Mic becomes the Mac's default microphone, so
+// apps set to the default mic (Discord's "Default", Zoom's "Same as System", ...) get the shifted voice. The real mic
+// is put back when the voice is switched off (and the Soundboard closed) or the app quits, and by a small watchdog
+// process if the app ever crashes.
 import CoreAudio
 import Foundation
 

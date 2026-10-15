@@ -52,7 +52,7 @@ More help: [windows/README.md](windows/README.md).
 - Turn on **Deeper when slow** and your voice goes lower while you talk slowly, then back when you talk normally (Mac).
 - In Discord, Zoom or any other app, choose **Pitch Shift Mic** as your microphone.
 - Press **Test** to record 5 seconds of your shifted voice and hear it back.
-- Press **Sounds** for the Soundboard (Mac): add sound files with **+**, then click one to play it into your call (right-click one to rename it, change its volume or remove it). You hear it too; on your Mac's own speakers your voice is muted while it plays, so it can't echo.
+- Press **Sounds** for the Soundboard (Mac): add sound files with **+**, then click one to play it into your call (right-click one to rename it, change its volume or remove it). You hear it too; on your Mac's own speakers your voice is muted while it plays, so it can't echo. It works with **Your voice** off too: your mic then goes into the call unchanged.
 - Use headphones in calls. If your voice cuts out, turn off the call app's noise suppression (like Krisp).
 
 Both can be on at the same time. Closing the window keeps Pitch Shift running. Quit it with ⌘Q.
