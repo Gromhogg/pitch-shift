@@ -10,7 +10,8 @@
 //   - pitch mapping toward the voice's median pitch: off = 12 log2(target / speaker's median),
 //     P = strength * (off + (intonation - 1) * deviation) + extra, limited to +-15 half-steps, smoothed 25 ms,
 //     held through unvoiced and creaky frames (creak: < 70 Hz, < 0.62 x median, zig-zag jitter > 8 % over 3 frames,
-//     or aperiodicity 0.25-0.45 just after voice),
+//     or aperiodicity 0.25-0.45 just after voice); the speaker's median (4 s, seeded by assumedInputHz) learns from
+//     voiced frames and from smooth low ones (>= 0.5 x median, not rough), so a deep voice finds its real median,
 //   - voice shape (formants): formant ^ (strength * |off| / |12 log2(target / assumedInputHz)|, limited to 1),
 //     gliding over 150 ms; Rubber Band gets shape / pitch.
 // post (after Rubber Band), per output sample, all plain filters (no added delay):
@@ -247,6 +248,7 @@ struct VoiceChanger {
     float shapePower = 1;       // the formant exponent before strength (|off| / full move, 0 ... 1)
     double shapeLogNow = 0;     // log of the voice shape in use (glides)
     float lastGoodHz = 0;
+    float lastDev = 0;          // the last good frame's distance from the median (half-steps)
     int lastGoodAge = 999;
     float medianHz = 120;
     // Decisions for post.
@@ -319,6 +321,11 @@ struct VoiceChanger {
         mapBins[bin] += 1;
         mapAt = (mapAt + 1) % 1024;
         mapCount++;
+    }
+
+    void learnMedian(float f0) {
+        pushMap(pitchBin(f0));
+        seedWeight = std::max(0.0f, seedWeight - 0.25f);  // the first guess fades as real frames come in
     }
 
     float noiseFloor() const {  // 10th percentile of the levels of the last ~5 s
@@ -439,7 +446,11 @@ struct VoiceChanger {
                 const float mean = (prev[0] + prev[1] + prev[2]) / 3;
                 jitter = std::fabs(prev[1] - 0.5f * (prev[0] + prev[2])) / mean;
             }
-            creak = f0 < tuning.creakHz || f0 < tuning.creakRatio * median || jitter > tuning.creakJitter;
+            const bool rough = jitter > tuning.creakJitter;
+            creak = f0 < tuning.creakHz || f0 < tuning.creakRatio * median || rough;
+            // The speaker's median also learns from smooth low frames (a deep voice talks below 70 Hz; without them
+            // its median would stay at the first guess). Rough frames and octave-low ones (fry) stay out.
+            if (creak && !rough && f0 >= 0.5f * median) learnMedian(f0);
         } else {
             prevCount = 0;
             creak = levelOk && ap >= tuning.creakApLow && ap <= tuning.creakApHigh && lastGoodAge <= 15;
@@ -447,10 +458,10 @@ struct VoiceChanger {
         frames++;
         float target = 0;
         if (voiced && !creak) {
-            pushMap(pitchBin(f0));
-            seedWeight = std::max(0.0f, seedWeight - 0.25f);
+            learnMedian(f0);
             const float off = semitones(voice.targetHz / median);
             const float dev = std::clamp(semitones(f0 / median), -12.0f, 12.0f);
+            lastDev = dev;
             const float shift = off + (voice.intonation - 1) * dev;
             const float alpha = 1 - std::exp(-10.0f / std::max(1.0f, tuning.smoothMs));
             shiftFrame = shiftKnown ? shiftFrame + alpha * (shift - shiftFrame) : shift;
@@ -468,6 +479,10 @@ struct VoiceChanger {
                 target = lastGoodHz;  // hold: the pitch stays put through creak
                 creakFrames++;
                 voicedFrames++;
+            }
+            if (creak && shiftKnown) {  // the intonation part holds; the offset still follows the median as it learns
+                const float shift = semitones(voice.targetHz / median) + (voice.intonation - 1) * lastDev;
+                shiftFrame += (1 - std::exp(-10.0f / std::max(1.0f, tuning.smoothMs))) * (shift - shiftFrame);
             }
         }
         const int64_t index = ++flagLatest;

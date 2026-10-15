@@ -30,6 +30,8 @@
 //                [--voice Woman [--strength 1] [--quality natural] [--changer-tune "k=v,..."] [--changer-stats]]
 //                                              with the voice changer (the amount and style are then ignored;
 //                                              --changer-stats prints what it does once per second of sound)
+//                [--live-sim [--buffer 128]]   instead: the live chain's steps in callback-sized pieces (with the
+//                                              waiting sound), printing the delay they add (no devices)
 //   --list-voices [--voices-dir DIR]           the voice changer's voices (and files that were skipped)
 //   --test-button [--mic NAME] [--volume 0.03] presses Test with a quiet tone as the voice (record 5 s, play back)
 //   --test-sounds FILE [--speakers] [--seconds S] [--out F.caf] [--mic NAME] [--steps 3] [--volume 0.05] [--hear 0.02]
@@ -308,6 +310,18 @@ if let input = arg("--render-voice") {
         return (t, n)
     }
     if changerArg != nil && realisticArg { print("Realistic mode: \(realisticUnavailable); Natural mode is used.") }
+    if args.contains("--live-sim") {  // the live chain's timing, offline (see simulateVoiceChain)
+        do {
+            try simulateVoiceChain(input: input, output: args[i + 2], halfSteps: arg("--steps").flatMap(Float.init) ?? 3,
+                                   cartoon: cartoonArg ?? 0, slowDeeper: slowDeeperArg, changer: changerArg,
+                                   blockFrames: arg("--buffer").flatMap(Int.init) ?? 128)
+            print("wrote \(args[i + 2])")
+            exit(0)
+        } catch {
+            print("live-sim failed: \((error as? Problem)?.message ?? "\(error)")")
+            exit(1)
+        }
+    }
     do {
         try renderVoiceFile(input: input, output: args[i + 2], halfSteps: arg("--steps").flatMap(Float.init) ?? 3,
                             cartoon: cartoonArg ?? 0, changes: changes, slowDeeper: slowDeeperArg, levelFix: preset != "old",

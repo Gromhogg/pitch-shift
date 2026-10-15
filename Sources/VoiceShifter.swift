@@ -1525,3 +1525,93 @@ func changerStatsLine(_ s: VoiceChangerStats, seconds: Double) -> String {
     return String(format: "%4.0fs  changer: strength %.2f, speaker median %.0f Hz, shift %+.2f half-steps, shape x%.3f, voiced %.0f%%, creak %.1f%%, EQ [%@] dB, cost %.3f ms per 10 ms (worst %.3f)",
                   seconds, s.strength, s.medianHz, s.semitones, s.formant, 100 * s.voicedShare, 100 * s.creakShare, eq, s.analyseMs, s.worstMs)
 }
+
+// Offline copy of the live chain's timing (--render-voice ... --live-sim [--buffer 128]): the file goes through the
+// same steps as VoiceChain.render, in callback-sized pieces (Rubber Band, the waiting sound in a VoiceRing, the voice
+// changer's analyse and post), and the result is written as the chain would send it (late by the chain's delay).
+// Prints the Rubber Band + waiting-sound delay (the part of the mic-to-Pitch-Shift-Mic delay this code adds) and
+// the ring's dry-outs, trims and replays. No devices are used.
+func simulateVoiceChain(input: String, output: String, halfSteps: Float, cartoon: Float, slowDeeper: Bool,
+                        changer: ChangerOptions?, blockFrames: Int) throws {
+    let file = try AVAudioFile(forReading: URL(fileURLWithPath: input))
+    let rate = file.processingFormat.sampleRate
+    let length = Int(file.length)
+    guard let source = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(length)) else {
+        throw Problem(message: "Could not read \(input).")
+    }
+    try file.read(into: source)
+    let channels = Int(file.processingFormat.channelCount), used = channels <= 2 ? channels : 1
+    var mono = [Float](repeating: 0, count: length)
+    for c in 0..<used { for i in 0..<length { mono[i] += source.floatChannelData![c][i] / Float(used) } }
+    guard let stretcher = VoiceStretcher(rate: rate, halfSteps: halfSteps, cartoon: cartoon, slowDeeper: slowDeeper,
+                                         changer: changer != nil), stretcher.running,
+          let voiceChanger = voicechanger_new(rate, Int32(max(4096, blockFrames))) else {
+        throw Problem(message: "Nothing to shift (0 half-steps and no voice), or Rubber Band didn't start.")
+    }
+    defer { voicechanger_delete(voiceChanger) }
+    if let changer {
+        for (key, value) in changer.tune { _ = voicechanger_tune(voiceChanger, key, value) }
+        voicechanger_set(voiceChanger, changer.voice, changer.strength)
+        voicechanger_reset(voiceChanger)
+    }
+    let ring = VoiceRing(rate: rate)
+    let speaking = SpeakingRate(sampleRate: rate)
+    var block = [Float](repeating: 0, count: blockFrames)
+    var piece = [Float](repeating: 0, count: 4096)
+    var analysis = VoiceChangerPitch()
+    var given = 0, returned = 0
+    var delays: [Double] = []  // ms, once per callback while sending
+    var result: [Float] = []
+    result.reserveCapacity(length + Int(rate))
+    var position = 0
+    while position < length + Int(rate / 2) {
+        let pitchBefore = stretcher.pitch
+        stretcher.glide(blockFrames)
+        if stretcher.pitch != pitchBefore { ring.amountChanged() }
+        for i in 0..<blockFrames { block[i] = position + i < length ? mono[position + i] : 0 }
+        position += blockFrames
+        if slowDeeper {
+            block.withUnsafeBufferPointer { speaking.listen($0.baseAddress!, blockFrames) }
+            stretcher.set(extra: speaking.extra)
+        }
+        if stretcher.changerActive {
+            block.withUnsafeBufferPointer { voicechanger_analyse(voiceChanger, $0.baseAddress!, Int32(blockFrames), stretcher.extra, &analysis) }
+            stretcher.set(changerPitch: Double(analysis.pitchScale), formantScale: Double(analysis.formantScale))
+        }
+        block.withUnsafeBufferPointer { p in
+            var pointer: UnsafePointer<Float>? = p.baseAddress
+            rubberband_process(stretcher.state, &pointer, UInt32(blockFrames), 0)
+        }
+        given += blockFrames
+        while true {
+            let ready = min(Int(rubberband_available(stretcher.state)), piece.count)
+            if ready <= 0 { break }
+            let got = piece.withUnsafeMutableBufferPointer { stretcher.retrieve($0.baseAddress!, ready) }
+            if got <= 0 { break }
+            returned += got
+            piece.withUnsafeBufferPointer { ring.write($0.baseAddress!, got) }
+        }
+        ring.settle(blockFrames)
+        block.withUnsafeMutableBufferPointer { ring.read(into: $0.baseAddress!, blockFrames) }
+        let startDelay = Int(rubberband_get_start_delay(stretcher.state)) - Int(rubberband_get_preferred_start_pad(stretcher.state))
+        let delay = given - returned + ring.count + startDelay  // as the live chain counts it
+        if stretcher.changerActive {
+            block.withUnsafeMutableBufferPointer { voicechanger_post(voiceChanger, $0.baseAddress!, Int32(blockFrames), Int32(delay)) }
+        }
+        if !ring.waiting { delays.append(Double(delay) / rate * 1000) }
+        for i in 0..<blockFrames { result.append(softLimit(block[i])) }
+    }
+    let steady = Array(delays.suffix(delays.count * 4 / 5)).sorted()  // after the first fifth (start-up trims)
+    if !steady.isEmpty {
+        print(String(format: "live-sim: callback %d, Rubber Band + waiting sound %.1f ms median (%.1f ... %.1f) over the last 80%%; dry-outs %d, trims %d (%.0f ms), replays %d (%.0f ms), margin %.1f ms",
+                     blockFrames, steady[steady.count / 2], steady.first!, steady.last!, ring.dryOuts, ring.trims,
+                     Double(ring.trimmed) / rate * 1000, ring.replays, Double(ring.replayed) / rate * 1000, Double(ring.margin) / rate * 1000))
+    }
+    guard let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1),
+          let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(max(1, result.count))) else {
+        throw Problem(message: "Could not write \(output).")
+    }
+    buffer.frameLength = AVAudioFrameCount(result.count)
+    _ = result.withUnsafeBufferPointer { memcpy(buffer.floatChannelData![0], $0.baseAddress!, result.count * MemoryLayout<Float>.size) }
+    try AVAudioFile(forWriting: URL(fileURLWithPath: output), settings: format.settings).write(from: buffer)
+}
