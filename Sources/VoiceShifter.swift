@@ -271,14 +271,15 @@ final class VoiceStretcher {
 // Each syllable is a bump in loudness, so it counts bumps: the loudness of the voice's middle sounds (about
 // 250-2500 Hz, where the vowels are), smoothed over 20 ms and looked at every 10 ms. A bump counts when it rises
 // well above the quiet between words (the quietest moment of the last second), falls again, and comes at least
-// 80 ms after the last one. The rate is the bumps in the last 2 seconds of talking. Pauses don't count as talking,
-// so the rate stays where it was while it's quiet. The voice only moves once the rate has clearly changed
-// (by more than 0.5 per second, for more than half a second), so normal talking doesn't wobble.
+// 80 ms after the last one. The rate is the bumps in the last 1.2 seconds of talking. Pauses don't count as
+// talking, so the rate stays where it was while it's quiet. The voice only moves once the rate has clearly changed
+// (by more than one syllable in those 1.2 s, for more than a quarter of a second), so normal talking doesn't
+// wobble. Going from normal to slow talking moves the voice all the way down in about 2 seconds.
 // `listen` runs on the sound thread: it makes no memory and never waits.
 final class SpeakingRate {
-    static let depth: Float = 5         // half-steps lower when talking slowly
-    static let slowRate: Float = 2      // syllables per second: this slow or slower gets all of `depth`
-    static let normalRate: Float = 4    // this fast or faster: no change (in between: part of `depth`)
+    static let depth: Float = 8         // half-steps lower when talking slowly
+    static let slowRate: Float = 1.5    // syllables per second: this slow or slower gets all of `depth`
+    static let normalRate: Float = 3    // this fast or faster: no change (in between: part of `depth`)
 
     private(set) var rate = SpeakingRate.normalRate  // syllables per second, as measured
     private(set) var used = SpeakingRate.normalRate  // the rate the voice follows (moves only after a clear change)
@@ -293,14 +294,15 @@ final class SpeakingRate {
     private let quietest: Float = -55     // dB: anything quieter is never talking
     private let bumpGap = 8               // at least 80 ms between bumps
     private let talkHold = 25             // a pause still counts as talking for its first 0.25 s
-    private let windowSteps = 200         // the rate counts the last 2 s of talking
-    private let firstSteps = 100          // ...once there has been 1 s of it
-    private let moveAfter = 50            // the rate must stay clearly changed this long (0.5 s) to move the voice
+    private let windowSteps = 120         // the rate counts the last 1.2 s of talking
+    private let firstSteps = 60           // ...once there has been 0.6 s of it
+    private let moveAfter = 25            // the rate must stay clearly changed this long (0.25 s) to move the voice
+    private let moveBy: Float = 0.9       // ...by more than this (syllables per second): one syllable in 1.2 s is 0.83
     private let stepLength: Int           // samples in 10 ms
     private let smoothing: Double         // for the 20 ms smoothing
     private let b0, a1, a2: Double        // the 250-2500 Hz band-pass filter
     private let quietPieces: UnsafeMutablePointer<Float>  // the quietest level in each 100 ms of the last second
-    private let window: UnsafeMutablePointer<UInt8>       // bumps in each 10 ms of the last 2 s of talking
+    private let window: UnsafeMutablePointer<UInt8>       // bumps in each 10 ms of the last 1.2 s of talking
 
     private var x1 = 0.0, x2 = 0.0, y1 = 0.0, y2 = 0.0
     private var energy = 0.0
@@ -417,7 +419,7 @@ final class SpeakingRate {
         windowAt = (windowAt + 1) % windowSteps
         windowFilled = min(windowFilled + 1, windowSteps)
         if windowFilled >= firstSteps { rate = Float(windowBumps) / (Float(windowFilled) * 0.01) }
-        if abs(rate - used) > 0.5 {
+        if abs(rate - used) > moveBy {
             changedFor += 1
             if changedFor >= moveAfter {
                 used = rate
