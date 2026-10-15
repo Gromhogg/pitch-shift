@@ -13,6 +13,14 @@
 //                                              shifts a sound file with the voice's own settings (offline, no devices;
 //                                              --cartoon-at "1:1,2:0" moves the style to 1 at 1 s and back to 0 at 2 s)
 //   --test-button [--mic NAME] [--volume 0.03] presses Test with a quiet tone as the voice (record 5 s, play back)
+//   --test-sounds FILE [--speakers] [--seconds S] [--out F.caf] [--mic NAME] [--steps 3] [--volume 0.05] [--hear 0.02]
+//                                              Soundboard: plays FILE into Pitch Shift Mic 1 s in, with a quiet tone as
+//                                              the voice, records Pitch Shift Mic and checks it (one copy of the sound,
+//                                              its level; --speakers: as if on the Mac's speakers, so the voice must
+//                                              stop while it plays). --hear: also play it here at that volume.
+//                                              --recording F.caf: check a recording saved with --out (no devices).
+//                                              --stop-after S: press Stop S seconds after the sound starts.
+//                                              --hear-out F.caf: save the owner's copy (with --hear).
 //   --test ... --advanced [--record-out F.wav] [--steps-at "3:8,6:-5"] [--tone-amount 0.5] [--tone-at "2:1,4:-1"]
 //              [--as-device UID] [--tone-db 6,-6]
 //                                              "What you hear" with Advanced processing on (--watch prints the delay;
@@ -33,9 +41,9 @@ func arg(_ name: String) -> String? {
 }
 // --preview STATES [--size 800x400] [--cartoon-amount 0.5] [--tone-amount -0.4]: show the window in a state for
 // screenshots, without touching any sound or settings, and without switching apps (states: hear-on, voice-on, waiting,
-// typing, recording, playing, listening, hover, menu, roll, resize, no-driver, advanced-alert, light, tone, slow;
-// --cartoon-amount sets the voice style slider; "tone" shows Advanced processing on, and --tone-amount sets the
-// Bass ↔ Treble slider; slow turns on "Deeper when slow").
+// typing, recording, playing, listening, hover, menu, roll, resize, no-driver, advanced-alert, sounds, light, tone,
+// slow; --cartoon-amount sets the voice style slider; sounds opens the Soundboard with example names; "tone" shows
+// Advanced processing on, and --tone-amount sets the Bass ↔ Treble slider; slow turns on "Deeper when slow").
 let preview = arg("--preview")
 
 var signalSources: [DispatchSourceSignal] = []
@@ -317,6 +325,103 @@ if args.contains("--test-button") {
     voice.start()
     test.click()
     DispatchQueue.main.asyncAfter(deadline: .now() + 15) { print("timed out"); exit(1) }
+    dispatchMain()
+}
+
+// Soundboard check: a quiet tone is the voice, FILE plays into Pitch Shift Mic 1 s in, Pitch Shift Mic is recorded.
+if let path = arg("--test-sounds") {
+    let steps = arg("--steps").flatMap(Float.init) ?? 3
+    let toneHz = 440.0
+    // --recording F.caf: checks a recording saved earlier with --out (no devices are used).
+    if let saved = arg("--recording") {
+        guard let file = try? AVAudioFile(forReading: URL(fileURLWithPath: saved)),
+              let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length)),
+              (try? file.read(into: buffer)) != nil,
+              let reference = try? SoundClip(url: URL(fileURLWithPath: path), rate: file.processingFormat.sampleRate) else {
+            print("Can't read \(saved) or \(path)")
+            exit(1)
+        }
+        let recorded = Array(UnsafeBufferPointer(start: buffer.floatChannelData![0], count: Int(buffer.frameLength)))
+        let samples = Array(UnsafeBufferPointer(start: reference.samples, count: reference.count))
+        soundTestReport(recorded: recorded, reference: samples, rate: reference.rate,
+                        toneHz: toneHz * pow(2, Double(steps) / 12)).forEach { print($0) }
+        exit(0)
+    }
+    let micUID = arg("--mic").flatMap { name in Mics.list().first { $0.name == name }?.uid }
+    let voice = VoiceShifter(halfSteps: steps, cartoon: 0, micUID: micUID)
+    guard let mic = voice.currentMic, let virtualMic = Mics.virtualMic else { print("No mic or Pitch Shift Mic not installed"); exit(1) }
+    let rate = nominalRate(mic)
+    let volume = arg("--volume").flatMap(Double.init) ?? 0.05
+    var phase = 0.0
+    voice.testSource = { buffer, frames in
+        for i in 0..<frames { buffer[i] = Float(volume * sin(phase)); phase += 2 * .pi * toneHz / rate }
+    }
+    let board = Soundboard(voice: voice, files: [], saves: false)
+    board.speakers = args.contains("--speakers")
+    board.hearVolume = arg("--hear").flatMap(Float.init) ?? 0
+    // --hear-out: the owner's copy, as its player makes it (collected on the main thread).
+    var heard: [Float] = []
+    var heardRate = 0.0
+    if arg("--hear-out") != nil {
+        board.hearTap = { buffer, _ in
+            guard let data = buffer.floatChannelData else { return }
+            let piece = Array(UnsafeBufferPointer(start: data[0], count: Int(buffer.frameLength)))
+            let rate = buffer.format.sampleRate
+            DispatchQueue.main.async { heard += piece; heardRate = rate }
+        }
+    }
+    board.ready = board.hearVolume > 0  // like the open Soundboard: the owner's player is already running
+    let url = URL(fileURLWithPath: path)
+    let clip: SoundClip
+    do { clip = try SoundClip(url: url, rate: rate) } catch { print("Can't read \(path)"); exit(1) }
+    let seconds = arg("--seconds").flatMap(Double.init) ?? (1 + clip.seconds + 2)
+    let started = Date()
+    board.onChange = {
+        print(String(format: "%.2fs: %@", Date().timeIntervalSince(started), board.playing.map { "playing \($0)" } ?? "stopped"))
+    }
+    onQuitSignals { voice.stop(); exit(0) }
+    voice.start()
+    guard let chain = voice.chain else { print("voice did not start: \(voice.state)"); exit(1) }
+    let recorder = try! Recorder(device: virtualMic, seconds: seconds)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+        let asked = Date()
+        board.play(clip, as: url.lastPathComponent)
+        if board.hearVolume > 0 { print(String(format: "the owner's copy took %.0f ms to start", Date().timeIntervalSince(asked) * 1000)) }
+    }
+    if let stopAfter = arg("--stop-after").flatMap(Double.init) {  // presses Stop part way through
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1 + stopAfter) { board.stop() }
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + seconds + 0.2) {
+        let recorded = recorder.finish()
+        voice.stop()
+        print(String(format: "sound test: file=%@ (%.2f s) mic=%@ rate=%d steps=%g speakers=%@ tone=%g",
+                     url.lastPathComponent, clip.seconds, chain.micName, Int(chain.sampleRate), steps,
+                     board.speakers == true ? "yes" : "no", volume))
+        // The file as the chain plays it, at the recording's rate.
+        let reference = recorder.sampleRate == clip.rate ? clip : (try? SoundClip(url: url, rate: recorder.sampleRate))
+        if let reference {
+            let samples = Array(UnsafeBufferPointer(start: reference.samples, count: reference.count))
+            let shifted = toneHz * pow(2, Double(steps) / 12)
+            soundTestReport(recorded: recorded, reference: samples, rate: recorder.sampleRate, toneHz: shifted).forEach { print($0) }
+        }
+        if let out = arg("--out"), let format = AVAudioFormat(standardFormatWithSampleRate: recorder.sampleRate, channels: 1),
+           let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(recorded.count)) {
+            buffer.frameLength = AVAudioFrameCount(recorded.count)
+            for (i, x) in recorded.enumerated() { buffer.floatChannelData![0][i] = x }
+            if (try? AVAudioFile(forWriting: URL(fileURLWithPath: out), settings: format.settings).write(from: buffer)) != nil {
+                print("wrote \(out)")
+            }
+        }
+        if let out = arg("--hear-out"), heardRate > 0, let format = AVAudioFormat(standardFormatWithSampleRate: heardRate, channels: 1),
+           let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(max(1, heard.count))) {
+            buffer.frameLength = AVAudioFrameCount(heard.count)
+            for (i, x) in heard.enumerated() { buffer.floatChannelData![0][i] = x }
+            if (try? AVAudioFile(forWriting: URL(fileURLWithPath: out), settings: format.settings).write(from: buffer)) != nil {
+                print("wrote \(out) (the owner's copy)")
+            }
+        }
+        exit(0)
+    }
     dispatchMain()
 }
 
