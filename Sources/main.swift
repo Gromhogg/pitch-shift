@@ -37,7 +37,7 @@
 //   --list-voices [--voices-dir DIR]           the voice changer's voices (and files that were skipped)
 //   --test-button [--mic NAME] [--volume 0.03] presses Test with a quiet tone as the voice (record 5 s, play back)
 //   --test-sounds FILE [--speakers] [--seconds S] [--out F.caf] [--mic NAME] [--steps 3] [--volume 0.05] [--hear 0.02]
-//                [--sound-volume 0.5] [--voice-off]
+//                [--sound-volume 0.5] [--voice-off] [--voice Woman [--quality realistic]]
 //                                              Soundboard: plays FILE into Pitch Shift Mic 1 s in, with a quiet tone as
 //                                              the voice, records Pitch Shift Mic and checks it (one copy of the sound,
 //                                              its level; --speakers: as if on the Mac's speakers, so the voice must
@@ -693,6 +693,12 @@ if let path = arg("--test-sounds") {
         print(String(format: "%.2fs: %@", Date().timeIntervalSince(started), board.playing.map { "playing \($0)" } ?? "stopped"))
     }
     onQuitSignals { voice.stopAll(); exit(0) }
+    // --voice Woman [--quality realistic]: with the voice changer on (the sound must still arrive unchanged, after it;
+    // the tone then comes out at the voice's pitch, not at --steps).
+    if !voiceOff, let changerArg, let entry = arg("--voice").flatMap({ VoiceLibrary.shared.voice($0) }) {
+        voice.changerTune = changerArg.tune
+        voice.changer = ChangerSettings(on: true, voiceID: entry.id, strength: changerArg.strength, realistic: realisticArg)
+    }
     if voiceOff { voice.keepForSounds(true) } else { voice.start() }
     voice.hold(true)  // runs the chain like the Test button does (no app is listening yet)
     guard let chain = voice.chain else { print("voice did not start: \(voice.state)"); exit(1) }

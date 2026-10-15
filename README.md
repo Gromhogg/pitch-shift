@@ -86,7 +86,7 @@ brew install rubberband
 ./build.sh
 ```
 
-`build.sh` builds `Pitch Shift.app` for Apple silicon and Intel (with Pitch Shift Mic inside), puts it in Applications and puts a shortcut on your Desktop. The first time, it downloads the source of Rubber Band and libsamplerate to build the Intel part (`libs/build.sh`). `packaging/make-pkg.sh` makes the installer, and `./release.sh 1.2.3` posts a new version.
+`build.sh` builds `Pitch Shift.app` for Apple silicon and Intel (with Pitch Shift Mic inside), puts it in Applications and puts a shortcut on your Desktop. The first time, it downloads the source of Rubber Band and libsamplerate to build the Intel part (`libs/build.sh`), and the Realistic voice changer's AI model files (about 130 MB, listed in `voices/models.txt`; without them the app still builds and only the Natural voice changer works). `packaging/make-pkg.sh` makes the installer, and `./release.sh 1.2.3` posts a new version.
 
 ## How it works
 
