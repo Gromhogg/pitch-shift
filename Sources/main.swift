@@ -514,6 +514,7 @@ if args.contains("--test-voice") {
     }
     DispatchQueue.main.asyncAfter(deadline: .now() + seconds + 0.2) {
         let recorded = recorder.finish()
+        let changerState = voice.changerState  // before stopping (stopping turns it off)
         voice.stop()
         let peak = recorded.reduce(Float(0)) { max($0, abs($1)) }
         let firstSound = recorded.firstIndex { abs($0) > 0.02 }.map { Double($0) / recorder.sampleRate * 1000 }
@@ -526,7 +527,7 @@ if args.contains("--test-voice") {
         line += "recorded=\(recorded.count) peak=\(peak) firstSound=\(firstSound.map { "\(Int($0))ms" } ?? "none")"
         line += String(format: " cpu=%.1f%% of one core (whole test)", cpuShare)
         if changerArg != nil {
-            line += " changer=\(voice.changerState)"
+            line += " changer=\(changerState)"
             if s.changing {
                 line += String(format: " (shift %+.2f half-steps, shape x%.3f, speaker median %.0f Hz, cost %.3f ms per 10 ms, worst %.3f)",
                                s.changer.semitones, s.changer.formant, s.changer.medianHz, s.changer.analyseMs, s.changer.worstMs)
