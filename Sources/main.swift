@@ -19,10 +19,20 @@
 //                                              the sound waiting to go out, the dry-outs/trims/replays and the delay from
 //                                              the mic to Pitch Shift Mic (the delay parts are printed at the start).
 //                                              --buffer N: callback size to ask for (default 128, or 256 above 48 kHz)
+//                                              --voice Woman [--strength S] [--quality natural] [--changer-tune ...]
+//                                              [--changer-stats]: with the voice changer on (--watch also prints what
+//                                              it does; with --file, --watch measures the delay at each start of the
+//                                              file's sound: give it a file with ~1 s of silence first)
 //   --render-voice IN OUT [--steps 3] [--cartoon | --cartoon-amount 0.5] [--cartoon-at "1:1,2:0"] [--slow-deeper]
 //                [--voice-preset old]          shifts a sound file with the voice's own settings (offline, no devices;
 //                                              --cartoon-at "1:1,2:0" moves the style to 1 at 1 s and back to 0 at 2 s;
 //                                              --voice-preset old: as before the Natural level fix, for comparing)
+//                [--voice Woman [--strength 1] [--quality natural] [--changer-tune "k=v,..."] [--changer-stats]]
+//                                              with the voice changer (the amount and style are then ignored;
+//                                              --changer-stats prints what it does once per second of sound)
+//                [--live-sim [--buffer 128]]   instead: the live chain's steps in callback-sized pieces (with the
+//                                              waiting sound), printing the delay they add (no devices)
+//   --list-voices [--voices-dir DIR]           the voice changer's voices (and files that were skipped)
 //   --test-button [--mic NAME] [--volume 0.03] presses Test with a quiet tone as the voice (record 5 s, play back)
 //   --test-sounds FILE [--speakers] [--seconds S] [--out F.caf] [--mic NAME] [--steps 3] [--volume 0.05] [--hear 0.02]
 //                [--sound-volume 0.5] [--voice-off]
@@ -99,6 +109,67 @@ func fourCC(_ value: UInt32) -> String {
 let cartoonArg: Float? = args.contains("--cartoon") ? 1 : arg("--cartoon-amount").flatMap(Float.init).map { max(0, min(1, $0)) }
 // "Deeper when slow" on, for --test-voice and --render-voice.
 let slowDeeperArg = args.contains("--slow-deeper")
+
+// The voice changer, for --render-voice and --test-voice: --voice NAME (Woman, Man or another voice's id),
+// --strength S (0 ... 1, default 1), --quality natural|realistic, --changer-tune "key=value,..." (VoiceChanger.h),
+// --changer-stats (once a second: what it is doing). --voices-dir DIR: also read voices from DIR (they replace
+// built-in voices with the same id). --list-voices: the voices found, and files that were skipped.
+if let dir = arg("--voices-dir") { VoiceLibrary.extraFolder = URL(fileURLWithPath: dir) }
+let changerTuneArg: [(String, Float)] = (arg("--changer-tune") ?? "").split(separator: ",").compactMap { item in
+    let parts = item.split(separator: "=")
+    guard parts.count == 2, let value = Float(parts[1].trimmingCharacters(in: .whitespaces)) else {
+        print("--changer-tune: can't read \"\(item)\" (use key=value)"); exit(1)
+    }
+    return (parts[0].trimmingCharacters(in: .whitespaces), value)
+}
+// The voice asked for with --voice (nil without --voice; stops with a message if it can't be used).
+let changerArg: ChangerOptions? = {
+    guard let name = arg("--voice") else { return nil }
+    guard let entry = VoiceLibrary.shared.voice(name) else {
+        print("--voice: no voice \"\(name)\". Voices: \(VoiceLibrary.shared.voices.map(\.name).joined(separator: ", "))"); exit(1)
+    }
+    guard let natural = entry.natural else { print("--voice: \(entry.name) has no Natural mode settings"); exit(1) }
+    if !changerTuneArg.isEmpty, let probe = voicechanger_new(48000, 512) {  // check the keys before starting
+        let unknown = changerTuneArg.filter { voicechanger_tune(probe, $0.0, $0.1) == 0 }.map(\.0)
+        voicechanger_delete(probe)
+        if !unknown.isEmpty { print("--changer-tune: unknown keys \(unknown.joined(separator: ", "))"); exit(1) }
+    }
+    let strength = arg("--strength").flatMap(Float.init).map { max(0, min(1, $0)) } ?? 1
+    return ChangerOptions(voice: natural, strength: strength, tune: changerTuneArg, stats: args.contains("--changer-stats"))
+}()
+// Why Realistic (AI) mode can't run yet.
+#if arch(arm64)
+let realisticUnavailable = "not available yet"
+#else
+let realisticUnavailable = "needs Apple silicon"
+#endif
+let realisticArg: Bool = {
+    switch arg("--quality") ?? "natural" {
+    case "natural": return false
+    case "realistic": return true
+    default: print("--quality: natural or realistic"); exit(1)
+    }
+}()
+
+if args.contains("--list-voices") {
+    let library = VoiceLibrary.shared
+    print("Voices (built in: \(VoiceLibrary.builtInFolder?.path ?? "-"); added: \(VoiceLibrary.userFolder.path)\(VoiceLibrary.extraFolder.map { "; --voices-dir: \($0.path)" } ?? "")):")
+    for voice in library.voices {
+        let m = voice.manifest
+        var modes: [String] = []
+        if let n = m.natural {
+            modes.append(String(format: "natural (target %.0f Hz, formant x%.2f, intonation %.2f)", n.targetHz, n.formant, n.intonation))
+        }
+        if let r = m.realistic {
+            let have = voice.modelURL.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+            modes.append("realistic (\(r.model)\(have ? "" : ", model file missing"))")
+        }
+        print("  \(m.id) \"\(m.name)\" v\(m.version)\(voice.builtIn ? " [built in]" : ""): \(modes.joined(separator: "; ")) — \(voice.folder.path)")
+    }
+    if library.voices.isEmpty { print("  none") }
+    for problem in library.problems { print("  skipped \(problem)") }
+    exit(0)
+}
 
 // The watchdog: a second copy of the app that gives the real mic back if the app ends without doing it.
 if let pid = arg("--watchdog").flatMap({ pid_t($0) }) { DefaultMic.watch(pid) }
@@ -228,7 +299,7 @@ if let input = arg("--render-file") {
 if let input = arg("--render-voice") {
     let i = args.firstIndex(of: "--render-voice")!
     guard i + 2 < args.count else {
-        print("usage: --render-voice IN OUT [--steps N] [--cartoon-amount X] [--slow-deeper] [--voice-preset old]"); exit(1)
+        print("usage: --render-voice IN OUT [--steps N] [--cartoon-amount X] [--slow-deeper] [--voice-preset old] [--voice Woman [--strength S]]"); exit(1)
     }
     let preset = arg("--voice-preset") ?? "current"
     guard preset == "current" || preset == "old" else { print("--voice-preset: old or current"); exit(1) }
@@ -238,9 +309,23 @@ if let input = arg("--render-voice") {
         guard parts.count == 2, let t = Double(parts[0]), let n = Float(parts[1]) else { return nil }
         return (t, n)
     }
+    if changerArg != nil && realisticArg { print("Realistic mode: \(realisticUnavailable); Natural mode is used.") }
+    if args.contains("--live-sim") {  // the live chain's timing, offline (see simulateVoiceChain)
+        do {
+            try simulateVoiceChain(input: input, output: args[i + 2], halfSteps: arg("--steps").flatMap(Float.init) ?? 3,
+                                   cartoon: cartoonArg ?? 0, slowDeeper: slowDeeperArg, changer: changerArg,
+                                   blockFrames: arg("--buffer").flatMap(Int.init) ?? 128)
+            print("wrote \(args[i + 2])")
+            exit(0)
+        } catch {
+            print("live-sim failed: \((error as? Problem)?.message ?? "\(error)")")
+            exit(1)
+        }
+    }
     do {
         try renderVoiceFile(input: input, output: args[i + 2], halfSteps: arg("--steps").flatMap(Float.init) ?? 3,
-                            cartoon: cartoonArg ?? 0, changes: changes, slowDeeper: slowDeeperArg, levelFix: preset != "old")
+                            cartoon: cartoonArg ?? 0, changes: changes, slowDeeper: slowDeeperArg, levelFix: preset != "old",
+                            changer: changerArg)
         print("wrote \(args[i + 2])")
         exit(0)
     } catch {
@@ -294,9 +379,17 @@ if args.contains("--test-voice") {
     let steps = arg("--steps").flatMap(Float.init) ?? 3
     let micUID = arg("--mic").flatMap { name in Mics.list().first { $0.name == name }?.uid }
     let voice = VoiceShifter(halfSteps: steps, cartoon: cartoonArg ?? 0, slowDeeper: slowDeeperArg, micUID: micUID)
+    if let changerArg, let entry = arg("--voice").flatMap({ VoiceLibrary.shared.voice($0) }) {  // --voice: the voice changer on
+        voice.changerTune = changerArg.tune
+        voice.changer = ChangerSettings(on: true, voiceID: entry.id, strength: changerArg.strength, realistic: realisticArg)
+    }
     guard let mic = voice.currentMic, let virtualMic = Mics.virtualMic else { print("No mic or Pitch Shift Mic not installed"); exit(1) }
     let rate = nominalRate(mic)
     let seconds = arg("--seconds").flatMap(Double.init) ?? 3
+    var usage = rusage()
+    getrusage(RUSAGE_SELF, &usage)
+    let cpuStart = Double(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) + Double(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) / 1e6
+    let wallStart = Date()
     let tone = arg("--tone").flatMap(Double.init)
     var sourceSamples: [Float] = []
     if let path = arg("--file") {
@@ -319,7 +412,10 @@ if args.contains("--test-voice") {
     var phase = 0.0, position = 0
     let toneStart = Int(rate)  // the tone starts 1 s in, once recording runs, so its delay can be measured
     // --watch: the tone plays for half of every second, so the delay can be measured again each second.
+    // With --file, the delay is measured where the file's sound starts, each time it starts over.
     let watch = args.contains("--watch")
+    let fileOnset = sourceSamples.firstIndex { abs($0) > 0.02 } ?? 0
+    let watchFile = watch && tone == nil && !sourceSamples.isEmpty
     let toneStarts = UnsafeMutablePointer<Double>.allocate(capacity: Int(seconds) + 2)  // host time of each tone start (s)
     var toneCount = 0
     voice.testBufferFrames = arg("--buffer").flatMap(UInt32.init)
@@ -337,6 +433,10 @@ if args.contains("--test-voice") {
                 if on { phase += 2 * .pi * tone / rate }
                 position += 1
             } else if !sourceSamples.isEmpty {
+                if watchFile && position % sourceSamples.count == fileOnset && toneCount < Int(seconds) + 2, let chain = voice.chain {
+                    toneStarts[toneCount] = Double(AudioConvertHostTimeToNanos(chain.blockInputTime)) / 1e9 + Double(i) / rate
+                    toneCount += 1
+                }
                 buffer[i] = sourceSamples[position % sourceSamples.count]
                 position += 1
             } else {
@@ -385,11 +485,23 @@ if args.contains("--test-voice") {
                               ms(s.delay), s.frames)
             line += String(format: " | margin %.1f ms | dry-outs %d, trims %d (%.0f ms), replays %d (%.0f ms), overloads %d",
                            ms(s.margin), s.dryOuts, s.trims, ms(s.trimmed), s.replays, ms(s.replayed), s.overloads)
-            if tone != nil { line += delays.last.map { String(format: " | mic to Pitch Shift Mic %.0f ms", $0) } ?? " | mic to Pitch Shift Mic -" }
+            if tone != nil || watchFile {
+                line += delays.last.map { String(format: " | mic to Pitch Shift Mic %.0f ms", $0) } ?? " | mic to Pitch Shift Mic -"
+            }
             print(line)
+            if s.changing { print(changerStatsLine(s.changer, seconds: Date().timeIntervalSince(started).rounded())) }
             if Date().timeIntervalSince(started) < seconds - 0.5 { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { look() } }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { look() }
+    }
+    if changerArg?.stats == true && !watch {  // once a second: what the voice changer is doing
+        let started = Date()
+        func report() {
+            let s = chain.stats.withLock { $0 }
+            if s.changing { print(changerStatsLine(s.changer, seconds: Date().timeIntervalSince(started).rounded())) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { report() }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { report() }
     }
     if slowDeeperArg {  // once a second: the speaking rate and the extra shift in use
         let started = Date()
@@ -402,13 +514,25 @@ if args.contains("--test-voice") {
     }
     DispatchQueue.main.asyncAfter(deadline: .now() + seconds + 0.2) {
         let recorded = recorder.finish()
+        let changerState = voice.changerState  // before stopping (stopping turns it off)
         voice.stop()
         let peak = recorded.reduce(Float(0)) { max($0, abs($1)) }
         let firstSound = recorded.firstIndex { abs($0) > 0.02 }.map { Double($0) / recorder.sampleRate * 1000 }
         let s = chain.stats.withLock { $0 }
+        getrusage(RUSAGE_SELF, &usage)
+        let cpuEnd = Double(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) + Double(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) / 1e6
+        let cpuShare = (cpuEnd - cpuStart) / max(0.001, Date().timeIntervalSince(wallStart)) * 100
         var line = "voice test: mic=\(chain.micName) rate=\(Int(chain.sampleRate)) style=\(voice.cartoon) callback=\(s.frames) "
         line += String(format: "shifter+wait=%.0fms dry-outs=%d overloads=%d ", Double(s.delay) / chain.sampleRate * 1000, s.dryOuts, s.overloads)
         line += "recorded=\(recorded.count) peak=\(peak) firstSound=\(firstSound.map { "\(Int($0))ms" } ?? "none")"
+        line += String(format: " cpu=%.1f%% of one core (whole test)", cpuShare)
+        if changerArg != nil {
+            line += " changer=\(changerState)"
+            if s.changing {
+                line += String(format: " (shift %+.2f half-steps, shape x%.3f, speaker median %.0f Hz, cost %.3f ms per 10 ms, worst %.3f)",
+                               s.changer.semitones, s.changer.formant, s.changer.medianHz, s.changer.analyseMs, s.changer.worstMs)
+            }
+        }
         if tone != nil, let heard = recorded.firstIndex(where: { abs($0) > 0.02 }), chain.firstInputTime > 0, recorder.firstInputTime > 0 {
             // From the tone starting at the mic to it coming out of Pitch Shift Mic.
             let toneAt = Double(AudioConvertHostTimeToNanos(chain.firstInputTime)) / 1e9 + Double(toneStart) / rate
@@ -423,14 +547,16 @@ if args.contains("--test-voice") {
                 for (i, x) in tail.enumerated() { re += Double(x) * cos(2 * .pi * f * Double(i) / sr); im += Double(x) * sin(2 * .pi * f * Double(i) / sr) }
                 return 2 * sqrt(re * re + im * im) / Double(tail.count)
             }
-            let expected = tone * pow(2, Double(steps) / 12)
+            let expected = tone * pow(2, (s.changing ? Double(s.changer.semitones) : Double(steps)) / 12)
             let best = stride(from: min(tone, expected) * 0.5, through: max(tone, expected) * 2, by: 0.5).max { level($0) < level($1) }!
             line += String(format: " | expected %.1f Hz, measured %.1f Hz, level %.3f, original left %.4f", expected, best, level(best), level(tone))
         }
         print(line)
         if !delays.isEmpty {
-            print(String(format: "watch: mic to Pitch Shift Mic %.0f..%.0f ms over %d tone starts (first %.0f, last %.0f)",
-                         delays.min()!, delays.max()!, delays.count, delays.first!, delays.last!))
+            let sorted = delays.sorted()
+            print(String(format: "watch: mic to Pitch Shift Mic %.0f..%.0f ms (median %.0f) over %d %@ starts (first %.0f, last %.0f)",
+                         delays.min()!, delays.max()!, sorted[sorted.count / 2], delays.count, watchFile ? "sound" : "tone",
+                         delays.first!, delays.last!))
         }
         if let path = arg("--out"), let format = AVAudioFormat(standardFormatWithSampleRate: recorder.sampleRate, channels: 1),
            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(recorded.count)) {
