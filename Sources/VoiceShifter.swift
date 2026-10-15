@@ -43,21 +43,158 @@ enum Mics {
 // Settings the sound thread reads. Changed from the window, read without waiting on the sound thread.
 struct VoiceParams {
     var halfSteps: Float
-    var natural: Bool
-    var silent: Bool  // during Test playback, so the replay isn't sent into a live call
+    var cartoon: Float  // voice style: 0 = Natural, 1 = Cartoon, in between = a blend
+    var silent: Bool    // during Test playback, so the replay isn't sent into a live call
 }
 
-// Rubber Band settings for the voice (the Windows version uses the same ones).
+// The sound effect (Soundboard) to mix into Pitch Shift Mic. Set from the window, read by the sound thread without
+// waiting. The samples belong to a SoundClip that the window side keeps alive while the sound thread may read them.
+struct SoundPlay: @unchecked Sendable {
+    var samples: UnsafePointer<Float>?  // nil = no sound
+    var count = 0
+    var rate: Double = 0  // the samples' rate: a chain running at another rate doesn't play them
+    var take = 0          // goes up with every play and stop, so the sound thread sees each one
+    var muteMic = false   // playing on the Mac's speakers: the real mic is muted while it plays and just after
+}
+
+// Plays the Soundboard's sound one sample at a time on a sound thread, following SoundPlay. Used for both copies:
+// the one sent into Pitch Shift Mic (VoiceChain) and the owner's own (Soundboard), so both stop and switch the same
+// way. A sound that is stopped or replaced fades out over 10 ms (stopping at once would click); a new one starts
+// from its beginning.
+struct SoundMix {
+    private(set) var take: Int
+    private let rate: Double
+    private let fadeStep: Float  // 10 ms from full to nothing
+    private var sound: UnsafePointer<Float>?  // the one playing
+    private var count = 0
+    private var at = 0
+    private var fading: UnsafePointer<Float>?  // one that was stopped or replaced
+    private var fadingCount = 0
+    private var fadingAt = 0
+    private var fadingGain: Float = 0
+
+    // `take`: the SoundPlay's take now (a sound already playing isn't picked up).
+    init(rate: Double, take: Int) {
+        self.rate = rate
+        self.take = take
+        fadeStep = Float(1 / (0.01 * rate))
+    }
+
+    var playing: Bool { sound != nil }
+    var active: Bool { sound != nil || fading != nil }
+
+    // A new sound, or Stop. Returns true if a sound was playing (it now fades out).
+    mutating func start(_ play: SoundPlay) -> Bool {
+        take = play.take
+        let cut = sound != nil
+        if let playing = sound {
+            fading = playing
+            fadingCount = count
+            fadingAt = at
+            fadingGain = 1
+        }
+        sound = nil
+        guard let samples = play.samples, play.count > 0, play.rate == rate else { return cut }
+        sound = samples
+        count = play.count
+        at = 0
+        return cut
+    }
+
+    // The next sample of the sound(s). `ended` turns true when the sound plays to its end.
+    @inline(__always) mutating func next(_ ended: inout Bool) -> Float {
+        var value: Float = 0
+        if let playing = sound {
+            value = playing[at]
+            at += 1
+            if at >= count {
+                sound = nil
+                ended = true
+            }
+        }
+        if let old = fading {
+            fadingGain -= fadeStep
+            if fadingGain > 0 && fadingAt < fadingCount {
+                value += old[fadingAt] * fadingGain
+                fadingAt += 1
+            } else {
+                fading = nil
+            }
+        }
+        return value
+    }
+}
+
+// Keeps voice + sound under full scale: unchanged up to 0.7, then eased so it never passes 0.95 (the Mac's clock
+// matching between the mic and Pitch Shift Mic can add about 1% on top).
+@inline(__always) func softLimit(_ x: Float) -> Float {
+    let knee: Float = 0.7, ceiling: Float = 0.95
+    let size = abs(x)
+    guard size > knee else { return x }
+    let eased = knee + (ceiling - knee) * tanh((size - knee) / (ceiling - knee))
+    return x < 0 ? -eased : eased
+}
+
+// Rubber Band settings for the voice (the Windows version uses the same ones, with a Natural/Cartoon switch).
 // Not the "live shifter" (rubberband_live_*): it only keeps the voice's shape (formants) up to about 10 kHz and
 // moves everything above that up like Cartoon, which put a loud hiss on every word in Natural ("buzzy", like a Z).
 // This keeps formants over the whole range, with about the same delay.
-func voiceShifterOptions(natural: Bool) -> Int32 {
-    Int32(RubberBandOptionProcessRealTime.rawValue | RubberBandOptionEngineFiner.rawValue | RubberBandOptionWindowShort.rawValue
-        | RubberBandOptionPitchHighConsistency.rawValue | formantOption(natural: natural))
+// Formants are always "preserved": Rubber Band only uses a formant scale (below) with that option on. The style
+// slider then sets how far they move (see voiceFormantScale).
+let voiceShifterOptions = Int32(RubberBandOptionProcessRealTime.rawValue | RubberBandOptionEngineFiner.rawValue
+    | RubberBandOptionWindowShort.rawValue | RubberBandOptionPitchHighConsistency.rawValue | RubberBandOptionFormantPreserved.rawValue)
+
+// How far the voice's shape (formants) moves for a style from 0 (Natural) to 1 (Cartoon). The formants end up
+// moved by pitch^cartoon: not at all for Natural, as much as the pitch for Cartoon. Rubber Band counts the formant
+// scale on top of the pitch change (checked in its source, R3Stretcher::adjustFormant), so it gets
+// pitch^(cartoon - 1). At 0 it gets 0, its own "keep the formants" value (exactly the old Natural); at 1 it gets 1,
+// which leaves the sound as the pitch change makes it (exactly the old Cartoon).
+func voiceFormantScale(halfSteps: Float, cartoon: Float) -> Double {
+    cartoon <= 0 ? 0 : pow(2, Double(halfSteps) / 12 * Double(min(cartoon, 1) - 1))
 }
 
-func formantOption(natural: Bool) -> UInt32 {
-    natural ? RubberBandOptionFormantPreserved.rawValue : RubberBandOptionFormantShifted.rawValue
+// The voice's Rubber Band shifter (used by the live chain and by the offline check --render-voice).
+// A new style glides there over a short moment, so moving the slider never clicks.
+final class VoiceStretcher {
+    let state: RubberBandState
+    private(set) var halfSteps: Float
+    private var cartoon: Float      // the style asked for
+    private var cartoonNow: Float   // the style in use (glides toward `cartoon`)
+    private let glideStep: Float    // how much the style may move per sample
+
+    init?(rate: Double, halfSteps: Float, cartoon: Float) {
+        guard let made = rubberband_new(UInt32(rate), 1, voiceShifterOptions, 1, pow(2, Double(halfSteps) / 12)) else { return nil }
+        state = made
+        self.halfSteps = halfSteps
+        self.cartoon = max(0, min(1, cartoon))
+        cartoonNow = self.cartoon
+        glideStep = Float(1 / (0.15 * rate))  // all the way from Natural to Cartoon in 0.15 s
+        rubberband_set_max_process_size(state, 4096)
+        rubberband_set_formant_scale(state, voiceFormantScale(halfSteps: halfSteps, cartoon: self.cartoon))
+    }
+
+    deinit { rubberband_delete(state) }
+
+    // Returns true when the shifter started fresh (coming back from normal pitch), so old sound should be dropped.
+    func set(halfSteps new: Float) -> Bool {
+        guard new != halfSteps else { return false }
+        let fresh = halfSteps == 0 && new != 0
+        if fresh { rubberband_reset(state) }
+        if new != 0 { rubberband_set_pitch_scale(state, pow(2, Double(new) / 12)) }
+        halfSteps = new
+        rubberband_set_formant_scale(state, voiceFormantScale(halfSteps: halfSteps, cartoon: cartoonNow))
+        return fresh
+    }
+
+    func set(cartoon new: Float) { cartoon = max(0, min(1, new)) }
+
+    // Moves the style toward where it's heading; call once for each piece of `frames` samples.
+    func glide(_ frames: Int) {
+        guard cartoonNow != cartoon else { return }
+        let step = glideStep * Float(frames)
+        cartoonNow = abs(cartoon - cartoonNow) <= step ? cartoon : cartoonNow + (cartoon > cartoonNow ? step : -step)
+        rubberband_set_formant_scale(state, voiceFormantScale(halfSteps: halfSteps, cartoon: cartoonNow))
+    }
 }
 
 // One running voice chain: a private combined device of [real mic + hidden side of Pitch Shift Mic] with one
@@ -70,7 +207,8 @@ final class VoiceChain {
     let cushion: Int  // sound kept ready beyond what one callback needs (Rubber Band hands it back in uneven pieces)
     private var aggregate = AudioObjectID(kAudioObjectUnknown)
     private var proc: AudioDeviceIOProcID?
-    private let shifter: RubberBandState
+    private let stretcher: VoiceStretcher
+    private var shifter: RubberBandState { stretcher.state }
     private let params: OSAllocatedUnfairLock<VoiceParams>
     private var applied: VoiceParams
     private let micOutputStreams: Int
@@ -87,11 +225,19 @@ final class VoiceChain {
     private var sinceCheck = 0
     private let checkEvery: Int
     private let extraAllowed: Int
+    // Sound effects (Soundboard): mixed in after the voice, never through the mic or the pitch change.
+    private let sounds: OSAllocatedUnfairLock<SoundPlay>
+    private var mix: SoundMix
+    private var muteMic = false   // the playing sound is on the Mac's speakers
+    private var muteLeft = 0      // samples the mic stays muted after a sound on the speakers ends
+    private var micGain: Float = 1
+    private let fadeStep: Float   // 10 ms from full to nothing
+    private let muteAfter: Int    // 150 ms
     // For the command-line test: replaces the mic with a made-up sound.
     var testSource: ((UnsafeMutablePointer<Float>, Int) -> Void)?
     private(set) var firstInputTime: UInt64 = 0  // host time of the first mic sample (for the delay test)
 
-    init(mic: AudioDeviceID, feed: AudioDeviceID, params: OSAllocatedUnfairLock<VoiceParams>) throws {
+    init(mic: AudioDeviceID, feed: AudioDeviceID, params: OSAllocatedUnfairLock<VoiceParams>, sounds: OSAllocatedUnfairLock<SoundPlay>) throws {
         micName = deviceName(mic)
         micUID = deviceUID(mic)
         devices = [mic, Mics.virtualMic ?? 0, feed]
@@ -108,11 +254,14 @@ final class VoiceChain {
         self.params = params
         let start = params.withLock { $0 }
         applied = start
-        guard let made = rubberband_new(UInt32(rate), 1, voiceShifterOptions(natural: start.natural), 1, pow(2, Double(start.halfSteps) / 12)) else {
+        guard let made = VoiceStretcher(rate: rate, halfSteps: start.halfSteps, cartoon: start.cartoon) else {
             throw Problem(message: "Can't use \(micName).")
         }
-        shifter = made
-        rubberband_set_max_process_size(shifter, UInt32(maxPiece))
+        stretcher = made
+        self.sounds = sounds
+        mix = SoundMix(rate: rate, take: sounds.withLock { $0.take })  // a sound already playing when the chain starts isn't sent
+        fadeStep = Float(1 / (0.01 * rate))
+        muteAfter = Int(rate * 0.15)
         // 20 ms is enough at every amount and callback size tried (16-96 kHz); more would only add delay.
         cushion = Int(rate * 0.02)
         extraAllowed = Int(rate * 0.005)
@@ -173,6 +322,7 @@ final class VoiceChain {
         let feedChannels = Int(feed.mNumberChannels)
         guard feedChannels > 0 else { return }
         let frames = Int(feed.mDataByteSize) / (feedChannels * MemoryLayout<Float>.size)
+        stretcher.glide(frames)
         for i in 0..<micOutputStreams { if let d = outs[i].mData { memset(d, 0, Int(outs[i].mDataByteSize)) } }
 
         // The mic, mixed to one channel (stereo mics are averaged; bigger audio interfaces use input 1).
@@ -194,6 +344,18 @@ final class VoiceChain {
             for i in 0..<frames { source[i] = 0 }
         }
 
+        // A sound playing on the Mac's speakers: the mic would hear it and send it into the call a second time, so
+        // the mic fades out (10 ms) while it plays and for 150 ms after. Headphones: nothing is muted.
+        if let play = sounds.withLockIfAvailable({ $0 }), play.take != mix.take { startSound(play) }
+        let muted = (mix.playing && muteMic) || muteLeft > 0
+        if muted || micGain < 1 {
+            for i in 0..<frames {
+                micGain = muted ? max(0, micGain - fadeStep) : min(1, micGain + fadeStep)
+                source[i] *= micGain
+            }
+        }
+        muteLeft = max(0, muteLeft - frames)
+
         let shifting = applied.halfSteps != 0
         if shifting { shift(source, frames) }
         for i in 0..<frames {
@@ -210,13 +372,25 @@ final class VoiceChain {
                 }
             }
             if applied.silent { value = 0 }
-            value = max(-1, min(1, value))
+            if mix.active {
+                var ended = false
+                value = softLimit(value + mix.next(&ended))
+                if ended && muteMic { muteLeft = muteAfter }  // played to the end
+            } else {
+                value = max(-1, min(1, value))
+            }
             for b in micOutputStreams..<outs.count {
                 guard let d = outs[b].mData?.assumingMemoryBound(to: Float.self) else { continue }
                 let ch = Int(outs[b].mNumberChannels)
                 for c in 0..<ch { d[i * ch + c] = value }
             }
         }
+    }
+
+    // A new sound, or Stop: the one playing fades out (SoundMix). Cutting one on the speakers starts the 150 ms hold.
+    private func startSound(_ play: SoundPlay) {
+        if mix.start(play) && muteMic { muteLeft = muteAfter }
+        if mix.playing { muteMic = play.muteMic }
     }
 
     // Gives one callback's sound to Rubber Band and moves everything it has ready into the ring.
@@ -275,18 +449,12 @@ final class VoiceChain {
     }
 
     private func apply(_ latest: VoiceParams) {
-        if latest.natural != applied.natural {
-            rubberband_set_formant_option(shifter, Int32(formantOption(natural: latest.natural)))
-        }
-        if latest.halfSteps != applied.halfSteps && latest.halfSteps != 0 {
-            if applied.halfSteps == 0 {  // coming back from normal pitch: start fresh
-                rubberband_reset(shifter)
-                ringRead = 0
-                ringCount = 0
-                waiting = true
-                fresh = true
-            }
-            rubberband_set_pitch_scale(shifter, pow(2, Double(latest.halfSteps) / 12))
+        stretcher.set(cartoon: latest.cartoon)
+        if stretcher.set(halfSteps: latest.halfSteps) {  // coming back from normal pitch: start fresh
+            ringRead = 0
+            ringCount = 0
+            waiting = true
+            fresh = true
         }
         applied = latest
     }
@@ -302,7 +470,6 @@ final class VoiceChain {
     }
 
     private func cleanUp() {
-        rubberband_delete(shifter)
         piece.deallocate()
         ring.deallocate()
         scratch.deallocate()
@@ -331,7 +498,7 @@ enum VoiceState: Equatable {
 // Decides when the voice chain runs, which mic it uses, and rebuilds it when devices change.
 final class VoiceShifter {
     var halfSteps: Float { didSet { pushParams() } }
-    var natural: Bool { didSet { pushParams() } }
+    var cartoon: Float { didSet { pushParams() } }  // voice style: 0 = Natural, 1 = Cartoon
     var micUID: String? { didSet { if oldValue != micUID { rebuild() } } }  // nil = the Mac's default mic
     var onChange: () -> Void = {}
     var testSource: ((UnsafeMutablePointer<Float>, Int) -> Void)?
@@ -339,6 +506,7 @@ final class VoiceShifter {
     private(set) var listening = false  // some app is using Pitch Shift Mic right now
     private(set) var chain: VoiceChain?
     let params: OSAllocatedUnfairLock<VoiceParams>
+    let sounds = OSAllocatedUnfairLock(uncheckedState: SoundPlay())  // the Soundboard's sound, for the chain
     private var running = false
     private var holdCount = 0
     private var listeners: [Listener] = []
@@ -347,11 +515,11 @@ final class VoiceShifter {
     private let debounce = Debouncer(0.3)
     private var rebuilds: [Date] = []
 
-    init(halfSteps: Float, natural: Bool, micUID: String?) {
+    init(halfSteps: Float, cartoon: Float, micUID: String?) {
         self.halfSteps = halfSteps
-        self.natural = natural
+        self.cartoon = cartoon
         self.micUID = micUID
-        params = OSAllocatedUnfairLock(initialState: VoiceParams(halfSteps: halfSteps, natural: natural, silent: false))
+        params = OSAllocatedUnfairLock(initialState: VoiceParams(halfSteps: halfSteps, cartoon: cartoon, silent: false))
     }
 
     var isOn: Bool { running }
@@ -392,8 +560,8 @@ final class VoiceShifter {
     }
 
     private func pushParams() {
-        let steps = halfSteps, natural = natural
-        params.withLock { $0.halfSteps = steps; $0.natural = natural }
+        let steps = halfSteps, cartoon = cartoon
+        params.withLock { $0.halfSteps = steps; $0.cartoon = cartoon }
     }
 
     private func setState(_ new: VoiceState) {
@@ -460,7 +628,7 @@ final class VoiceShifter {
             stopLater = nil
             if chain == nil {
                 do {
-                    let made = try VoiceChain(mic: mic, feed: feed, params: params)
+                    let made = try VoiceChain(mic: mic, feed: feed, params: params, sounds: sounds)
                     made.testSource = testSource
                     chain = made
                 } catch {
@@ -631,4 +799,68 @@ final class VoiceTest {
         voice.hold(false)
         setPhase(.idle)
     }
+}
+
+// Offline check (--render-voice): shifts a sound file with the voice's own Rubber Band settings, in 512-sample
+// pieces like the live chain, and writes one channel. `changes` moves the style part way through
+// ((seconds, style) pairs), to check that it changes smoothly.
+func renderVoiceFile(input: String, output: String, halfSteps: Float, cartoon: Float, changes: [(Double, Float)]) throws {
+    let file = try AVAudioFile(forReading: URL(fileURLWithPath: input))
+    let rate = file.processingFormat.sampleRate
+    let length = Int(file.length)
+    guard let source = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(length)) else {
+        throw Problem(message: "Could not read \(input).")
+    }
+    try file.read(into: source)
+    // One channel, like the live chain (two channels are averaged, more use the first).
+    let channels = Int(file.processingFormat.channelCount)
+    let used = channels <= 2 ? channels : 1
+    var mono = [Float](repeating: 0, count: length)
+    for c in 0..<used {
+        let data = source.floatChannelData![c]
+        for i in 0..<length { mono[i] += data[i] / Float(used) }
+    }
+    var result = mono
+    if halfSteps != 0 {
+        guard let stretcher = VoiceStretcher(rate: rate, halfSteps: halfSteps, cartoon: cartoon) else {
+            throw Problem(message: "Could not start Rubber Band.")
+        }
+        let block = 512
+        var skip = Int(rubberband_get_start_delay(stretcher.state))  // so the output lines up with the input
+        var chunk = [Float](repeating: 0, count: block)
+        var piece = [Float](repeating: 0, count: 4096)
+        result = []
+        result.reserveCapacity(length)
+        var position = 0
+        while result.count < length && position < length + Int(rate) {
+            if let change = changes.last(where: { Int($0.0 * rate) <= position }) { stretcher.set(cartoon: change.1) }
+            stretcher.glide(block)
+            for i in 0..<block { chunk[i] = position + i < length ? mono[position + i] : 0 }
+            chunk.withUnsafeBufferPointer { p in
+                var pointer: UnsafePointer<Float>? = p.baseAddress
+                rubberband_process(stretcher.state, &pointer, UInt32(block), 0)
+            }
+            position += block
+            while rubberband_available(stretcher.state) > 0 {
+                let want = min(Int(rubberband_available(stretcher.state)), piece.count)
+                let got = piece.withUnsafeMutableBufferPointer { p in
+                    var pointer: UnsafeMutablePointer<Float>? = p.baseAddress
+                    return Int(rubberband_retrieve(stretcher.state, &pointer, UInt32(want)))
+                }
+                if got <= 0 { break }
+                let drop = min(skip, got)
+                skip -= drop
+                result.append(contentsOf: piece[drop..<got])
+            }
+        }
+        if result.count > length { result.removeLast(result.count - length) }
+    }
+    guard let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1),
+          let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(max(1, result.count))) else {
+        throw Problem(message: "Could not write \(output).")
+    }
+    buffer.frameLength = AVAudioFrameCount(result.count)
+    _ = result.withUnsafeBufferPointer { memcpy(buffer.floatChannelData![0], $0.baseAddress!, result.count * MemoryLayout<Float>.size) }
+    let out = try AVAudioFile(forWriting: URL(fileURLWithPath: output), settings: format.settings)
+    try out.write(from: buffer)
 }
