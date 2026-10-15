@@ -66,6 +66,7 @@ final class AdvancedProcessor {
     let maxFrames: Int
     private let chain: OpaquePointer
     private var halfSteps: Float
+    private var tone = (bass: 0.0, treble: 0.0)
     // Made for -12..+12 (less delay); a bigger amount needs a version made with fullRange (more delay).
     let fullRange: Bool
     private let ins = UnsafeMutablePointer<UnsafePointer<Float>?>.allocate(capacity: 2)
@@ -98,6 +99,13 @@ final class AdvancedProcessor {
         advanced_set_semis(chain, Double(value))
     }
 
+    // Bass and treble in dB (0, 0 = untouched). They glide, so moving them doesn't click.
+    func setTone(bass: Double, treble: Double) {
+        guard bass != tone.bass || treble != tone.treble else { return }
+        tone = (bass, treble)
+        advanced_set_tone(chain, bass, treble)
+    }
+
     // `frames` in, the same number out (delayed by latencyFrames). At most maxFrames per call.
     func process(_ left: UnsafePointer<Float>, _ right: UnsafePointer<Float>,
                  _ outLeft: UnsafeMutablePointer<Float>, _ outRight: UnsafeMutablePointer<Float>, _ frames: Int) {
@@ -118,13 +126,17 @@ final class AdvancedPlayer: HearPlayer {
     private var stopped = false
 
     // recordSeconds > 0 (checks only): also keeps what is sent to the speakers, for `saveRecording`.
-    init(device: AudioDeviceID, format: AVAudioFormat, halfSteps: Float, input: SoundRing, recordSeconds: Double = 0) throws {
+    // tone: bass and treble in dB (see setTone), so a rebuilt player keeps them.
+    init(device: AudioDeviceID, format: AVAudioFormat, halfSteps: Float, tone: (bass: Double, treble: Double) = (0, 0),
+         input: SoundRing, recordSeconds: Double = 0) throws {
         self.device = device
         self.format = format
         guard let processor = AdvancedProcessor(sampleRate: format.sampleRate, halfSteps: halfSteps) else {
             throw Problem(message: "Could not start Advanced processing.")
         }
-        worker = AdvancedWorker(processor: processor, input: input, halfSteps: halfSteps, recordFrames: Int(recordSeconds * format.sampleRate))
+        processor.setTone(bass: tone.bass, treble: tone.treble)
+        let wanted = AdvancedWanted(halfSteps: halfSteps, bassDb: tone.bass, trebleDb: tone.treble)
+        worker = AdvancedWorker(processor: processor, input: input, wanted: wanted, recordFrames: Int(recordSeconds * format.sampleRate))
         // The cushion before the speakers: like normal mode (starts at 50 ms, at most 150 ms).
         let ring = worker.output.ring
         let start = Int32(format.sampleRate * 0.05), most = Int32(format.sampleRate * 0.15)
@@ -152,7 +164,8 @@ final class AdvancedPlayer: HearPlayer {
         engine.stop()
     }
 
-    func setHalfSteps(_ value: Float) { worker.wanted.withLock { $0 = value } }
+    func setHalfSteps(_ value: Float) { worker.wanted.withLock { $0.halfSteps = value } }
+    func setTone(bass: Double, treble: Double) { worker.wanted.withLock { $0.bassDb = bass; $0.trebleDb = treble } }
 
     // Not used live (the capture writes straight into the ring), but handy for tests.
     func play(_ buffer: AVAudioPCMBuffer) {
@@ -189,12 +202,19 @@ final class AdvancedPlayer: HearPlayer {
     }
 }
 
+// What the worker should use next: the amount, and the bass and treble in dB.
+struct AdvancedWanted: Equatable {
+    var halfSteps: Float
+    var bassDb: Double = 0
+    var trebleDb: Double = 0
+}
+
 // The worker thread: waits for grabbed sound, processes it, and hands it to the speakers' ring.
 final class AdvancedWorker {
     let processor: AdvancedProcessor
     let input: SoundRing
     let output: SoundRing
-    let wanted: OSAllocatedUnfairLock<Float>
+    let wanted: OSAllocatedUnfairLock<AdvancedWanted>
     private(set) var received = 0
     private(set) var loudest: Float = 0
     private(set) var outputLoudest: Float = 0
@@ -206,11 +226,11 @@ final class AdvancedWorker {
     private let block = 1024
     private let scratch: [UnsafeMutablePointer<Float>]
 
-    init(processor: AdvancedProcessor, input: SoundRing, halfSteps: Float, recordFrames: Int = 0) {
+    init(processor: AdvancedProcessor, input: SoundRing, wanted: AdvancedWanted, recordFrames: Int = 0) {
         self.processor = processor
         self.input = input
         output = SoundRing(seconds: 2, sampleRate: input.sampleRate)
-        wanted = OSAllocatedUnfairLock(initialState: halfSteps)
+        self.wanted = OSAllocatedUnfairLock(initialState: wanted)
         scratch = (0..<4).map { _ in UnsafeMutablePointer<Float>.allocate(capacity: 1024) }
         record = recordFrames > 0 ? (.allocate(capacity: recordFrames), .allocate(capacity: recordFrames), recordFrames) : nil
     }
@@ -245,7 +265,11 @@ final class AdvancedWorker {
         while keepGoing.withLock({ $0 }) {
             _ = input.wake.wait(timeout: .now() + .milliseconds(50))
             let value = wanted.withLock { $0 }
-            if value != current { processor.setHalfSteps(value); current = value }
+            if value != current {
+                processor.setHalfSteps(value.halfSteps)
+                processor.setTone(bass: value.bassDb, treble: value.trebleDb)
+                current = value
+            }
             while true {
                 let n = Int(audio_ring_read(input.ring, inL, inR, Int32(block)))
                 if n == 0 { break }
@@ -268,11 +292,13 @@ final class AdvancedWorker {
     }
 }
 
-// --render-file IN OUT [--steps N] [--advanced] [--steps-at "SECONDS:N,SECONDS:N"]
+// --render-file IN OUT [--steps N] [--advanced] [--steps-at "SECONDS:N,SECONDS:N"] [--tone-db B,T]
 // Shifts a sound file offline with the app's own code (normal mode or Advanced processing), for listening
 // samples and checks. The output lines up with the input (the delay is taken out) and has the same length.
-// --steps-at changes the amount while it plays, like moving the amount live.
-func renderFile(input: String, output: String, halfSteps: Float, advanced: Bool, changes: [(Double, Float)]) throws {
+// --steps-at changes the amount while it plays, like moving the amount live. --tone-db: Advanced processing's bass
+// and treble in dB.
+func renderFile(input: String, output: String, halfSteps: Float, advanced: Bool, changes: [(Double, Float)],
+                tone: (bass: Double, treble: Double) = (0, 0)) throws {
     let file = try AVAudioFile(forReading: URL(fileURLWithPath: input))
     let rate = file.processingFormat.sampleRate
     let length = Int(file.length)
@@ -297,6 +323,7 @@ func renderFile(input: String, output: String, halfSteps: Float, advanced: Bool,
         guard let processor = AdvancedProcessor(sampleRate: rate, halfSteps: amount(at: 0), fullRange: biggest > 12) else {
             throw Problem(message: "Could not start Advanced processing.")
         }
+        processor.setTone(bass: tone.bass, treble: tone.treble)
         let latency = processor.latencyFrames
         var position = 0, written = -latency
         while written < length {

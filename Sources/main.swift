@@ -9,10 +9,11 @@
 //                                              shifts a sound file with the voice's own settings (offline, no devices;
 //                                              --cartoon-at "1:1,2:0" moves the style to 1 at 1 s and back to 0 at 2 s)
 //   --test-button [--mic NAME] [--volume 0.03] presses Test with a quiet tone as the voice (record 5 s, play back)
-//   --test ... --advanced [--record-out F.wav] [--steps-at "3:8,6:-5"]
+//   --test ... --advanced [--record-out F.wav] [--steps-at "3:8,6:-5"] [--tone-db 6,-6]
 //                                              "What you hear" with Advanced processing on (--watch prints the delay;
-//                                              --record-out saves what it played; --steps-at changes the amount live)
-//   --render-file IN OUT [--steps 5] [--advanced] [--steps-at "4:8,8:-5"]
+//                                              --record-out saves what it played; --steps-at changes the amount live;
+//                                              --tone-db sets its bass and treble in dB)
+//   --render-file IN OUT [--steps 5] [--advanced] [--steps-at "4:8,8:-5"] [--tone-db 6,-6]
 //                                              shifts a sound file with the app's own code (normal or advanced)
 import AppKit
 import AVFoundation
@@ -39,6 +40,12 @@ func onQuitSignals(_ handler: @escaping () -> Void) {
         return source
     }
 }
+
+// --tone-db "B,T": Advanced processing's bass and treble in dB (not --tone, which is a frequency in --test-voice).
+let toneFromArgs: (bass: Double, treble: Double) = {
+    let parts = (arg("--tone-db") ?? "").split(separator: ",").compactMap { Double($0) }
+    return parts.count == 2 ? (parts[0], parts[1]) : (0, 0)
+}()
 
 func fourCC(_ value: UInt32) -> String {
     String(bytes: [24, 16, 8, 0].map { UInt8((value >> $0) & 0xFF) }, encoding: .ascii) ?? "\(value)"
@@ -96,7 +103,7 @@ if let input = arg("--render-file") {
     let started = Date()
     do {
         try renderFile(input: input, output: args[i + 2], halfSteps: arg("--steps").flatMap(Float.init) ?? 2,
-                       advanced: args.contains("--advanced"), changes: changes)
+                       advanced: args.contains("--advanced"), changes: changes, tone: toneFromArgs)
         print(String(format: "wrote %@ (%.1f s)", args[i + 2], Date().timeIntervalSince(started)))
         exit(0)
     } catch {
@@ -129,6 +136,7 @@ if args.contains("--test") {
     let source: HearSource = args.contains("--all") ? .all : HearSource(saved: arg("--app") ?? "com.apple.Music")
     let shifter = HearShifter(halfSteps: arg("--steps").flatMap(Float.init) ?? 2, source: source, advanced: args.contains("--advanced"))
     shifter.testPID = arg("--pid").flatMap { pid_t($0) }
+    shifter.setTone(bass: toneFromArgs.bass, treble: toneFromArgs.treble)
     let seconds = arg("--seconds").flatMap(Double.init) ?? 3
     // --record-out F (Advanced processing only): saves what it played. --steps-at "2:8,4:-5": change the amount live.
     let recordPath = arg("--record-out")
