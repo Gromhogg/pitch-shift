@@ -170,12 +170,14 @@ final class GradientSwitch: NSView {
 
 // A slider from 0 (left) to 1 (right), like the voice style (Natural ... Cartoon) or the tone (Bass ... Treble). The
 // track shows the icon's purple-to-pink colors from end to end, with a round white knob (like GradientSwitch's) and
-// small labels under its ends. `middleMark` adds a small mark at the middle, and the knob snaps to it when close.
+// small labels under its ends. `mark` adds a small mark (at 0.5 = the middle), and the knob snaps to it when close.
 // Click or drag to set it; with "Keyboard navigation" on, the arrow keys move it in steps of 0.1.
 // Nothing moves on its own, so it's the same with Reduce Motion.
 final class GradientSlider: NSView {
     var onChange: (Float) -> Void = { _ in }
-    var middleMark = false { didSet { needsDisplay = true } }
+    var mark: Float? { didSet { needsDisplay = true } }
+    var steps: Float = 100     // values it can take between 0 and 1
+    var clickThrough = false   // a click works even while another app is in front (the Soundboard's volume)
     private let left: String, right: String
     private let describe: (Float) -> String  // what VoiceOver says for a value
     var isEnabled = true {
@@ -266,11 +268,12 @@ final class GradientSlider: NSView {
 
         // The middle mark: a short line across the track's middle, just inside the knob's height (so the knob covers
         // it when it's there).
-        if middleMark {
+        if let mark {
             (isEnabled ? NSColor.secondaryLabelColor : NSColor.tertiaryLabelColor).setFill()
             let reach = knobSize / 2 - 1
-            NSBezierPath(rect: NSRect(x: (bounds.midX - 1).rounded(), y: middle - reach, width: 2, height: reach - trackHeight / 2)).fill()
-            NSBezierPath(rect: NSRect(x: (bounds.midX - 1).rounded(), y: middle + trackHeight / 2, width: 2, height: reach - trackHeight / 2)).fill()
+            let x = (bounds.minX + knobSize / 2 + CGFloat(mark) * (bounds.width - knobSize) - 1).rounded()
+            NSBezierPath(rect: NSRect(x: x, y: middle - reach, width: 2, height: reach - trackHeight / 2)).fill()
+            NSBezierPath(rect: NSRect(x: x, y: middle + trackHeight / 2, width: 2, height: reach - trackHeight / 2)).fill()
         }
 
         // The knob, with a soft shadow and a thin edge (so it stands out on a white card too).
@@ -293,6 +296,7 @@ final class GradientSlider: NSView {
 
     // Reachable with Tab when "Keyboard navigation" is on in the Mac's settings (like the switches).
     override var acceptsFirstResponder: Bool { isEnabled && NSApp.isFullKeyboardAccessEnabled }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { clickThrough }
     override var focusRingMaskBounds: NSRect { track.insetBy(dx: 0, dy: -(knobSize - trackHeight) / 2) }
     override func drawFocusRingMask() {
         let ring = focusRingMaskBounds
@@ -341,10 +345,10 @@ final class GradientSlider: NSView {
         return true
     }
 
-    // Steps of 0.01 from 0 to 1 (and to the middle mark when within 0.03 of it).
+    // Steps of 1/`steps` (0.01) from 0 to 1, and to the mark when within 3 steps of it.
     private func set(_ new: Float) {
-        var clean = max(0, min(1, (new * 100).rounded() / 100))
-        if middleMark && abs(clean - 0.5) < 0.031 { clean = 0.5 }
+        var clean = max(0, min(1, (new * steps).rounded() / steps))
+        if let mark, abs(clean - mark) < 3.1 / steps { clean = mark }
         guard clean != value else { return }
         value = clean
         onChange(clean)
@@ -981,7 +985,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         micUID: defaults.string(forKey: Keys.voiceMic))
     lazy var test = VoiceTest(voice: voice)
     // Sound effects into Pitch Shift Mic. Pictures show example names and change nothing.
-    lazy var board = Soundboard(voice: voice, files: preview == nil ? Soundboard.saved(defaults) : Soundboard.examples,
+    lazy var board = Soundboard(voice: voice, sounds: preview == nil ? Soundboard.saved(defaults) : Soundboard.examples,
                                 saves: preview == nil)
     lazy var soundboard = SoundboardPanel(board: board)
 
@@ -1051,6 +1055,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         voice.onChange = { [weak self] in self?.refresh() }
         test.onChange = { [weak self] in self?.refresh() }
         board.onChange = { [weak self] in self?.soundboard.update() }
+        soundboard.onClose = { [weak self] in self?.soundboardClosed() }
         deviceListeners = [kAudioHardwarePropertyDevices, kAudioHardwarePropertyDefaultInputDevice, kAudioHardwarePropertyDefaultOutputDevice].map {
             Listener(system, $0) { [weak self] in self?.deviceDebounce.call { self?.refresh() } }
         }
@@ -1079,7 +1084,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     func applicationWillTerminate(_ notification: Notification) {
         hear.stop()
-        voice.stop()
+        voice.stopAll()
         DefaultMic.giveBack()
     }
 
@@ -1151,7 +1156,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         advancedSwitch.onChange = { [weak self] on in self?.advancedPicked(on) }
         hearCard.addRow(ShiftCard.switchRow("Advanced processing", advancedSwitch))
         // Its tone, Bass ... Treble, kept for each speakers or headphones.
-        tone.middleMark = true
+        tone.mark = 0.5
         tone.onChange = { [weak self] value in self?.tonePicked(value) }
         let toneRow = CardRow(views: [tone])
         toneRow.onScale = { [unowned self] scale in
@@ -1514,7 +1519,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     // Opens the Soundboard next to the window, or closes it.
     @objc func soundsClicked() {
-        if soundboard.isOpen { soundboard.close() } else { soundboard.open(beside: window) }
+        if soundboard.isOpen {
+            soundboard.close()
+            return
+        }
+        soundboard.open(beside: window)
+        guard preview == nil else { return }  // pictures change nothing
+        // Sounds go out through the voice chain, so with the voice off it runs as if the voice were on with no
+        // pitch change, and Pitch Shift Mic becomes the Mac's default mic (like turning the voice on).
+        soundsOff?.cancel()
+        soundsOff = nil
+        voice.keepForSounds(true)
+        if !voice.isOn { DefaultMic.takeOver() }
+        refresh()
+    }
+
+    private var soundsOff: DispatchWorkItem?
+
+    // The Soundboard closed: with the voice off, the chain stops and the real mic is given back a second later
+    // (like when an app stops listening; a sound that was just stopped fades out first).
+    func soundboardClosed() {
+        guard preview == nil else { return }
+        soundsOff?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            soundsOff = nil
+            voice.keepForSounds(false)
+            if !voice.isOn { DefaultMic.giveBack() }
+            refresh()
+        }
+        soundsOff = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
     }
 
     // MARK: Advanced processing
@@ -1566,9 +1601,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     func setVoice(_ on: Bool) {
         guard on else {
-            soundboard.close()  // stops its sound too
-            voice.stop()
-            DefaultMic.giveBack()
+            voice.stop()  // with the Soundboard open, its sounds still go out (the voice unchanged)
+            if !voice.runsForSounds { DefaultMic.giveBack() }
             defaults.set(false, forKey: Keys.voiceOn)
             refresh()
             return
@@ -1604,12 +1638,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         guard error == nil else { return }
         // The Mac's sound system restarted; reconnect everything.
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [self] in
-            let hearOn = hear.isOn, voiceOn = voice.isOn
+            let hearOn = hear.isOn, voiceOn = voice.isOn, sounds = voice.runsForSounds
             hear.stop()
-            voice.stop()
+            voice.stopAll()
             if hearOn { hear.start() }
-            if voiceOn {
-                voice.start()
+            if voiceOn || sounds {
+                if voiceOn { voice.start() }
+                voice.keepForSounds(sounds)
                 DefaultMic.takeOver()
             }
             rebuildMicMenu()
@@ -1620,7 +1655,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     // MARK: Showing state
 
     // For screenshots (--preview hear-on,voice-on,waiting,typing,recording,playing,listening,hover,menu,roll,
-    // resize,no-driver,advanced-alert,sounds,light,tone,slow [--size 800x400]): shows a state, no sound.
+    // resize,no-driver,advanced-alert,sounds,rename,volume,drop,light,tone,slow [--size 800x400]): shows a state,
+    // no sound.
     func showPreview() {
         guard let preview else { return }
         if preview.contains("light") {
@@ -1628,9 +1664,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             soundboard.panel.appearance = NSAppearance(named: .aqua)
         }
         if preview.contains("sounds") {  // the Soundboard with example names, the second one playing
-            board.showAsPlaying(Soundboard.examples[1])
+            board.showAsPlaying(Soundboard.examples[1].file)
             soundboard.open(beside: window)
             if preview.contains("hover") { soundboard.showHover() }
+            if preview.contains("rename") { soundboard.showRenaming() }  // the first name being changed
+            if preview.contains("volume") { soundboard.showVolume() }  // the first sound's volume slider
+            if preview.contains("drop") { soundboard.showDropping() }  // sound files dragged over it
         }
         if let cartoonArg { voice.cartoon = cartoonArg }  // where the style slider is (--cartoon-amount 0.5)
         if preview.contains("tone") { hear.advanced = true }  // Advanced processing on (nothing runs in pictures)
@@ -1722,11 +1761,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         style.isEnabled = voiceOn && installed
         slowSwitch.isOn = voice.slowDeeper
         slowSwitch.isEnabled = voiceOn && installed
-        soundsButton.isEnabled = voiceOn && installed && hasMic
+        soundsButton.isEnabled = installed && hasMic  // the Soundboard works with the voice off too
         if case .problem(let message) = voice.state { voiceCard.amount.toolTip = message } else { voiceCard.amount.toolTip = nil }
 
         let listening = preview.map { $0.contains("listening") } ?? voice.listening
-        dot.isLive = voiceOn && installed && listening
+        dot.isLive = (voiceOn || voice.runsForSounds) && installed && listening
         footer.toolTip = dot.isLive ? "An app is using Pitch Shift Mic" : "Choose Pitch Shift Mic as the microphone in Discord, Zoom or any app"
         micName.setAccessibilityValue(dot.isLive ? "Pitch Shift Mic, in use" : "Pitch Shift Mic, not in use")
 
