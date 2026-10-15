@@ -31,6 +31,7 @@
 #include <cmath>
 #include <complex>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -107,6 +108,12 @@ struct LR4 {
     // All-pass with the phase of a Butterworth 8 split at f (exactly that of an LR8 split, within ~0.3 dB of a B8 one
     // where it matters), so a band that skipped the split stays in phase with one that went through it.
     void allpass8(double f, double sr) { s1.allpass(f, BW4Q[0], sr); s2.allpass(f, BW4Q[1], sr); clear(); }
+    // Butterworth 4th order: its low and high sides add up to full power (for two halves that don't add in phase)
+    void bw4(bool high, double f, double sr) {
+        if (high) { s1.highpass(f, BW4Q[0], sr); s2.highpass(f, BW4Q[1], sr); }
+        else { s1.lowpass(f, BW4Q[0], sr); s2.lowpass(f, BW4Q[1], sr); }
+        clear();
+    }
     void clear() { s1.clear(); s2.clear(); }
     inline float run(float x) { return s2.run(s1.run(x)); }
 };
@@ -114,6 +121,8 @@ inline double lrLP(double f, double fc) { double x = f / fc; x *= x; x *= x; ret
 inline double lrHP(double f, double fc) { double x = f / fc; x *= x; x *= x; return x / (1.0 + x); }    // |LR4 high-pass|
 inline double bwLP8(double f, double fc) { double x = f / fc; x *= x; x *= x; x *= x; return 1.0 / sqrt(1.0 + x * x); }  // |Butterworth 8 low-pass|
 inline double bwHP8(double f, double fc) { double x = f / fc; x *= x; x *= x; x *= x; return x / sqrt(1.0 + x * x); }    // |Butterworth 8 high-pass|
+inline double bwLP4(double f, double fc) { double x = f / fc; x *= x; x *= x; return 1.0 / sqrt(1.0 + x * x); }  // |Butterworth 4 low-pass|
+inline double bwHP4(double f, double fc) { double x = f / fc; x *= x; x *= x; return x / sqrt(1.0 + x * x); }    // |Butterworth 4 high-pass|
 
 // One channel of sound kept by absolute sample number (power-of-two size, so the index wraps with a mask).
 struct Ring {
@@ -217,6 +226,7 @@ struct PathSpec {
     Term t[MAXTERMS];
     bool coherent = false;      // terms are in phase (LR4 pair at one corner): they add as amplitudes, else as powers
     double outHP = 0;           // 8th-order high-pass on the path's output (Hz), 0 = none (balanced3: 30 Hz on the +4..+6 fold)
+    double subHP = 0;           // 4th-order high-pass on the path's output (Hz), 0 = none (recipe 5: up to 40 Hz going down)
     Term &add(float gain) { Term &x = t[nt++]; x.gain = gain; return x; }
 };
 inline Term &filt(Term &x, double f, bool high, int kind) { x.fc[x.nf] = f; x.hp[x.nf] = high; x.kind[x.nf++] = kind; return x; }
@@ -231,6 +241,7 @@ struct Spec {           // the recipe for one amount N
     int n = 0;          // paths (0 = the unprocessed input)
     PathSpec p[MAXPATHS];
     double air = 0;     // pitch-down: above this (Hz) the output is the unshifted input; 0 = none
+    bool airBW = false; // the air split is a Butterworth 4 (flat power) instead of a Linkwitz-Riley 4 (-3 dB at the split)
 };
 
 // ------------------------------------------------------------------------------------------------- shifter pool
@@ -253,6 +264,7 @@ struct Path {
     Ring ring[MAXCH];        // its output stream
     LR4 filt[MAXTERMS][MAXF][MAXCH];   // input filters, one set per term
     Biquad outF[4][MAXCH];             // output high-pass (4 Butterworth sections)
+    Biquad subF[2][MAXCH];             // sub high-pass (2 Butterworth sections)
 };
 
 struct Chain {
@@ -278,12 +290,21 @@ struct Chain {
 // research): the target compares the input with a PREDICTED output spectrum (input moved by the chain's shifts,
 // with its bands and air), plus a slow correction (+-3 dB, 12 s) from the measured output for what the prediction
 // misses. 10 minimum-phase filters, fitted by least squares. Zero delay.
+// Recipe 5 makes it pitch-aware: per-direction target offsets and limits (the knobs below; all off for recipes 2-4).
+const int NKNOT = 10;    // offset knots, one per octave: 25, 50, 100 .. 12800 Hz
+const double OFF = -99;  // "knob off" for the limits below
 struct TonalEQ {
     double sr = 48000, tau = 4, boost = 9, cut = 9, alpha = 1, lowcap = 6, midcap = 6, shelfLo = 44;
     double loF = 100, loCut = 15;        // balanced3: below 100 Hz the target is not smoothed and may cut up to 15 dB
     bool loUp = false;                   // ... also going up (recipe 3 = 2.0.0). Off: going up, the bass is treated like
                                          // the rest (smoothed over +-1 band, cuts up to 9 dB), so the EQ doesn't cut
                                          // bass notes just because the shift moved them to a band the original had empty
+    // recipe 5 (see AdvancedTuning.h): predict counts edge bins like bandPowers; target offsets (dB) per knot for each
+    // direction, full from |N| >= offN; going down, the largest boost below 70 Hz and the deepest cut of the 250 Hz
+    // filter; going up, the deepest cut of the 500 Hz - 2 kHz filters and of everything from 7 kHz up.
+    bool edgefix = false, offOn = false;
+    double offUp[NKNOT] = {}, offDn[NKNOT] = {}, offN = 8;
+    double lowcapDn = OFF, midcutDn = OFF, midcutUp = OFF, topcutUp = OFF;
     int smooth = 1, N = 16384, period = 2048;
 #if ADVANCED_VDSP
     FFTSetup setup = nullptr; int log2n = 14;
@@ -293,7 +314,8 @@ struct TonalEQ {
     std::vector<float> hann, tmp, re, im;
     std::vector<double> fcs, rbin, pref, pcur, pr, pc, pq, pqs, pcs, T, S, g, e;
     std::vector<double> D;               // checks only: the change each band wanted at the last fit, before any limits
-    std::vector<int> b0, b1, bandOf;
+    std::vector<int> b0, b1, bandOf, bandOf2;  // bandOf2: the second band of a bin on a band edge (else -1)
+    std::vector<int> knotI; std::vector<double> knotF;  // per band: offset knot below it and how far toward the next
     std::vector<std::vector<double>> M;  // least-squares fit matrix (filters x bands)
     double eqf[NEQ];
     int64_t blocks = 0, blocks2 = 0;     // analyses so far; analyses since the slow correction was reset
@@ -324,8 +346,15 @@ struct TonalEQ {
         }
         size_t nb = fcs.size();
         bandOf.assign(N / 2, -1);  // FFT bin -> 1/3-octave band (first match, as the test bench)
+        bandOf2.assign(N / 2, -1);
         for (int i = 0; i < N / 2; i++)
-            for (size_t j = 0; j < nb; j++) if (i >= b0[j] && i < b1[j]) { bandOf[i] = (int)j; break; }
+            for (size_t j = 0; j < nb; j++)
+                if (i >= b0[j] && i < b1[j]) { if (bandOf[i] < 0) bandOf[i] = (int)j; else { bandOf2[i] = (int)j; break; } }
+        knotI.assign(nb, 0); knotF.assign(nb, 0.0);
+        for (size_t j = 0; j < nb; j++) {  // knots at 25 x 2^i Hz: interpolate on a log scale, flat past the ends
+            double x = std::max(0.0, std::min((double)NKNOT - 1, log2(fcs[j] / 25.0)));
+            knotI[j] = std::min(NKNOT - 2, (int)x); knotF[j] = x - knotI[j];
+        }
         rbin.assign(N / 2, 0.0);
         for (auto *v : {&pref, &pcur, &pr, &pc, &pq, &pqs, &pcs, &T, &S, &e, &D}) v->assign(nb, 0.0);
         g.assign(NEQ, 0.0);
@@ -378,8 +407,24 @@ struct TonalEQ {
     inline void addAt(double fo, double p) {
         double kb = fo * N / sr;
         if (kb < 0 || kb >= N / 2) return;
+        if (edgefix) {  // as bandPowers measures it: shared by the two nearest bins, an edge bin counts in both bands
+            int i = (int)kb; double fr = kb - i;
+            addBin(i, p * (1 - fr));
+            if (i + 1 < N / 2) addBin(i + 1, p * fr);
+            return;
+        }
         int j = bandOf[(int)kb];
         if (j >= 0) pq[j] += p;
+    }
+    inline void addBin(int i, double p) {
+        if (bandOf[i] >= 0) pq[bandOf[i]] += p;
+        if (bandOf2[i] >= 0) pq[bandOf2[i]] += p;
+    }
+    // recipe 5: target offset (dB) for band j at amount N
+    double offsetAt(int j, double N) const {
+        const double *k = N > 0 ? offUp : offDn;
+        double s = std::min(1.0, fabs(N) / offN);
+        return s * (k[knotI[j]] * (1 - knotF[j]) + k[knotI[j] + 1] * knotF[j]);
     }
     // predicted output band powers of chain spec s, bins [k0, k1): each input bin is moved by each path's shift,
     // weighted by that path's input filters (and output high-pass, and the air band's crossover)
@@ -397,11 +442,12 @@ struct TonalEQ {
                 if (p.coherent) pw = amp * amp;
                 pw *= (double)p.outW * p.outW;
                 double fo = f * ratio[q];
-                if (s.air > 0) { double ga = lrLP(fo, s.air); pw *= ga * ga; }
+                if (s.air > 0) { double ga = s.airBW ? bwLP4(fo, s.air) : lrLP(fo, s.air); pw *= ga * ga; }
                 if (p.outHP > 0) { double h = lrHP(fo, p.outHP); pw *= h * h * h * h; }  // 8th order = |LR4|^2
+                if (p.subHP > 0) { double h = lrHP(fo, p.subHP); pw *= h * h; }          // 4th order = |LR4|
                 addAt(fo, P * pw);
             }
-            if (s.air > 0) { double h = lrHP(f, s.air); addAt(f, P * h * h); }
+            if (s.air > 0) { double h = s.airBW ? bwHP4(f, s.air) : lrHP(f, s.air); addAt(f, P * h * h); }
         }
     }
 };
@@ -412,29 +458,36 @@ struct TonalEQ {
 // It looks D samples (2 ms) ahead: the sound is delayed by D, and the gain for each sample is the average of the last
 // D+1 "held" gains. Every one of those held values is <= the gain the delayed sample needs (each hold window contains
 // that sample), so their average is too: no overs, and the gain slides down over 2 ms instead of jumping.
-// Release: the held gain climbs back toward 1 with a 120 ms time constant. Under the ceiling it does nothing at all
+// Release: the held gain climbs back toward 1 with a 120 ms time constant (recipe 5: 25 ms after a short over of less
+// than 5 ms, so single peaks don't pull the whole mix down for long). Under the ceiling it does nothing at all
 // (gain exactly 1, the output is the input delayed by D).
 struct Limiter {
     int nch = 2, D = 96, R = 97, pos = 0;
     double ceiling = 0.966, relCoef = 0.9998, r = 1, sum = 97;
     int64_t sinceOver = 1 << 30;
+    // Optional faster release after a short over (a single peak): fastCoef after episodes shorter than fastMax frames.
+    double sr = 48000, fastMs = 0, fastCoef = 0.9998;
+    int64_t fastMax = 240, episode = 0;   // frames the current (or last) episode of overs lasted
     std::vector<float> delay[MAXCH];
     std::vector<double> need, held;   // gain each sample needs; held (released) gain, last D+1 of each
     bool enabled = true;
     double minGain = 1; long long limited = 0, limited01 = 0, total = 0, clamps = 0;  // for checks (limited01: > 0.1 dB)
 
-    void init(double sr, int channels) {
-        nch = channels;
+    void init(double rate, int channels) {
+        sr = rate; nch = channels;
         D = std::max(1, (int)lround(0.002 * sr)); R = D + 1;
         relCoef = exp(-1.0 / (0.120 * sr));
+        fastMax = (int64_t)lround(0.005 * sr);
+        setFast(fastMs);
         for (int c = 0; c < nch; c++) delay[c].assign(R, 0.0f);
         need.assign(R, 1.0); held.assign(R, 1.0);
         reset();
     }
+    void setFast(double ms) { fastMs = ms; fastCoef = ms > 0 ? exp(-1.0 / (ms * 0.001 * sr)) : relCoef; }
     void reset() {
         for (int c = 0; c < nch; c++) std::fill(delay[c].begin(), delay[c].end(), 0.0f);
         std::fill(need.begin(), need.end(), 1.0); std::fill(held.begin(), held.end(), 1.0);
-        r = 1; sum = R; pos = 0; sinceOver = 1 << 30;
+        r = 1; sum = R; pos = 0; sinceOver = 1 << 30; episode = 0;
     }
     // v: one sample per channel, replaced by the limited sample from D samples ago
     inline void run(float *v) {
@@ -443,12 +496,13 @@ struct Limiter {
         // aim a hair (0.00003 dB) under the ceiling, so float rounding of the result never lands above it
         double g = (enabled && peak > ceiling) ? ceiling * (1.0 - 4e-6) / peak : 1.0;
         need[pos] = g;
+        if (g < 1.0 && sinceOver > D) episode = 0;  // a new episode of overs starts
         sinceOver = g < 1.0 ? 0 : sinceOver + 1;
         double m = 1.0;  // lowest need in the last D+1 samples (only searched while an over is in the window)
-        if (sinceOver <= D) for (int k = 0; k < R; k++) m = std::min(m, need[k]);
+        if (sinceOver <= D) { for (int k = 0; k < R; k++) m = std::min(m, need[k]); episode++; }
         if (m < r) r = m;                    // drops at once (the averaging below makes it a 2 ms slide)
         else {
-            r = m - (m - r) * relCoef;       // climbs back slowly
+            r = m - (m - r) * (episode < fastMax ? fastCoef : relCoef);  // climbs back slowly (faster after a short over)
             if (m == 1.0 && r > 1.0 - 1e-7) r = 1.0;
         }
         sum += r - held[pos]; held[pos] = r;
@@ -526,8 +580,12 @@ struct Engine {
     int PIECE = 512;      // largest piece handed to a shifter at once
     double range = 24;
     // tunables (see AdvancedTuning.h)
-    int recipe = 4, fold2 = 1, floor2 = 1; double airMin = 7000; int catchup = 2; double fadeMs = 80, foldStart = 3, foldFull = 7;
+    int recipe = 5, fold2 = 1, floor2 = 1; double airMin = 7000; int catchup = 2; double fadeMs = 80, foldStart = 3, foldFull = 7;
     double floorHz = 45, floorEndHz = 35, floor2Hz = 35, floorOut = 30;
+    double subHz = 0;     // going down: high-pass on the shifted sound (Hz), 0 = none
+    bool airBW = false;   // going down: the air split is a Butterworth 4 (flat power)
+    double guardMax = 0, guardDb = 0;  // headroom guard: trims the bass filters' boost while the limiter works (max dB)
+    long long guardLast = 0;           // limiter frames > 0.1 dB at the last EQ fit
     int64_t fadeLen = 3840, prerollLen = 1024;
 
     std::vector<std::unique_ptr<Shifter>> pool;
@@ -554,7 +612,33 @@ struct Engine {
 
     Engine(double rate, int channels, int maxF, int fl) : sr(rate), nch(channels), maxFrames(maxF), flags(fl) {}
 
+    // The settings of a recipe (see "recipe" in AdvancedTuning.h). Recipes 2-4 leave every recipe 5 knob off.
+    void applyRecipe(int r) {
+        recipe = r;
+        if (r == 2) { eq.loF = 0; eq.loCut = 9; } else { eq.loF = 100; eq.loCut = 15; }
+        eq.loUp = r <= 3;
+        floorHz = r >= 4 ? 45 : 35;
+        bool five = r >= 5;
+        eq.edgefix = false;
+        eq.offOn = false;
+        for (int i = 0; i < NKNOT; i++) eq.offUp[i] = eq.offDn[i] = 0;
+        eq.offN = 8;
+        eq.lowcapDn = eq.midcutDn = eq.midcutUp = eq.topcutUp = OFF;
+        subHz = 0; airBW = false; guardMax = guardDb = 0;
+        lim.setFast(0);
+        if (!five) return;
+        // recipe 5: the pitch-aware tone fix (values from the tuning in research/advanced/tone, see AdvancedTuning.h)
+        eq.edgefix = true;
+        eq.lowcapDn = 3; eq.midcutDn = 9; eq.midcutUp = 8; eq.topcutUp = 3;
+        eq.offDn[2] = 1; eq.offDn[3] = 0.5; eq.offDn[5] = -0.5; eq.offDn[6] = -0.5;  // 100, 200, 800, 1600 Hz
+        eq.offUp[5] = -0.5; eq.offUp[6] = -0.5;                                     // 800, 1600 Hz
+        eq.offOn = true;
+        subHz = 40; airBW = true;
+        lim.setFast(25);
+    }
+
     bool setup() {
+        applyRecipe(recipe);
         range = (flags & ADVANCED_RANGE_12) ? 12 : 24;
         bool high = sr > 64000;
         SB = high ? 512 : 256;
@@ -637,10 +721,10 @@ struct Engine {
 
     // ---------------------------------------------------------------- the rule for any N
 
-    // The fold floor at amount N (recipe 4): floorHz up to +8, then easing to floorEndHz at +11. At +9..+11 the fold
-    // moves the bass down only 1-3 half-steps, so a 41 Hz bass note may fold to 37-39 Hz instead of jumping up 9-11.
+    // The fold floor at amount N (recipe 4 and up): floorHz up to +8, then easing to floorEndHz at +11. At +9..+11 the
+    // fold moves the bass down only 1-3 half-steps, so a 41 Hz bass note may fold to 37-39 Hz instead of jumping up 9-11.
     double floorAt(double N) const {
-        if (recipe != 4 || N <= 8) return floorHz;
+        if (recipe < 4 || N <= 8) return floorHz;
         return floorHz + (floorEndHz - floorHz) * std::min(1.0, (N - 8) / 3);
     }
 
@@ -670,9 +754,11 @@ struct Engine {
         auto path = [&](double shift) -> PathSpec & { PathSpec &p = s.p[s.n++]; p = PathSpec(); p.shift = shift; return p; };
         if (N == 0) return s;
         if (N < 0) {
-            path(N).add(1);
+            PathSpec &m = path(N); m.add(1);
+            if (subHz > 0) m.subHP = subHz * std::min(1.0, -N / eq.offN);  // full from -offn down
             s.air = std::max(15000.0 * pow(2.0, N / 12.0), airMin);
             if (s.air > 0.45 * sr) s.air = 0;
+            s.airBW = airBW;
             return s;
         }
         if (N <= foldStart) { path(N).add(1); return s; }
@@ -685,7 +771,7 @@ struct Engine {
         if (N <= 15 || !fold2) {  // one fold
             double t = std::min(1.0, (N - foldStart) / (foldFull - foldStart));
             double FH = 150 * t, FL = 300 * t;
-            if (recipe == 4 && N < 12) {  // fold floor with a steep, power-keeping split
+            if (recipe >= 4 && N < 12) {  // fold floor with a steep, power-keeping split
                 double FX = floorAt(N) * pow(2.0, (12 - N) / 12.0);
                 PathSpec &m = path(N); m.coherent = true;
                 ap8(hp(m.add(1), FH), FX);   // above FH, in phase with the sub below
@@ -770,9 +856,12 @@ struct Engine {
                     }
             if (p.spec.outHP > 0)
                 for (int k = 0; k < 4; k++) for (int c = 0; c < nch; c++) { p.outF[k][c].highpass(p.spec.outHP, M_SQRT1_2, sr); p.outF[k][c].clear(); }
+            if (p.spec.subHP > 0)
+                for (int k = 0; k < 2; k++) for (int c = 0; c < nch; c++) { p.subF[k][c].highpass(p.spec.subHP, M_SQRT1_2, sr); p.subF[k][c].clear(); }
         }
         for (int c = 0; c < nch; c++) {
-            if (s.air > 0) { ch.airLP[c].lowpass(s.air, sr); ch.airHP[c].highpass(s.air, sr); }
+            if (s.air > 0 && s.airBW) { ch.airLP[c].bw4(false, s.air, sr); ch.airHP[c].bw4(true, s.air, sr); }
+            else if (s.air > 0) { ch.airLP[c].lowpass(s.air, sr); ch.airHP[c].highpass(s.air, sr); }
             for (int b = 0; b < NEQ; b++) ch.eq[c][b].clear();
         }
         // EQ: start from the gains being heard, take the first gains made for this chain at once
@@ -885,12 +974,13 @@ struct Engine {
         }
     }
 
-    // append to a path's output stream (through its output high-pass, if it has one)
+    // append to a path's output stream (through its output high-passes, if it has them)
     void store(Path &p, const float *const *src, int n) {
         for (int c = 0; c < nch; c++)
             for (int i = 0; i < n; i++) {
                 float v = src[c][i];
                 if (p.spec.outHP > 0) for (int k = 0; k < 4; k++) v = p.outF[k][c].run(v);
+                if (p.spec.subHP > 0) for (int k = 0; k < 2; k++) v = p.subF[k][c].run(v);
                 p.ring[c][p.produced + i] = v;
             }
         p.produced += n;
@@ -965,6 +1055,11 @@ struct Engine {
             return;
         }
         if (stage != 4) return;
+        if (guardMax > 0) {  // headroom guard: the limiter worked more than 1 % of the last period -> less bass boost
+            double frac = (double)(lim.limited01 - guardLast) / E.period;
+            guardLast = lim.limited01;
+            guardDb = frac > 0.01 ? std::min(guardMax, guardDb + 0.5) : std::max(0.0, guardDb - 0.05);
+        }
         Chain *c = eqTarget();
         if (!c || E.gen != targetGen) return;  // the target changed during this analysis: next time
         bool steady = next < 0;                 // the measured output belongs to this chain: update the slow correction
@@ -974,18 +1069,24 @@ struct Engine {
             for (size_t j = 0; j < E.fcs.size(); j++) { E.pqs[j] = a2 * E.pqs[j] + (1 - a2) * E.pq[j]; E.pcs[j] = a2 * E.pcs[j] + (1 - a2) * E.pcur[j]; }
         }
         double mx = *std::max_element(E.pref.begin(), E.pref.end());
-        double loF = (c->spec.N > 0 && !E.loUp) ? 0.0 : E.loF;  // the deeper bass cuts: going down only (see loUp)
+        double N = c->spec.N;
+        double loF = (N > 0 && !E.loUp) ? 0.0 : E.loF;  // the deeper bass cuts: going down only (see loUp)
         double ramp = std::min(1.0, (double)E.blocks2 * E.period / sr / (2 * E.tau));
+        // recipe 5 limits for this direction (OFF: as recipe 4)
+        double lowcap = (N < 0 && E.lowcapDn != OFF) ? E.lowcapDn : E.lowcap;
+        double topcut = N > 0 ? E.topcutUp : OFF;
         size_t nb = E.fcs.size();
         for (size_t j = 0; j < nb; j++) {
             double d = 10 * log10((E.pref[j] + 1e-20) / (E.pq[j] + 1e-20));
             if (E.blocks2 > 0) d += ramp * std::max(-3.0, std::min(3.0, 10 * log10((E.pqs[j] + 1e-20) / (E.pcs[j] + 1e-20))));
-            if (E.pref[j] < mx * 1e-6 && E.pq[j] < mx * 1e-6) d = 0;
-            if (E.pref[j] < mx * 1e-6 && E.pcur[j] < mx * 1e-6) d = 0;  // both quiet: leave alone
+            bool quiet = (E.pref[j] < mx * 1e-6 && E.pq[j] < mx * 1e-6) || (E.pref[j] < mx * 1e-6 && E.pcur[j] < mx * 1e-6);
+            if (quiet) d = 0;  // both quiet: leave alone
             E.D[j] = d;
+            if (E.offOn && !quiet) d += E.offsetAt((int)j, N);  // recipe 5: the per-direction target offsets
             bool lo = loF > 0 && E.fcs[j] < loF;  // balanced3: deeper cuts allowed below 100 Hz
             E.T[j] = E.alpha * std::max(lo ? -E.loCut : -E.cut, std::min(E.boost, d));
-            if (E.fcs[j] < 70) E.T[j] = std::min(E.T[j], E.lowcap);
+            if (E.fcs[j] < 70) E.T[j] = std::min(E.T[j], lowcap);
+            if (topcut != OFF && E.fcs[j] >= 7000) E.T[j] = std::max(E.T[j], -topcut);
         }
         for (int j = 0; j < (int)nb; j++) {  // broad target only: average over +-1 band (not below loF)
             double s = 0; int n = 0;
@@ -1003,8 +1104,15 @@ struct Engine {
         int steps = E.period / 32;
         for (int k = 0; k < NEQ; k++) {
             double cutk = (loF > 0 && E.eqf[k] < loF) ? E.loCut : E.cut;  // the 44 Hz shelf and 62 Hz filter: deeper cut
-            double gk = std::max(-cutk - 3, std::min((k <= 1 ? std::min(E.boost, E.lowcap) : E.boost) + 3, E.g[k]));
-            if (k >= 3 && k <= 7) gk = std::max(-E.midcap, std::min(E.midcap, gk));
+            double gk = std::max(-cutk - 3, std::min((k <= 1 ? std::min(E.boost, lowcap) : E.boost) + 3, E.g[k]));
+            if (k >= 3 && k <= 7) {
+                double mcut = E.midcap;  // recipe 5: deeper mid cuts (going down at 250 Hz, going up at 500 Hz - 2 kHz)
+                if (N < 0 && k == 3 && E.midcutDn != OFF) mcut = E.midcutDn;
+                if (N > 0 && k >= 4 && k <= 6 && E.midcutUp != OFF) mcut = E.midcutUp;
+                gk = std::max(-mcut, std::min(E.midcap, gk));
+            }
+            if (topcut != OFF && k >= 8) gk = std::max(gk, -topcut - 1);
+            if (guardDb > 0 && k <= 2 && gk > 0) gk = std::max(0.0, gk - guardDb);  // never adds a cut
             if (c->eqFresh) { c->eqApplied[k] = gk; c->eqInc[k] = 0; }
             else c->eqInc[k] = (gk - c->eqApplied[k]) / steps;
         }
@@ -1094,6 +1202,7 @@ struct Engine {
         eq.reset();
         keepG = 0; keepIdle = keepIdleLimit;
         lim.reset();
+        guardDb = 0; guardLast = lim.limited01;
         tone.clear();
         tStart = t;
         pending = wantN != 0;
@@ -1188,12 +1297,21 @@ void advanced_get_info(const AdvancedChain *chain, AdvancedInfo *info) {
 int advanced_tune(AdvancedChain *chain, const char *key, double v) {
     Engine *e = chain->e;
     std::string k(key);
-    if (k == "recipe") {
-        e->recipe = (int)v;
-        if (v == 2) { e->eq.loF = 0; e->eq.loCut = 9; } else { e->eq.loF = 100; e->eq.loCut = 15; }
-        e->eq.loUp = v <= 3;
-        e->floorHz = v == 4 ? 45 : 35;
+    TonalEQ &q = e->eq;
+    // offset knots: up25 .. up12800, dn25 .. dn12800 (25 x 2^i Hz)
+    if ((k.compare(0, 2, "up") == 0 || k.compare(0, 2, "dn") == 0) && k.size() > 2) {
+        double hz = atof(k.c_str() + 2);
+        double *knots = k[0] == 'u' ? q.offUp : q.offDn;
+        for (int i = 0; i < NKNOT; i++)
+            if (hz == 25.0 * (1 << i)) {
+                knots[i] = v;
+                q.offOn = false;
+                for (int j = 0; j < NKNOT; j++) if (q.offUp[j] != 0 || q.offDn[j] != 0) q.offOn = true;
+                return 1;
+            }
+        return 0;
     }
+    if (k == "recipe") e->applyRecipe((int)v);
     else if (k == "limiter") e->lim.enabled = v != 0;
     else if (k == "floor2") e->floor2 = (int)v;
     else if (k == "floorhz") e->floorHz = v;
@@ -1207,8 +1325,20 @@ int advanced_tune(AdvancedChain *chain, const char *key, double v) {
     else if (k == "keepfadems") e->keepStep = v > 0 ? (float)(1.0 / (v * 0.001 * e->sr)) : 1.0f;
     else if (k == "foldstart") e->foldStart = v;
     else if (k == "foldfull") e->foldFull = v;
-    else if (k == "lowcap") e->eq.lowcap = v;
-    else if (k == "eqalpha") e->eq.alpha = v;
+    else if (k == "lowcap") q.lowcap = v;
+    else if (k == "eqalpha") q.alpha = v;
+    else if (k == "edgefix") q.edgefix = v != 0;
+    else if (k == "offn") q.offN = std::max(0.01, v);
+    else if (k == "lowcapdn") q.lowcapDn = v < -98 ? OFF : v;
+    else if (k == "midcutup") q.midcutUp = v < 0 ? OFF : v;
+    else if (k == "midcutdn") q.midcutDn = v < 0 ? OFF : v;
+    else if (k == "topcutup") q.topcutUp = v < 0 ? OFF : v;
+    else if (k == "subhz") e->subHz = std::max(0.0, v);
+    else if (k == "airbw") e->airBW = v != 0;
+    else if (k == "guard") { e->guardMax = std::max(0.0, v); e->guardDb = 0; e->guardLast = e->lim.limited01; }
+    else if (k == "fastrel") e->lim.setFast(std::max(0.0, v));
+    else if (k == "tonelohz") { e->tone.loHz = v; e->tone.setFilters(); }
+    else if (k == "tonehihz") { e->tone.hiHz = std::min(v, 0.45 * e->sr); e->tone.setFilters(); }
     else return 0;
     return 1;
 }

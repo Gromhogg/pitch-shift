@@ -1,7 +1,8 @@
 // Advanced processing engine for "What you hear": pitch shifting that keeps the music balanced at big shifts.
-// Recipe ("balanced3", from the research rounds 2-4, with the bass fix made after 2.0.0): the bass is moved down an
-// octave ("fold") for pitch-up, the original's top end ("air") is kept for pitch-down, and a gentle adaptive EQ steers
-// the long-term tone back toward the original (going up, it no longer cuts bass notes that the fold moved).
+// Recipe ("balanced3", from the research rounds 2-4, with the bass fix and the tone fix made after 2.0.0): the bass is
+// moved down an octave ("fold") for pitch-up, the original's top end ("air") is kept for pitch-down, and a gentle
+// adaptive EQ steers the long-term tone back toward the original (going up, it no longer cuts bass notes that the fold
+// moved; it knows which way the pitch went: going down it trims the deep bass, going up it keeps more of the top).
 // Rubber Band (R3, real-time) does the shifting. A safety peak limiter at the very end keeps the output at or below
 // -0.3 dBFS (it does nothing while the sound stays under that).
 //

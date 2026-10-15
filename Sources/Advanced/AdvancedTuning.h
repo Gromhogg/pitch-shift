@@ -8,12 +8,14 @@ extern "C" {
 #endif
 
 // key / default:
-//   "recipe" 4       4: balanced3 with the bass fix (the app's recipe after 2.0.0: steep, power-keeping fold floor at
-//                    45 Hz; going up, the EQ treats the bass like the rest instead of cutting moved bass notes);
+//   "recipe" 5       5: recipe 4 plus the pitch-aware tone fix (the app's recipe: the EQ knows which way the pitch
+//                    went; the recipe 5 knobs below); 4: balanced3 with the bass fix (steep, power-keeping fold floor
+//                    at 45 Hz; going up, the EQ treats the bass like the rest instead of cutting moved bass notes);
 //                    3: balanced3 exactly as in 2.0.0 (research round 4: floor at 35 Hz with LR4 splits, deeper EQ
 //                    cuts below 100 Hz both ways); 2: balanced2 (round 3: blend ramp for +3..+7 with the unfolded low
 //                    band riding in the main shifter, no fold floor, EQ without the deeper low cuts).
-//                    Set "recipe" first: it resets "floorhz" to its own default.
+//                    Set "recipe" first: it resets "floorhz" and all the recipe 5 knobs to its own values (recipes
+//                    2-4: every recipe 5 knob off, so the output is exactly that recipe's).
 //   "fold2" 1        second fold (N-24) for N > +15 (0: the one fold keeps going up with N)
 //   "floor2" 1       fold floor for the second fold too (its sub bass goes one level up); 0 = none
 //   "floorhz" 45, "floorendhz" 35, "floor2hz" 35, "floorout" 30   fold floor up to +8 (35 with recipe 3), the
@@ -27,6 +29,29 @@ extern "C" {
 //   "limiter" 1      safety limiter on (0: gain always 1; its 2 ms delay stays, so the latency doesn't change)
 //   "lowcap" 6       EQ: largest boost below 70 Hz (dB)
 //   "eqalpha" 1      EQ strength: 1 = full, 0 = EQ off (its filters stay flat)
+// Recipe 5 knobs (value with recipe 5; with recipes 2-4 they are off):
+//   "edgefix" 1      the EQ's prediction counts a frequency on a band edge in both bands, as its measurement does
+//                    (0: in the lower band only, which made the EQ boost the bass a little)
+//   "up25" .. "up12800", "dn25" .. "dn12800"   target offsets (dB) going up / down, one knot per octave at
+//                    25 x 2^i Hz (25, 50, 100, 200, 400, 800, 1600, 3200, 6400, 12800), in between on a log scale,
+//                    flat past the ends. Scaled by min(1, |N| / offn). Recipe 5: dn100 1, dn200 0.5, dn800 -0.5,
+//                    dn1600 -0.5, up800 -0.5, up1600 -0.5, the rest 0.
+//   "offn" 8         amount (half-steps) from which the offsets and "subhz" apply in full
+//   "lowcapdn" 3     going down: largest boost below 70 Hz (dB); -99 = off (use "lowcap")
+//   "midcutdn" 9     going down: deepest cut of the 250 Hz filter (dB; the other mid filters stay at 6); -1 = off
+//   "midcutup" 8     going up: deepest cut of the 500 Hz, 1 kHz and 2 kHz filters (dB); -1 = off
+//   "topcutup" 3     going up: deepest cut from 7 kHz up (dB; the 8 kHz and 11.3 kHz filters may go 1 dB further),
+//                    so the top stays closer to normal mode's; -1 = off
+//   "subhz" 40       going down: 4th-order high-pass on the shifted sound (Hz, scaled by min(1, |N| / offn)): the
+//                    original's deep bass moved below 40 Hz; 0 = none
+//   "airbw" 1        going down: the split to the unshifted top is a Butterworth 4 (its two sides add up to full
+//                    power) instead of a Linkwitz-Riley 4 (a -3 dB dip at the split, 7-15 kHz)
+//   "fastrel" 25     limiter: release time (ms) after a short over (shorter than 5 ms); longer ones keep 120 ms.
+//                    0 = always 120 ms
+//   "guard" 0        limiter headroom guard: while the limiter works more than 1 % of an EQ period, the bass filters'
+//                    boost is trimmed 0.5 dB per period (back 0.05 dB per period), at most this many dB; 0 = off
+// Bass / treble setting (advanced_set_tone):
+//   "tonelohz" 150, "tonehihz" 5000   corner of the low shelf and of the high shelf (Hz)
 // Returns 0 if the key is unknown.
 int advanced_tune(AdvancedChain *chain, const char *key, double value);
 
