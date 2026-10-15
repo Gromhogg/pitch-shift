@@ -179,6 +179,18 @@ func voiceFormantScale(halfSteps: Float, cartoon: Float) -> Double {
     cartoon <= 0 ? 0 : pow(2, Double(halfSteps) / 12 * Double(min(cartoon, 1) - 1))
 }
 
+// How much quieter the voice is made, for a pitch (half-steps, including "Deeper when slow") and a style.
+// Rubber Band's short window (used for its low delay) makes the voice louder when it moves the voice's shape
+// (formants) back down, which is what Natural does when going up: about 0.25 dB per half-step the shape is moved,
+// measured on 4 recorded voices and 2 made-up ones against Rubber Band's own standard window, which keeps the level
+// (for example +2.6 dB at +10, up to +6 dB on a high voice). Loud words could then go past full scale and sound harsh.
+// So the output is turned down by that much: nothing in Cartoon (the shape isn't moved) or when going down.
+// Off for `--render-voice --voice-preset old`.
+func voiceLevelGain(halfSteps: Float, cartoon: Float) -> Float {
+    let shapeMove = halfSteps * (1 - max(0, min(1, cartoon)))  // half-steps the shape is moved back down
+    return shapeMove > 0 ? pow(10, -0.25 * shapeMove / 20) : 1
+}
+
 // The voice's Rubber Band shifter (used by the live chain and by the offline check --render-voice).
 // A new style glides there over a short moment, so moving the slider never clicks. "Deeper when slow" adds an extra
 // shift on top of the set amount, which glides too.
@@ -193,8 +205,12 @@ final class VoiceStretcher {
     private var extraTarget: Float = 0
     private var extraStep: Float = 0     // how much `extra` moves per sample on its way
     private let extraGlide: Float        // each move of `extra` takes this many samples (0.3 s)
+    private let levelFix: Bool           // turn the output down as voiceLevelGain says
+    private var gain: Float = 1          // the output gain in use (follows `gainTarget` smoothly)
+    private var gainTarget: Float = 1
+    private let gainSmoothing: Float     // per sample, for a 30 ms glide
 
-    init?(rate: Double, halfSteps: Float, cartoon: Float, slowDeeper: Bool = false) {
+    init?(rate: Double, halfSteps: Float, cartoon: Float, slowDeeper: Bool = false, levelFix: Bool = true) {
         guard let made = rubberband_new(UInt32(rate), 1, voiceShifterOptions, 1, pow(2, Double(halfSteps) / 12)) else { return nil }
         state = made
         self.halfSteps = halfSteps
@@ -203,8 +219,12 @@ final class VoiceStretcher {
         glideStep = Float(1 / (0.15 * rate))  // all the way from Natural to Cartoon in 0.15 s
         self.slowDeeper = slowDeeper
         extraGlide = Float(0.3 * rate)
+        self.levelFix = levelFix
+        gainSmoothing = Float(1 - exp(-1 / (0.03 * rate)))
         rubberband_set_max_process_size(state, 4096)
         rubberband_set_formant_scale(state, voiceFormantScale(halfSteps: halfSteps, cartoon: self.cartoon))
+        aimGain()
+        gain = gainTarget
     }
 
     deinit { rubberband_delete(state) }
@@ -223,6 +243,8 @@ final class VoiceStretcher {
         halfSteps = new
         if running { rubberband_set_pitch_scale(state, pow(2, Double(pitch) / 12)) }
         rubberband_set_formant_scale(state, voiceFormantScale(halfSteps: pitch, cartoon: cartoonNow))
+        aimGain()
+        if fresh { gain = gainTarget }  // nothing old is left to glide from
         return fresh
     }
 
@@ -240,6 +262,8 @@ final class VoiceStretcher {
         guard running else { return fresh }
         rubberband_set_pitch_scale(state, pow(2, Double(pitch) / 12))
         rubberband_set_formant_scale(state, voiceFormantScale(halfSteps: pitch, cartoon: cartoonNow))
+        aimGain()
+        if fresh { gain = gainTarget }
         return fresh
     }
 
@@ -264,6 +288,25 @@ final class VoiceStretcher {
             rubberband_set_pitch_scale(state, pow(2, Double(pitch) / 12))
         }
         rubberband_set_formant_scale(state, voiceFormantScale(halfSteps: pitch, cartoon: cartoonNow))
+        aimGain()
+    }
+
+    private func aimGain() {
+        gainTarget = levelFix ? voiceLevelGain(halfSteps: pitch, cartoon: cartoonNow) : 1
+    }
+
+    // Takes up to `count` shifted samples from Rubber Band into `buffer`, at the level voiceLevelGain says
+    // (gliding there), and returns how many it took.
+    func retrieve(_ buffer: UnsafeMutablePointer<Float>, _ count: Int) -> Int {
+        var output: UnsafeMutablePointer<Float>? = buffer
+        let got = Int(rubberband_retrieve(state, &output, UInt32(count)))
+        guard gain != 1 || gainTarget != 1 else { return got }  // Cartoon and going down: untouched
+        for j in 0..<got {
+            gain += (gainTarget - gain) * gainSmoothing
+            buffer[j] *= gain
+        }
+        if abs(gain - gainTarget) < 1e-4 { gain = gainTarget }  // close enough (0.001 dB): stop gliding
+        return got
     }
 }
 
@@ -627,6 +670,10 @@ final class VoiceChain {
                 var ended = false
                 value = softLimit(value + mix.next(&ended))
                 if ended && muteMic { muteLeft = muteAfter }  // played to the end
+            } else if shifting {
+                // The shifted voice can peak a few dB above the mic: ease its loudest moments instead of cutting
+                // them off at full scale (a hard cut sounds harsh and buzzy).
+                value = softLimit(value)
             } else {
                 value = max(-1, min(1, value))
             }
@@ -656,8 +703,7 @@ final class VoiceChain {
         while true {
             let ready = min(Int(rubberband_available(shifter)), maxPiece)
             if ready <= 0 { break }
-            var output: UnsafeMutablePointer<Float>? = piece
-            let got = Int(rubberband_retrieve(shifter, &output, UInt32(ready)))
+            let got = stretcher.retrieve(piece, ready)
             for j in 0..<got where ringCount < ringSize {
                 ring[(ringRead + ringCount) % ringSize] = piece[j]
                 ringCount += 1
@@ -1073,9 +1119,10 @@ final class VoiceTest {
 // Offline check (--render-voice): shifts a sound file with the voice's own Rubber Band settings, in 512-sample
 // pieces like the live chain, and writes one channel. `changes` moves the style part way through
 // ((seconds, style) pairs), to check that it changes smoothly. With `slowDeeper` it prints the speaking rate and
-// the extra shift once per second of sound.
+// the extra shift once per second of sound. `levelFix: false` renders it as before the level fix
+// (`--voice-preset old`, see voiceLevelGain), so old and new can be compared.
 func renderVoiceFile(input: String, output: String, halfSteps: Float, cartoon: Float, changes: [(Double, Float)],
-                     slowDeeper: Bool = false) throws {
+                     slowDeeper: Bool = false, levelFix: Bool = true) throws {
     let file = try AVAudioFile(forReading: URL(fileURLWithPath: input))
     let rate = file.processingFormat.sampleRate
     let length = Int(file.length)
@@ -1093,7 +1140,8 @@ func renderVoiceFile(input: String, output: String, halfSteps: Float, cartoon: F
     }
     var result = mono
     if halfSteps != 0 || slowDeeper {
-        guard let stretcher = VoiceStretcher(rate: rate, halfSteps: halfSteps, cartoon: cartoon, slowDeeper: slowDeeper) else {
+        guard let stretcher = VoiceStretcher(rate: rate, halfSteps: halfSteps, cartoon: cartoon, slowDeeper: slowDeeper,
+                                             levelFix: levelFix) else {
             throw Problem(message: "Could not start Rubber Band.")
         }
         let speaking = SpeakingRate(sampleRate: rate)
@@ -1124,10 +1172,7 @@ func renderVoiceFile(input: String, output: String, halfSteps: Float, cartoon: F
             position += block
             while rubberband_available(stretcher.state) > 0 {
                 let want = min(Int(rubberband_available(stretcher.state)), piece.count)
-                let got = piece.withUnsafeMutableBufferPointer { p in
-                    var pointer: UnsafeMutablePointer<Float>? = p.baseAddress
-                    return Int(rubberband_retrieve(stretcher.state, &pointer, UInt32(want)))
-                }
+                let got = piece.withUnsafeMutableBufferPointer { stretcher.retrieve($0.baseAddress!, want) }
                 if got <= 0 { break }
                 let drop = min(skip, got)
                 skip -= drop
