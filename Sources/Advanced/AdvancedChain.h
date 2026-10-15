@@ -8,8 +8,8 @@
 // Plain C API, so Swift can call it through the bridging header.
 // Threading: create, use and delete from one thread at a time (the engine also runs one helper thread of its own
 // that tidies up spare Rubber Band shifters; it never touches the sound).
-// Real-time safe: advanced_process, advanced_set_semis and advanced_reset make no memory, take no locks and do no
-// file or console I/O. Everything is set up in advanced_new.
+// Real-time safe: advanced_process, advanced_set_semis, advanced_set_tone and advanced_reset make no memory, take no
+// locks and do no file or console I/O. Everything is set up in advanced_new.
 #ifndef ADVANCED_CHAIN_H
 #define ADVANCED_CHAIN_H
 
@@ -34,7 +34,13 @@ void advanced_delete(AdvancedChain *chain);
 // At 0 the output is the delayed input, untouched.
 void advanced_set_semis(AdvancedChain *chain, double semis);
 
-// Forget all sound (for example after a pause). Keeps the amount.
+// Bass and treble in dB (-12..+12 each, default 0): a low shelf at 150 Hz and a high shelf at 5 kHz on the finished
+// sound, at every amount (0 too). Call any time on the processing thread. The gains glide 0.25 dB per 32 samples
+// (about 16 ms for 6 dB), so moving them doesn't click; set before the first advanced_process, the glide is over
+// before any sound comes out. At 0 and 0 the sound is exactly as without it.
+void advanced_set_tone(AdvancedChain *chain, double bassDb, double trebleDb);
+
+// Forget all sound (for example after a pause). Keeps the amount and the bass and treble.
 void advanced_reset(AdvancedChain *chain);
 
 // in: `channels` pointers to `frames` samples. keep: NULL, or `channels` pointers to a part of `in` that must stay

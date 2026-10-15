@@ -25,8 +25,19 @@ extern "C" {
 //   "foldstart" 3, "foldfull" 7   fold weight ramps from 0 at foldstart to 1 at foldfull (half-steps)
 //   "keepfadems" 30  fade-in of `keep` when it starts (0 = none, for tests)
 //   "limiter" 1      safety limiter on (0: gain always 1; its 2 ms delay stays, so the latency doesn't change)
+//   "lowcap" 6       EQ: largest boost below 70 Hz (dB)
+//   "eqalpha" 1      EQ strength: 1 = full, 0 = EQ off (its filters stay flat)
 // Returns 0 if the key is unknown.
 int advanced_tune(AdvancedChain *chain, const char *key, double value);
+
+// The EQ gains applied right now in the chain being heard (dB): filter 0 is a low shelf at 44 Hz, 1-8 are peaks at
+// 62.5, 125, 250, 500, 1000, 2000, 4000, 8000 Hz, 9 is a high shelf at 11.3 kHz. All 0 while the amount heard is 0.
+void advanced_eq_gains(const AdvancedChain *chain, double g[10]);
+
+// The EQ's last fit, per 1/3-octave band (band j is centred at 1000 x 10^((j-16)/10) Hz: 25 Hz .. 16 kHz):
+// want = the change the band asked for (dB, before any limits), target = what the filters were fitted to (after the
+// limits, the strength and the smoothing). Either may be NULL. Copies the first n bands; returns the band count (29).
+int advanced_eq_bands(const AdvancedChain *chain, double *want, double *target, int n);
 
 // What the safety limiter has done so far.
 typedef struct {

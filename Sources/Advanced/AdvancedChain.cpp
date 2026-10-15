@@ -292,6 +292,7 @@ struct TonalEQ {
 #endif
     std::vector<float> hann, tmp, re, im;
     std::vector<double> fcs, rbin, pref, pcur, pr, pc, pq, pqs, pcs, T, S, g, e;
+    std::vector<double> D;               // checks only: the change each band wanted at the last fit, before any limits
     std::vector<int> b0, b1, bandOf;
     std::vector<std::vector<double>> M;  // least-squares fit matrix (filters x bands)
     double eqf[NEQ];
@@ -326,7 +327,7 @@ struct TonalEQ {
         for (int i = 0; i < N / 2; i++)
             for (size_t j = 0; j < nb; j++) if (i >= b0[j] && i < b1[j]) { bandOf[i] = (int)j; break; }
         rbin.assign(N / 2, 0.0);
-        for (auto *v : {&pref, &pcur, &pr, &pc, &pq, &pqs, &pcs, &T, &S, &e}) v->assign(nb, 0.0);
+        for (auto *v : {&pref, &pcur, &pr, &pc, &pq, &pqs, &pcs, &T, &S, &e, &D}) v->assign(nb, 0.0);
         g.assign(NEQ, 0.0);
         for (int k = 0; k < NEQ; k++) eqf[k] = 31.25 * pow(2.0, k);
         // how each filter at 12 dB shows up in each band; M = (A^T A + 0.05 I)^-1 A^T
@@ -471,6 +472,50 @@ struct Limiter {
     }
 };
 
+// ------------------------------------------------------------------------------------------------- bass / treble
+
+// The app's bass and treble setting (advanced_set_tone): a low shelf at 150 Hz and a high shelf at 5 kHz on each
+// channel, on the finished sound just before the safety limiter. The gains glide 0.25 dB per 32 samples, so moving
+// them doesn't click. While both are 0 and staying there it is skipped, so the sound is exactly as without it.
+struct ToneStage {
+    double sr = 48000, loHz = 150, hiHz = 5000;
+    double wantB = 0, wantT = 0, curB = 0, curT = 0;  // bass, treble (dB): asked for, applied now
+    int nch = 2, count = 0;                           // count: samples into the current 32-sample step
+    int64_t idle = 0, idleLimit = 1;                  // samples run flat since both reached 0; then it stops
+    Biquad lo[MAXCH], hi[MAXCH];
+
+    void init(double rate, int channels) {
+        sr = rate; nch = channels;
+        hiHz = std::min(5000.0, 0.45 * rate);
+        idleLimit = idle = (int64_t)(0.05 * rate);  // 50 ms: the filters' last ring-out has died away
+        setFilters();
+    }
+    void setFilters() { for (int c = 0; c < nch; c++) { lo[c].lowshelf(loHz, curB, sr); hi[c].highshelf(hiHz, curT, sr); } }
+    void clear() { for (int c = 0; c < nch; c++) { lo[c].clear(); hi[c].clear(); } count = 0; }
+    bool flat() const { return wantB == 0 && wantT == 0 && curB == 0 && curT == 0; }
+    static double toward(double cur, double want) { return fabs(want - cur) <= 0.25 ? want : cur + (want > cur ? 0.25 : -0.25); }
+
+    void run(std::vector<float> *x, int m) {
+        if (flat() && idle >= idleLimit) return;
+        int i = 0;
+        while (i < m) {
+            if (count == 0 && (curB != wantB || curT != wantT)) {
+                curB = toward(curB, wantB); curT = toward(curT, wantT);
+                setFilters();
+            }
+            int n = std::min(m - i, 32 - count);
+            for (int c = 0; c < nch; c++) {
+                float *s = x[c].data() + i;
+                for (int k = 0; k < n; k++) s[k] = hi[c].run(lo[c].run(s[k]));
+            }
+            count = (count + n) & 31;
+            i += n;
+        }
+        if (!flat()) idle = 0;
+        else if ((idle += m) >= idleLimit) clear();
+    }
+};
+
 // ------------------------------------------------------------------------------------------------- engine
 
 struct Engine {
@@ -499,6 +544,7 @@ struct Engine {
     int targetGen = 0;                     // changes whenever the EQ's target chain changes
     TonalEQ eq;
     Limiter lim;                           // safety limiter at the very end (adds its 2 ms look-ahead to the delay)
+    ToneStage tone;                        // bass / treble, just before the limiter
     long long underruns = 0, switches = 0;
     float keepG = 0, keepStep = 1;          // keep fade-in: level now, step per sample
     int64_t keepIdle = 0, keepIdleLimit = 1; // samples since keep was last non-zero; after 0.25 s it counts as off
@@ -518,6 +564,7 @@ struct Engine {
         keepStep = (float)(1.0 / (0.030 * sr));
         keepIdleLimit = keepIdle = (int64_t)(0.25 * sr);
         lim.init(sr, nch);
+        tone.init(sr, nch);
         // two chains (the one heard and the next) of up to 3 shifters each, plus one spare while the helper resets
         // used ones. About 4.5 MB each at 48 kHz, 8 MB at 96 kHz.
         int poolSize = 2 * MAXPATHS + 1;
@@ -935,6 +982,7 @@ struct Engine {
             if (E.blocks2 > 0) d += ramp * std::max(-3.0, std::min(3.0, 10 * log10((E.pqs[j] + 1e-20) / (E.pcs[j] + 1e-20))));
             if (E.pref[j] < mx * 1e-6 && E.pq[j] < mx * 1e-6) d = 0;
             if (E.pref[j] < mx * 1e-6 && E.pcur[j] < mx * 1e-6) d = 0;  // both quiet: leave alone
+            E.D[j] = d;
             bool lo = loF > 0 && E.fcs[j] < loF;  // balanced3: deeper cuts allowed below 100 Hz
             E.T[j] = E.alpha * std::max(lo ? -E.loCut : -E.cut, std::min(E.boost, d));
             if (E.fcs[j] < 70) E.T[j] = std::min(E.T[j], E.lowcap);
@@ -1026,6 +1074,7 @@ struct Engine {
         }
         for (int c = 0; c < nch; c++)
             for (int i = 0; i < m; i++) acc[c][i] += keepR[c][tau0 + i];
+        tone.run(acc, m);
         for (int i = 0; i < m; i++) {  // safety limiter, both channels together
             float v[MAXCH];
             for (int c = 0; c < nch; c++) v[c] = acc[c][i];
@@ -1045,6 +1094,7 @@ struct Engine {
         eq.reset();
         keepG = 0; keepIdle = keepIdleLimit;
         lim.reset();
+        tone.clear();
         tStart = t;
         pending = wantN != 0;
         targetGen++;
@@ -1086,6 +1136,12 @@ void advanced_set_semis(AdvancedChain *chain, double semis) {
     e->pending = true;
 }
 
+void advanced_set_tone(AdvancedChain *chain, double bassDb, double trebleDb) {
+    ToneStage &s = chain->e->tone;
+    if (bassDb == bassDb) s.wantB = std::max(-12.0, std::min(12.0, bassDb));  // NaN: unchanged
+    if (trebleDb == trebleDb) s.wantT = std::max(-12.0, std::min(12.0, trebleDb));
+}
+
 void advanced_reset(AdvancedChain *chain) { chain->e->reset(); }
 
 void advanced_process(AdvancedChain *chain, const float *const *in, const float *const *keep, float *const *out, int frames) {
@@ -1103,6 +1159,21 @@ void advanced_limiter_stats(const AdvancedChain *chain, AdvancedLimiterStats *s)
     s->samplesLimitedOver01dB = l.limited01;
     s->samples = l.total;
     s->roundingClamps = l.clamps;
+}
+
+void advanced_eq_gains(const AdvancedChain *chain, double g[10]) {
+    const Chain &a = chain->e->chains[chain->e->active];
+    for (int k = 0; k < NEQ; k++) g[k] = a.dry() ? 0.0 : a.eqApplied[k];
+}
+
+int advanced_eq_bands(const AdvancedChain *chain, double *want, double *target, int n) {
+    const TonalEQ &E = chain->e->eq;
+    int nb = (int)E.fcs.size();
+    for (int j = 0; j < std::min(n, nb); j++) {
+        if (want) want[j] = E.D[j];
+        if (target) target[j] = E.S[j];
+    }
+    return nb;
 }
 
 void advanced_get_info(const AdvancedChain *chain, AdvancedInfo *info) {
@@ -1136,6 +1207,8 @@ int advanced_tune(AdvancedChain *chain, const char *key, double v) {
     else if (k == "keepfadems") e->keepStep = v > 0 ? (float)(1.0 / (v * 0.001 * e->sr)) : 1.0f;
     else if (k == "foldstart") e->foldStart = v;
     else if (k == "foldfull") e->foldFull = v;
+    else if (k == "lowcap") e->eq.lowcap = v;
+    else if (k == "eqalpha") e->eq.alpha = v;
     else return 0;
     return 1;
 }
