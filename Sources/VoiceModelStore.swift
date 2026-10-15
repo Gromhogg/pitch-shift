@@ -1,0 +1,232 @@
+// Realistic mode (AI voices, Apple silicon): loads a voice's Core ML models once, in the background, while Natural
+// mode keeps playing, and frees them when Realistic is turned off. Also the pieces the voice chain and the command
+// line use around Sources/Voice/VoiceModel.h.
+//
+// The first time a voice is loaded on a Mac, macOS prepares the models for its chips: that can take up to a minute
+// (later loads take about a second). The window shows that through ChangerState.loading (see `loadingNote`).
+import AVFoundation
+import Foundation
+
+final class VoiceModelStore {
+    static let shared = VoiceModelStore()
+    // --compute cpu|gpu|ane|all (VOICEMODEL_COMPUTE_*); auto = the content encoder on the Neural Engine and the voice
+    // on the GPU, the CPU if those can't be used.
+    static var computeUnits: Int32 = Int32(VOICEMODEL_COMPUTE_AUTO)
+
+    enum Status: Equatable {
+        case none
+        case loading(String)          // voice id
+        case ready(String)
+        case failed(String, String)   // voice id, why
+    }
+    private(set) var status: Status = .none
+    private(set) var model: OpaquePointer?   // VoiceModel *, for `status` .ready
+    var onChange: () -> Void = {}            // called on the main thread when `status` changes
+    private var wanted: String?              // the voice id asked for last (nil = none)
+    private var retired: [OpaquePointer] = [] // models of a voice no longer wanted, freed once no chain uses them
+    private let queue = DispatchQueue(label: "Pitch Shift AI voice loading", qos: .userInitiated)
+
+    // True until this voice has been loaded once on this Mac (then macOS keeps the prepared models).
+    func firstTime(_ entry: VoiceEntry) -> Bool { !UserDefaults.standard.bool(forKey: Self.preparedKey(entry)) }
+
+    // What the window can say while loading.
+    func loadingNote(_ entry: VoiceEntry?) -> String {
+        guard let entry, firstTime(entry) else { return "Getting the AI voice ready…" }
+        return "Getting the AI voice ready. The first time can take up to a minute."
+    }
+
+    // Asks for a voice's models (main thread). Loads in the background unless they are loaded or loading already.
+    func want(_ entry: VoiceEntry) {
+        wanted = entry.id
+        switch status {
+        case .ready(let id) where id == entry.id, .loading(let id) where id == entry.id: return
+        default: break
+        }
+        guard let encoder = entry.encoderURL?.path, let voice = entry.modelURL?.path else {
+            setStatus(.failed(entry.id, "\(entry.name) has no AI voice"))
+            return
+        }
+        guard FileManager.default.fileExists(atPath: encoder), FileManager.default.fileExists(atPath: voice) else {
+            setStatus(.failed(entry.id, "the AI voice files are missing"))
+            return
+        }
+        if let model { retired.append(model) }  // another voice was loaded: a running chain may still use it
+        model = nil
+        setStatus(.loading(entry.id))
+        let id = entry.id, units = Self.computeUnits, key = Self.preparedKey(entry)
+        queue.async { [weak self] in
+            var err = [CChar](repeating: 0, count: 200)
+            let made = voicemodel_load(encoder, voice, units, &err, Int32(err.count))
+            let why = String(cString: err)
+            DispatchQueue.main.async {
+                guard let self else { voicemodel_free(made); return }
+                guard self.wanted == id, self.status == .loading(id) else { voicemodel_free(made); return }  // no longer wanted
+                if let made {
+                    UserDefaults.standard.set(true, forKey: key)
+                    self.model = made
+                    self.setStatus(.ready(id))
+                } else {
+                    self.setStatus(.failed(id, why.isEmpty ? "the AI voice can't run here" : why))
+                }
+            }
+        }
+    }
+
+    // Lets the models go (main thread). Only call it after every voice chain using them was closed.
+    func free() {
+        wanted = nil
+        if let model { voicemodel_free(model) }
+        model = nil
+        freeRetired()
+        setStatus(.none)
+    }
+
+    // Frees the models of voices no longer wanted (main thread; call after the chain that used them was closed).
+    func freeRetired() {
+        for old in retired { voicemodel_free(old) }
+        retired = []
+    }
+
+    // The loaded model for a voice, or nil.
+    func model(for id: String) -> OpaquePointer? {
+        if case .ready(let ready) = status, ready == id { return model }
+        return nil
+    }
+
+    // Loads right here and waits (for --render-voice). The caller frees it with voicemodel_free.
+    static func loadNow(_ entry: VoiceEntry) throws -> OpaquePointer {
+        guard let encoder = entry.encoderURL?.path, let voice = entry.modelURL?.path,
+              FileManager.default.fileExists(atPath: encoder), FileManager.default.fileExists(atPath: voice) else {
+            throw Problem(message: "\(entry.name): the AI voice files are missing")
+        }
+        var err = [CChar](repeating: 0, count: 200)
+        guard let made = voicemodel_load(encoder, voice, computeUnits, &err, Int32(err.count)) else {
+            throw Problem(message: "Realistic mode: \(String(cString: err))")
+        }
+        UserDefaults.standard.set(true, forKey: preparedKey(entry))
+        return made
+    }
+
+    private func setStatus(_ new: Status) {
+        guard new != status else { return }
+        status = new
+        onChange()
+    }
+
+    // Changes when the model files change (size of the voice file), so a new version counts as "first time" again.
+    private static func preparedKey(_ entry: VoiceEntry) -> String {
+        let size = entry.modelURL.flatMap { url -> Int? in
+            let weights = url.appendingPathComponent("weights/weight.bin")
+            return (try? FileManager.default.attributesOfItem(atPath: weights.path)[.size] as? Int) ?? nil
+        } ?? 0
+        return "aiVoicePrepared.\(entry.id).\(size)"
+    }
+}
+
+// --compute cpu|gpu|ane|all|auto -> VOICEMODEL_COMPUTE_*
+func computeUnits(named name: String) -> Int32? {
+    switch name {
+    case "auto": return Int32(VOICEMODEL_COMPUTE_AUTO)
+    case "cpu": return Int32(VOICEMODEL_COMPUTE_CPU)
+    case "gpu": return Int32(VOICEMODEL_COMPUTE_GPU)
+    case "ane": return Int32(VOICEMODEL_COMPUTE_ANE)
+    case "all": return Int32(VOICEMODEL_COMPUTE_ALL)
+    default: return nil
+    }
+}
+
+// Hands the mic sound and the pitch frames voicechanger_analyse just made to the AI voice (sound thread).
+func voicestreamPush(_ stream: OpaquePointer, _ mic: UnsafePointer<Float>, _ frames: Int, _ pitch: UnsafeMutablePointer<VoiceChangerPitch>) {
+    let raw = UnsafeMutableRawPointer(pitch)
+    let hz = (raw + MemoryLayout<VoiceChangerPitch>.offset(of: \VoiceChangerPitch.frameHz)!).assumingMemoryBound(to: Float.self)
+    let pos = (raw + MemoryLayout<VoiceChangerPitch>.offset(of: \VoiceChangerPitch.framePos)!).assumingMemoryBound(to: Int64.self)
+    voicestream_push(stream, mic, Int32(frames), hz, pos, pitch.pointee.newFrames)
+}
+
+// One line about the AI voice for --watch and --render-voice --quality realistic.
+func aiStatsLine(_ s: VoiceStreamStats, latencyMs: Double, seconds: Double) -> String {
+    String(format: "%4.0fs  AI voice: %@ | delay %.0f ms (fixed) | pieces %lld, late %lld, Natural filled in %.2f s | piece %.1f ms average, %.1f ms worst | AI thread %.0f%% of a core",
+           seconds, s.loaded != 0 ? "playing" : "not yet", latencyMs, s.hops, s.misses, s.fallbackSeconds,
+           s.averageHopMs, s.worstHopMs, s.cpuShare * 100)
+}
+
+// --render-voice ... --voice X --quality realistic: runs the AI voice inline over a file (it never comes late) after
+// the Natural render (`natural`, lined up with the input), and writes the result lined up with the input too.
+// Prints what it does once per second of sound.
+func renderRealisticFile(input: String, natural: [Float], rate: Double, output: String, entry: VoiceEntry, options: ChangerOptions) throws {
+    let file = try AVAudioFile(forReading: URL(fileURLWithPath: input))
+    guard file.processingFormat.sampleRate == rate,
+          let source = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length)) else {
+        throw Problem(message: "Could not read \(input).")
+    }
+    try file.read(into: source)
+    let length = Int(file.length)
+    let channels = Int(file.processingFormat.channelCount), used = channels <= 2 ? channels : 1
+    var mono = [Float](repeating: 0, count: length)
+    for c in 0..<used { for i in 0..<length { mono[i] += source.floatChannelData![c][i] / Float(used) } }
+
+    let started = Date()
+    let model = try VoiceModelStore.loadNow(entry)
+    defer { voicemodel_free(model) }
+    print(String(cString: voicemodel_describe(model)))
+    let block = 128
+    guard let stream = voicestream_new(model, rate, Int32(block), 1, nil) else { throw Problem(message: "Could not start the AI voice.") }
+    defer { voicestream_delete(stream) }
+    for (key, value) in options.tune { _ = voicestream_tune(stream, key, value) }
+    guard let changer = voicechanger_new(rate, Int32(block)) else { throw Problem(message: "Could not start the voice changer.") }
+    defer { voicechanger_delete(changer) }
+    for (key, value) in options.tune { _ = voicechanger_tune(changer, key, value) }
+    voicechanger_set(changer, options.voice, options.strength)
+    voicechanger_reset(changer)  // its pitch frames count the same samples as the stream
+    let latency = Int(voicestream_latency_frames(stream))
+    let pitch = UnsafeMutablePointer<VoiceChangerPitch>.allocate(capacity: 1)
+    pitch.initialize(to: VoiceChangerPitch())
+    defer { pitch.deallocate() }
+    var mic = [Float](repeating: 0, count: block), nat = mic, out = mic
+    var result: [Float] = []
+    result.reserveCapacity(length + latency + block)
+    var position = 0, nextReport = 1
+    var stats = VoiceStreamStats()
+    while result.count < length + latency {
+        for i in 0..<block {
+            mic[i] = position + i < length ? mono[position + i] : 0
+            nat[i] = position + i < natural.count ? natural[position + i] : 0
+        }
+        mic.withUnsafeBufferPointer { m in
+            voicechanger_analyse(changer, m.baseAddress!, Int32(block), 0, pitch)
+            voicestreamPush(stream, m.baseAddress!, block, pitch)
+        }
+        nat.withUnsafeBufferPointer { n in
+            out.withUnsafeMutableBufferPointer { o in voicestream_pull(stream, n.baseAddress!, 0, o.baseAddress!, Int32(block)) }
+        }
+        result.append(contentsOf: out)
+        position += block
+        if position >= nextReport * Int(rate) && position <= length {
+            voicestream_get_stats(stream, &stats)
+            print(aiStatsLine(stats, latencyMs: Double(latency) / rate * 1000, seconds: Double(nextReport)))
+            nextReport += 1
+        }
+    }
+    voicestream_get_stats(stream, &stats)
+    print(String(format: "AI voice: %lld pieces in %.1f s (%.1f ms each on average, %.1f ms worst), fixed delay %.0f ms (taken out of the file)",
+                 stats.hops, Date().timeIntervalSince(started), stats.averageHopMs, stats.worstHopMs, Double(latency) / rate * 1000))
+    let aligned = Array(result[min(latency, result.count)..<min(latency + length, result.count)])
+    guard let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1),
+          let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(max(1, aligned.count))) else {
+        throw Problem(message: "Could not write \(output).")
+    }
+    buffer.frameLength = AVAudioFrameCount(aligned.count)
+    _ = aligned.withUnsafeBufferPointer { memcpy(buffer.floatChannelData![0], $0.baseAddress!, aligned.count * MemoryLayout<Float>.size) }
+    let outFile = try AVAudioFile(forWriting: URL(fileURLWithPath: output), settings: format.settings)
+    try outFile.write(from: buffer)
+}
+
+// Reads a mono file written by renderVoiceFile (the Natural render) back in.
+func readMonoFile(_ path: String) throws -> (samples: [Float], rate: Double) {
+    let file = try AVAudioFile(forReading: URL(fileURLWithPath: path))
+    guard let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length)) else {
+        throw Problem(message: "Could not read \(path).")
+    }
+    try file.read(into: buffer)
+    return (Array(UnsafeBufferPointer(start: buffer.floatChannelData![0], count: Int(buffer.frameLength))), file.processingFormat.sampleRate)
+}

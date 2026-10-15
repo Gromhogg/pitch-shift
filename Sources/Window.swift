@@ -2117,7 +2117,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             switch look {
             case .loading:
                 loading = true
-                note = "Getting the realistic voice ready. Natural plays meanwhile."
+                note = VoiceModelStore.shared.loadingNote(chosen) + " Natural plays meanwhile."
             case .fallback(let misses):
                 warning = true
                 note = "The realistic voice fell behind \(misses == 1 ? "once" : "\(misses) times"). Natural filled in."

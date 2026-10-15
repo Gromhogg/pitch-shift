@@ -53,18 +53,35 @@ typedef struct VoiceStreamStats {
 // (macOS prepares the models; later loads are quick), so call it off the main and sound threads.
 // Returns NULL and writes a short reason into err (errSize bytes) if it can't, e.g. "needs Apple silicon".
 VoiceModel *voicemodel_load(const char *encoderPath, const char *voicePath, int computeUnits, char *err, int errSize);
-void voicemodel_free(VoiceModel *model);
+void voicemodel_free(VoiceModel *model);  // only after every stream using it is deleted
 
-// chainRate: the voice chain's sample rate. maxFrames: the largest `frames` given to push/pull. offline: 1 = convert
-// inline in push (for --render-voice; never misses), 0 = live with a worker thread. config: NULL = defaults.
+// One line for logs and --changer-stats: which chips run it, hop and past sound, time per hop, load time.
+const char *voicemodel_describe(const VoiceModel *model);
+
+// chainRate: the voice chain's sample rate. maxFrames: the largest `frames` given to push/pull (one callback; it is
+// part of the fixed delay, so pass the real callback size, not a worst case). offline: 1 = convert inline in push (for
+// --render-voice; never misses), 0 = live with a worker thread. config: NULL = defaults. With a model, the model's
+// own hop, crossfade and search are used (they are built into the files) and a CPU-only model gets a 70 ms reserve.
+// model may be NULL: the stream then plays Natural's sound at the fixed delay until voicestream_set_model gives it
+// one (so turning Realistic on changes the delay once, not again when the models are ready).
 VoiceStream *voicestream_new(VoiceModel *model, double chainRate, int maxFrames, int offline, const VoiceStreamConfig *config);
 void voicestream_delete(VoiceStream *stream);
+
+// Gives a stream made with model NULL its model (off the sound thread; the worker starts at the newest sound and
+// crossfades in). Returns 0 if it doesn't fit this stream's hop / crossfade / search or reserve; make a new stream then.
+int voicestream_set_model(VoiceStream *stream, VoiceModel *model);
+
+// Test settings (--changer-tune): "aiSlowMs" = extra time added to each piece (forces late pieces),
+// "aiSlowEvery" = only every Nth piece, "aiGainMaxDb" = the most the loudness match may lift (default 18).
+// Returns 1 if the key is known.
+int voicestream_tune(VoiceStream *stream, const char *key, float value);
 
 // The fixed delay from mic to output, in chain samples.
 int voicestream_latency_frames(const VoiceStream *stream);
 
 // Sound thread: the next `frames` mic samples and the target pitch of the n 10 ms frames that finished
-// (f0Hz 0 = not voiced; f0Pos = frame centres in mic samples, from VoiceChangerPitch).
+// (f0Hz 0 = not voiced; f0Pos = frame centres in mic samples, from VoiceChangerPitch). The positions must count the
+// same samples as push does: reset the VoiceChanger when the stream is made (both then start at 0).
 void voicestream_push(VoiceStream *stream, const float *mic, int frames, const float *f0Hz, const int64_t *f0Pos, int n);
 
 // Sound thread: `frames` samples of output. naturalNow: Natural mode's output for the same callback, naturalDelay:

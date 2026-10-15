@@ -636,6 +636,10 @@ final class VoiceChain {
     private let changer: OpaquePointer
     private let changerPitch: UnsafeMutablePointer<VoiceChangerPitch>
     private let changerStats: UnsafeMutablePointer<VoiceChangerStats>
+    // Realistic mode (AI voice, Apple silicon): the stream that turns the mic into the AI voice at a fixed delay
+    // (Sources/Voice/VoiceModel.h). Made with the chain when Realistic is on; its models may come later (attach).
+    private var ai: OpaquePointer?
+    let realisticID: String?  // the voice the AI stream is for (nil = no AI stream)
     // Sound effects (Soundboard): mixed in after the voice, never through the mic or the pitch change.
     private let sounds: OSAllocatedUnfairLock<SoundPlay>
     private var mix: SoundMix
@@ -657,7 +661,8 @@ final class VoiceChain {
     // `changerTune`: --changer-tune settings for the voice changer (command line only).
     init(mic: AudioDeviceID, feed: AudioDeviceID, params: OSAllocatedUnfairLock<VoiceParams>, sounds: OSAllocatedUnfairLock<SoundPlay>,
          bufferFrames: UInt32? = nil, testSource: ((UnsafeMutablePointer<Float>, Int) -> Void)? = nil,
-         changerTune: [(String, Float)] = []) throws {
+         changerTune: [(String, Float)] = [], realistic: (id: String, model: OpaquePointer?)? = nil) throws {
+        realisticID = realistic?.id
         self.testSource = testSource  // set before the sound starts, so a test never sends the real mic
         micName = deviceName(mic)
         micUID = deviceUID(mic)
@@ -727,6 +732,11 @@ final class VoiceChain {
         if range.mMaximum > 0 { frames = UInt32(min(max(Double(frames), range.mMinimum), range.mMaximum)) }
         var sizeAddress = address(kAudioDevicePropertyBufferFrameSize)
         AudioObjectSetPropertyData(aggregate, &sizeAddress, 0, nil, UInt32(MemoryLayout<UInt32>.size), &frames)
+        if let realistic {  // the AI voice: its delay includes one callback, so it is made once the size is known
+            let callback = getValue(aggregate, kAudioDevicePropertyBufferFrameSize, default: frames)
+            ai = voicestream_new(realistic.model, rate, Int32(max(callback, 1)), 0, nil)
+            if let ai { for (key, value) in changerTune { _ = voicestream_tune(ai, key, value) } }
+        }
         overloadListener = Listener(aggregate, kAudioDeviceProcessorOverload) { [weak self] in
             self?.stats.withLock { $0.overloads += 1 }
         }
@@ -835,6 +845,10 @@ final class VoiceChain {
             voicechanger_analyse(changer, source, Int32(frames), stretcher.extra, changerPitch)
             stretcher.set(changerPitch: Double(changerPitch.pointee.pitchScale), formantScale: Double(changerPitch.pointee.formantScale))
         }
+        if let ai {  // Realistic: the mic (before Rubber Band) and its pitch frames go to the AI voice
+            if !changing { changerPitch.pointee.newFrames = 0 }
+            voicestreamPush(ai, source, frames, changerPitch)
+        }
 
         // At normal pitch the mic goes straight out; otherwise the shifted sound replaces it in the same buffer.
         let shifting = stretcher.running
@@ -844,6 +858,11 @@ final class VoiceChain {
             if changing {  // sibilance, tone EQ, presence and breath, lined up with the mic sound it came from
                 voicechanger_post(changer, source, Int32(frames), Int32(clamping: soundDelay))
             }
+            // Realistic: the AI voice at its fixed delay; when it isn't ready (loading, a late piece) Natural's sound,
+            // delayed to the same point, fills in (crossfaded). Never silence, never the raw mic.
+            if let ai { voicestream_pull(ai, source, Int32(clamping: soundDelay), source, Int32(frames)) }
+        } else if let ai {
+            voicestream_pull(ai, nil, 0, source, Int32(frames))  // (not reached while a voice is on: it always shifts)
         }
         for i in 0..<frames {
             var value = applied.silent ? 0 : source[i]
@@ -971,9 +990,25 @@ final class VoiceChain {
         aggregate = AudioObjectID(kAudioObjectUnknown)
     }
 
+    // Realistic: gives the AI stream its models once they are loaded (main thread). False if they don't fit it.
+    func attach(model: OpaquePointer) -> Bool {
+        guard let ai else { return false }
+        return voicestream_set_model(ai, model) != 0
+    }
+
+    // Realistic: what the AI voice is doing, and its fixed delay in ms (nil without an AI stream).
+    var aiStats: (stats: VoiceStreamStats, latencyMs: Double)? {
+        guard let ai else { return nil }
+        var s = VoiceStreamStats()
+        voicestream_get_stats(ai, &s)
+        return (s, Double(voicestream_latency_frames(ai)) / sampleRate * 1000)
+    }
+
     private func cleanUp() {
         piece.deallocate()
         scratch.deallocate()
+        if let ai { voicestream_delete(ai) }  // the sound has stopped, so nothing uses it any more
+        ai = nil
         voicechanger_delete(changer)
         changerPitch.deallocate()
         changerStats.deallocate()
@@ -1030,6 +1065,12 @@ final class VoiceShifter {
     var changer = ChangerSettings() { didSet { if changer != oldValue { pushParams() } } }
     private(set) var changerState: ChangerState = .off
     var changerTune: [(String, Float)] = []  // --changer-tune (command line only; used when the chain is made)
+    // Realistic (AI) mode: the models load in the background (VoiceModelStore) while Natural plays; the chain is
+    // remade once when Realistic or the voice changes (the AI stream's fixed delay starts right away, Natural fills
+    // in until the models are ready); they are freed when Realistic goes off.
+    private let models = VoiceModelStore.shared
+    private var aiPolling = false
+    private var lastMisses: Int64 = 0, missesAt = Date.distantPast
     var micUID: String? { didSet { if oldValue != micUID { rebuild() } } }  // nil = the Mac's default mic
     var onChange: () -> Void = {}
     var testSource: ((UnsafeMutablePointer<Float>, Int) -> Void)?
@@ -1055,6 +1096,7 @@ final class VoiceShifter {
         self.slowDeeper = slowDeeper
         self.micUID = micUID
         params = OSAllocatedUnfairLock(initialState: VoiceParams(halfSteps: halfSteps, cartoon: cartoon, slowDeeper: slowDeeper, silent: false))
+        models.onChange = { [weak self] in self?.modelsChanged() }
     }
 
     var isOn: Bool { voiceSwitch }
@@ -1143,8 +1185,8 @@ final class VoiceShifter {
         updateChangerState(voiceFound: voice != nil)
     }
 
-    // Natural mode plays whenever the changer is on. Realistic (AI) isn't connected yet, so asking for it says why
-    // and Natural plays instead.
+    // Natural mode plays whenever the changer is on. Realistic (AI): loading (Natural plays), realistic, fallback
+    // (some pieces came late in the last 10 s; Natural filled in), or unavailable (why; Natural plays).
     private func updateChangerState(voiceFound: Bool) {
         var new: ChangerState = .off
         if changer.on && voiceSwitch {
@@ -1152,7 +1194,7 @@ final class VoiceShifter {
                 new = .unavailable("no voice \"\(changer.voiceID)\"")
             } else if changer.realistic {
                 #if arch(arm64)
-                new = .unavailable("not available yet")
+                new = realisticState()
                 #else
                 new = .unavailable("needs Apple silicon")
                 #endif
@@ -1160,9 +1202,70 @@ final class VoiceShifter {
                 new = .natural
             }
         }
+        updateRealistic()
         guard new != changerState else { return }
         changerState = new
         onChange()
+    }
+
+    // The voice the AI is wanted for now (nil = Realistic is off, or this Mac can't run it).
+    private var realisticWanted: VoiceEntry? {
+        #if arch(arm64)
+        guard voiceSwitch && changer.on && changer.realistic, let entry = VoiceLibrary.shared.voice(changer.voiceID),
+              entry.manifest.realistic != nil else { return nil }
+        return entry
+        #else
+        return nil
+        #endif
+    }
+
+    private func realisticState() -> ChangerState {
+        guard let entry = VoiceLibrary.shared.voice(changer.voiceID) else { return .unavailable("no voice") }
+        guard entry.manifest.realistic != nil else { return .unavailable("\(entry.name) has no AI voice") }
+        switch models.status {
+        case .failed(let id, let why) where id == entry.id: return .unavailable(why)
+        case .ready(let id) where id == entry.id:
+            guard let ai = chain?.aiStats else { return .realistic }  // nobody listening yet: ready to go
+            if ai.stats.loaded == 0 { return .loading }               // fading in
+            if ai.stats.misses > lastMisses { lastMisses = ai.stats.misses; missesAt = Date() }
+            return Date().timeIntervalSince(missesAt) < 10 ? .fallback(misses: Int(ai.stats.misses)) : .realistic
+        default: return .loading
+        }
+    }
+
+    // Starts loading the AI voice, remakes the chain when its AI stream is for another voice (or none), and frees the
+    // models once nothing uses them.
+    private func updateRealistic() {
+        let want = realisticWanted
+        if let want { models.want(want) }
+        if running, let chain, chain.realisticID != want?.id {
+            DispatchQueue.main.async { [weak self] in  // not from inside pushParams
+                guard let self, let current = self.chain, current.realisticID != self.realisticWanted?.id else { return }
+                self.closeChain()
+                self.update()
+            }
+        }
+        if want == nil && models.status != .none && chain?.realisticID == nil { models.free() }
+        if want != nil && !aiPolling { pollRealistic() }
+    }
+
+    // Once a second while Realistic is on: loading -> realistic, and late pieces -> fallback.
+    private func pollRealistic() {
+        aiPolling = realisticWanted != nil
+        guard aiPolling else { return }
+        updateChangerState(voiceFound: true)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.pollRealistic() }
+    }
+
+    // The models finished loading (or failed): hand them to the running chain's AI stream.
+    private func modelsChanged() {
+        if case .ready(let id) = models.status, let chain, chain.realisticID == id, let model = models.model {
+            if !chain.attach(model: model) {  // made for other piece sizes (can't happen with one model set): remake
+                closeChain()
+                update()
+            }
+        }
+        updateChangerState(voiceFound: VoiceLibrary.shared.voice(changer.voiceID) != nil)
     }
 
     private func setState(_ new: VoiceState) {
@@ -1230,8 +1333,10 @@ final class VoiceShifter {
             stopLater = nil
             if chain == nil {
                 do {
+                    let ai = realisticWanted.map { (id: $0.id, model: models.model(for: $0.id)) }
                     let made = try VoiceChain(mic: mic, feed: feed, params: params, sounds: sounds,
-                                              bufferFrames: testBufferFrames, testSource: testSource, changerTune: changerTune)
+                                              bufferFrames: testBufferFrames, testSource: testSource, changerTune: changerTune,
+                                              realistic: ai)
                     chain = made
                 } catch {
                     setState(.problem((error as? Problem)?.message ?? "\(error)"))
@@ -1263,6 +1368,8 @@ final class VoiceShifter {
     private func closeChain() {
         chain?.close()
         chain = nil
+        models.freeRetired()  // an AI voice switched away from: its chain is gone now
+        if realisticWanted == nil && models.status != .none { models.free() }  // nothing uses the AI voice now
     }
 }
 
