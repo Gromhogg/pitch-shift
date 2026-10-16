@@ -23,10 +23,19 @@ for arch in arm64 x86_64; do
   for f in Sources/Advanced/*.cpp; do
     clang++ -arch $arch -mmacosx-version-min=14.4 -O2 -std=c++17 -Ibuild/libs/include -c "$f" -o "$obj/${f:t:r}.o"
   done
+  # The voice changer: Natural mode (plain C++) and Realistic mode (Core ML, Objective-C++).
+  for f in Sources/Voice/*.cpp; do
+    clang++ -arch $arch -mmacosx-version-min=14.4 -O2 -std=c++17 -c "$f" -o "$obj/${f:t:r}.o"
+  done
+  for f in Sources/Voice/*.mm; do
+    clang++ -arch $arch -mmacosx-version-min=14.4 -O2 -std=c++17 -fobjc-arc -Ibuild/libs/src/libsamplerate-0.2.2/include \
+      -c "$f" -o "$obj/${f:t:r}.o"
+  done
   # Rubber Band is built into the app, so the app works on its own.
   swiftc -target $arch-apple-macos14.4 -O -swift-version 5 Sources/*.swift $obj/*.o -o $obj/PitchShift \
     -import-objc-header Sources/Bridging.h -Ibuild/libs/include \
-    -Xlinker build/libs/lib/librubberband.a -Xlinker build/libs/lib/libsamplerate.a -lc++ -framework Accelerate
+    -Xlinker build/libs/lib/librubberband.a -Xlinker build/libs/lib/libsamplerate.a -lc++ -framework Accelerate \
+    -framework CoreML
 done
 lipo -create build/obj/arm64/PitchShift build/obj/x86_64/PitchShift -output "$app/Contents/MacOS/PitchShift"
 
@@ -35,6 +44,34 @@ if [[ ! -f AppIcon.icns ]]; then
 fi
 cp Info.plist "$app/Contents/Info.plist"
 cp AppIcon.icns LICENSE packaging/install-driver.sh build/libs/lib/libsamplerate-COPYING "$app/Contents/Resources/"
+# The voice changer's voices (settings, credits) and the Realistic mode's AI models. The models are too big for git
+# (~150 MB): they come from a local copy (build/voices/ or research/voicechanger/models/, in this checkout or the main
+# one) or are downloaded once into build/voices/ from the addresses in voices/models.txt, checked against their
+# SHA-256 sums, and unpacked next to the voices' json files. Without them the app still builds (Realistic mode then
+# says the files are missing; Natural mode works).
+ditto voices "$app/Contents/Resources/Voices"
+rm -f "$app/Contents/Resources/Voices/models.txt"
+mkdir -p build/voices
+main_checkout=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+main_checkout=${main_checkout:h}
+while read -r name size sum url; do
+  [[ -z $name || $name == \#* ]] && continue
+  zip=build/voices/$name
+  for dir in research/voicechanger/models $main_checkout/research/voicechanger/models; do
+    [[ -f $zip ]] || [[ ! -f $dir/$name ]] || cp "$dir/$name" "$zip"
+  done
+  if [[ ! -f $zip ]] || ! echo "$sum  $zip" | shasum -a 256 -c --status; then
+    if [[ -z $url || $url == *PLACEHOLDER* ]]; then
+      echo "AI voice file $name: no local copy and no download address yet (voices/models.txt); Realistic mode will be missing it"
+      continue
+    fi
+    echo "Downloading $name"
+    curl -fL --retry 3 "$url" -o "$zip.part"
+    echo "$sum  $zip.part" | shasum -a 256 -c --status || { echo "$name doesn't match its checksum"; exit 1; }
+    mv "$zip.part" "$zip"
+  fi
+  ditto -x -k "$zip" "$app/Contents/Resources/Voices/"
+done < voices/models.txt
 codesign --force --sign - "$app"
 codesign --verify --deep --strict "$app"
 echo "Built $app"

@@ -1,0 +1,146 @@
+// The voice changer's voices. Built in: Contents/Resources/Voices/*.json (woman.json, man.json). Added by the user:
+// ~/Library/Application Support/Pitch Shift/Voices/<id>/voice.json. The command line's --voices-dir DIR is read last,
+// so a voice there replaces a built-in one with the same id (for tuning). Each file:
+//   {id, name, version, natural{targetHz, assumedInputHz, intonation, formant, breathDb, presenceDb, sibilanceKeep,
+//    eqAmount, ltas[21]}, realistic{model, encoder, rate, eqAmount}, credits}
+// A voice with only a "natural" block works on every Mac. Bad files are skipped and listed in `problems`.
+import Foundation
+
+struct VoiceManifest: Decodable, Equatable {
+    struct Natural: Decodable, Equatable {
+        var targetHz: Float
+        var assumedInputHz: Float
+        var intonation: Float
+        var formant: Float
+        var breathDb: Float
+        var presenceDb: Float
+        var sibilanceKeep: Float
+        var eqAmount: Float
+        var ltas: [Float]
+    }
+    struct Realistic: Decodable, Equatable {
+        var model: String    // the voice's .mlmodelc, next to the json file
+        var encoder: String  // the shared encoder's .mlmodelc
+        var rate: Double     // the model's sample rate
+        var eqAmount: Float
+    }
+    var id: String
+    var name: String
+    var version: Int
+    var natural: Natural?
+    var realistic: Realistic?
+    var credits: String?
+}
+
+// One voice. `natural` is what the sound thread reads; it is made once and never freed (it lives as long as the app),
+// so a running chain can keep reading it while the list is scanned again.
+final class VoiceEntry {
+    let manifest: VoiceManifest
+    let folder: URL      // where its files are
+    let builtIn: Bool
+    let natural: UnsafePointer<VoiceChangerVoice>?
+
+    var id: String { manifest.id }
+    var name: String { manifest.name }
+    var modelURL: URL? { manifest.realistic.map { folder.appendingPathComponent($0.model) } }
+    var encoderURL: URL? { manifest.realistic.map { folder.appendingPathComponent($0.encoder) } }
+
+    init(manifest: VoiceManifest, folder: URL, builtIn: Bool) {
+        self.manifest = manifest
+        self.folder = folder
+        self.builtIn = builtIn
+        natural = manifest.natural.map { n in
+            var voice = VoiceChangerVoice()
+            voice.targetHz = n.targetHz
+            voice.assumedInputHz = n.assumedInputHz
+            voice.intonation = n.intonation
+            voice.formant = n.formant
+            voice.breathDb = n.breathDb
+            voice.presenceDb = n.presenceDb
+            voice.sibilanceKeep = n.sibilanceKeep
+            voice.eqAmount = n.eqAmount
+            withUnsafeMutableBytes(of: &voice.ltas) { raw in
+                let bands = raw.bindMemory(to: Float.self)
+                for k in 0..<min(bands.count, n.ltas.count) { bands[k] = n.ltas[k] }
+            }
+            let stored = UnsafeMutablePointer<VoiceChangerVoice>.allocate(capacity: 1)
+            stored.initialize(to: voice)
+            return UnsafePointer(stored)
+        }
+    }
+}
+
+final class VoiceLibrary {
+    static let shared = VoiceLibrary()
+    static var extraFolder: URL?  // --voices-dir DIR
+
+    private(set) var voices: [VoiceEntry] = []
+    private(set) var problems: [String] = []  // "file: why it was skipped"
+    private var made: [String: VoiceEntry] = [:]  // every entry ever made, by path, so pointers stay valid
+
+    static var builtInFolder: URL? { Bundle.main.resourceURL?.appendingPathComponent("Voices") }
+    static var userFolder: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Pitch Shift/Voices")
+    }
+
+    private init() { rescan() }
+
+    // Reads all voice folders again (cheap; the window does it when its voice menu opens).
+    func rescan() {
+        var found: [VoiceEntry] = []
+        problems = []
+        let folders: [(URL?, Bool)] = [(Self.builtInFolder, true), (Self.userFolder, false), (Self.extraFolder, false)]
+        for case let (folder?, builtIn) in folders {
+            for file in Self.manifestFiles(in: folder) {
+                guard let entry = load(file, builtIn: builtIn) else { continue }
+                found.removeAll { $0.id == entry.id }  // a later folder replaces a voice with the same id
+                found.append(entry)
+            }
+        }
+        voices = found
+    }
+
+    // By id ("woman") or name ("Woman"), ignoring case.
+    func voice(_ idOrName: String) -> VoiceEntry? {
+        let key = idOrName.lowercased()
+        return voices.first { $0.id.lowercased() == key } ?? voices.first { $0.name.lowercased() == key }
+    }
+
+    // DIR/*.json and DIR/<folder>/voice.json, in name order.
+    private static func manifestFiles(in folder: URL) -> [URL] {
+        let fm = FileManager.default
+        guard let items = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) else { return [] }
+        var files: [URL] = []
+        for item in items.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+            if item.pathExtension == "json" {
+                files.append(item)
+            } else if fm.fileExists(atPath: item.appendingPathComponent("voice.json").path) {
+                files.append(item.appendingPathComponent("voice.json"))
+            }
+        }
+        return files
+    }
+
+    private func load(_ file: URL, builtIn: Bool) -> VoiceEntry? {
+        do {
+            let manifest = try JSONDecoder().decode(VoiceManifest.self, from: Data(contentsOf: file))
+            guard !manifest.id.isEmpty, !manifest.name.isEmpty else { throw Problem(message: "no id or name") }
+            guard manifest.natural != nil || manifest.realistic != nil else { throw Problem(message: "no natural or realistic block") }
+            if let n = manifest.natural {
+                guard n.ltas.count == Int(VOICECHANGER_LTAS_BANDS) else { throw Problem(message: "ltas needs \(VOICECHANGER_LTAS_BANDS) values") }
+                let values = [n.targetHz, n.assumedInputHz, n.intonation, n.formant, n.breathDb, n.presenceDb, n.sibilanceKeep, n.eqAmount] + n.ltas
+                guard values.allSatisfy(\.isFinite), n.targetHz > 0, n.assumedInputHz > 0, n.formant > 0 else {
+                    throw Problem(message: "bad natural values")
+                }
+            }
+            if let old = made[file.path], old.manifest == manifest, old.builtIn == builtIn { return old }
+            let entry = VoiceEntry(manifest: manifest, folder: file.deletingLastPathComponent(), builtIn: builtIn)
+            made[file.path] = entry
+            return entry
+        } catch {
+            problems.append("\(file.path): \((error as? Problem)?.message ?? "\(error)")")
+            return nil
+        }
+    }
+}

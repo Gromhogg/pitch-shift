@@ -19,10 +19,23 @@
 //                                              the sound waiting to go out, the dry-outs/trims/replays and the delay from
 //                                              the mic to Pitch Shift Mic (the delay parts are printed at the start).
 //                                              --buffer N: callback size to ask for (default 128, or 256 above 48 kHz)
+//                                              --voice Woman [--strength S] [--quality natural] [--changer-tune ...]
+//                                              [--changer-stats] [--compute cpu|gpu|ane|all]: with the voice changer
+//                                              on (--quality realistic: the AI voice; its fixed delay, late pieces and
+//                                              the time Natural filled in are printed; --watch also prints what
+//                                              it does; with --file, --watch measures the delay at each start of the
+//                                              file's sound: give it a file with ~1 s of silence first)
 //   --render-voice IN OUT [--steps 3] [--cartoon | --cartoon-amount 0.5] [--cartoon-at "1:1,2:0"] [--slow-deeper]
 //                [--voice-preset old]          shifts a sound file with the voice's own settings (offline, no devices;
 //                                              --cartoon-at "1:1,2:0" moves the style to 1 at 1 s and back to 0 at 2 s;
 //                                              --voice-preset old: as before the Natural level fix, for comparing)
+//                [--voice Woman [--strength 1] [--quality natural] [--changer-tune "k=v,..."] [--changer-stats]]
+//                                              with the voice changer (the amount, style and --slow-deeper are then
+//                                              ignored: only one at a time;
+//                                              --changer-stats prints what it does once per second of sound)
+//                [--live-sim [--buffer 128]]   instead: the live chain's steps in callback-sized pieces (with the
+//                                              waiting sound), printing the delay they add (no devices)
+//   --list-voices [--voices-dir DIR]           the voice changer's voices (and files that were skipped)
 //   --render-sounds VOICE OUT --sound FILE [--at 5,20] [--sound-volume 1] [--speakers] [--voice-db 0] [--shifted]
 //                [--buffer 128] [--sound-preset old]
 //                                              Soundboard, offline (no devices): VOICE as the mic, FILE clicked at each
@@ -31,8 +44,13 @@
 //                                              scale, and how long the mixing takes per callback (--sound-preset old:
 //                                              as in 2.0.2, before the limiter, fades and loudness cap)
 //   --test-button [--mic NAME] [--volume 0.03] presses Test with a quiet tone as the voice (record 5 s, play back)
+//                [--file F] [--voice Woman [--quality realistic]]
+//                                              --file: a speech file as the voice (looped, its loudest point at
+//                                              --volume); --voice: with the voice changer on, so it records and plays
+//                                              back the changed voice (Realistic: Test is pressed once the AI voice
+//                                              is ready; --steps is not used with --voice: only one at a time)
 //   --test-sounds FILE [--speakers] [--seconds S] [--out F.caf] [--mic NAME] [--steps 3] [--volume 0.05] [--hear 0.02]
-//                [--sound-volume 0.5] [--voice-off]
+//                [--sound-volume 0.5] [--voice-off] [--voice Woman [--quality realistic]]
 //                                              Soundboard: plays FILE into Pitch Shift Mic 1 s in, with a quiet tone as
 //                                              the voice, records Pitch Shift Mic and checks it (one copy of the sound,
 //                                              its level; --speakers: as if on the Mac's speakers, so the voice must
@@ -62,13 +80,18 @@ func arg(_ name: String) -> String? {
     guard let i = args.firstIndex(of: name), i + 1 < args.count else { return nil }
     return args[i + 1]
 }
-// --preview STATES [--size 800x400] [--cartoon-amount 0.5] [--tone-amount -0.4]: show the window in a state for
-// screenshots, without touching any sound or settings, and without switching apps (states: hear-on, voice-on, waiting,
-// typing, recording, playing, listening, hover, menu, roll, resize, no-driver, advanced-alert, sounds, rename, volume,
-// drop, light, tone, slow; --cartoon-amount sets the voice style slider; sounds opens the Soundboard with example
-// names, rename shows the first name being changed, volume the first sound's volume slider and drop files being
-// dragged over it; "tone" shows Advanced processing on, and --tone-amount sets the Bass ↔ Treble slider; slow turns
-// on "Deeper when slow").
+// --preview STATES [--size 800x400] [--cartoon-amount 0.5] [--tone-amount -0.4] [--strength 0.6]: show the window in
+// a state for screenshots, without touching any sound or settings, and without switching apps (states: hear-on,
+// voice-on, waiting, typing, recording, playing, listening, hover, menu, roll, resize, no-driver, advanced-alert,
+// sounds, rename, volume, drop, light, tone, slow, changer, changer-man, changer-realistic, changer-loading,
+// changer-fallback, changer-alert, changer-intel; --cartoon-amount sets the voice style slider; sounds opens the
+// Soundboard with example names, rename shows the first name being changed, volume the first sound's volume slider
+// and drop files being dragged over it; "tone" shows Advanced processing on, and --tone-amount sets the
+// Bass ↔ Treble slider; slow turns on "Deeper when slow"; changer turns on the Voice changer (and Your voice) with
+// Woman, changer-man with Man, --strength sets its Strength slider, changer-realistic/-loading/-fallback show
+// Realistic on and working/getting ready/standing in with Natural, changer-alert the alert for turning Realistic on,
+// changer-intel the card as on an Intel Mac (no Realistic); resize drags the window's corner through the three
+// layouts).
 let preview = arg("--preview")
 
 var signalSources: [DispatchSourceSignal] = []
@@ -104,8 +127,85 @@ func fourCC(_ value: UInt32) -> String {
 // Voice style from the command line: --cartoon = 1 (Cartoon), --cartoon-amount X (0 = Natural ... 1 = Cartoon).
 // In --preview it sets where the slider is.
 let cartoonArg: Float? = args.contains("--cartoon") ? 1 : arg("--cartoon-amount").flatMap(Float.init).map { max(0, min(1, $0)) }
-// "Deeper when slow" on, for --test-voice and --render-voice.
-let slowDeeperArg = args.contains("--slow-deeper")
+// "Deeper when slow" asked for (--test-voice, --render-voice; left out with --voice, see slowDeeperArg).
+let slowDeeperAsked = args.contains("--slow-deeper")
+
+// The voice changer, for --render-voice and --test-voice: --voice NAME (Woman, Man or another voice's id),
+// --strength S (0 ... 1, default 1), --quality natural|realistic, --changer-tune "key=value,..." (VoiceChanger.h),
+// --changer-stats (once a second: what it is doing). --voices-dir DIR: also read voices from DIR (they replace
+// built-in voices with the same id). --list-voices: the voices found, and files that were skipped.
+if let dir = arg("--voices-dir") { VoiceLibrary.extraFolder = URL(fileURLWithPath: dir) }
+let changerTuneArg: [(String, Float)] = (arg("--changer-tune") ?? "").split(separator: ",").compactMap { item in
+    let parts = item.split(separator: "=")
+    guard parts.count == 2, let value = Float(parts[1].trimmingCharacters(in: .whitespaces)) else {
+        print("--changer-tune: can't read \"\(item)\" (use key=value)"); exit(1)
+    }
+    return (parts[0].trimmingCharacters(in: .whitespaces), value)
+}
+// The voice asked for with --voice (nil without --voice; stops with a message if it can't be used).
+let changerArg: ChangerOptions? = {
+    guard let name = arg("--voice") else { return nil }
+    guard let entry = VoiceLibrary.shared.voice(name) else {
+        print("--voice: no voice \"\(name)\". Voices: \(VoiceLibrary.shared.voices.map(\.name).joined(separator: ", "))"); exit(1)
+    }
+    guard let natural = entry.natural else { print("--voice: \(entry.name) has no Natural mode settings"); exit(1) }
+    if !changerTuneArg.isEmpty, let probe = voicechanger_new(48000, 512) {  // check the keys before starting
+        let aiKeys = ["aiSlowMs", "aiSlowEvery", "aiGainMaxDb"]  // Realistic mode's test keys (voicestream_tune)
+        let unknown = changerTuneArg.filter { voicechanger_tune(probe, $0.0, $0.1) == 0 && !aiKeys.contains($0.0) && !isVoiceShifterTuneKey($0.0) }.map(\.0)
+        voicechanger_delete(probe)
+        if !unknown.isEmpty { print("--changer-tune: unknown keys \(unknown.joined(separator: ", "))"); exit(1) }
+    }
+    let strength = arg("--strength").flatMap(Float.init).map { max(0, min(1, $0)) } ?? 1
+    return ChangerOptions(voice: natural, strength: strength, tune: changerTuneArg, stats: args.contains("--changer-stats"))
+}()
+// Only one at a time (the owner's rule, as in the window): with --voice the voice changer sets the pitch, so --steps
+// and --slow-deeper are left out.
+if changerArg != nil && (arg("--steps") != nil || slowDeeperAsked) {
+    print("Note: with --voice the voice changer sets the pitch, so --steps and --slow-deeper are ignored (only one at a time).")
+}
+let slowDeeperArg = slowDeeperAsked && changerArg == nil
+// The amount for the voice: --steps (or `fallback`), except with --voice, where it is not used (the changer sets the
+// pitch; the fallback keeps the renders as they were).
+func voiceStepsArg(_ fallback: Float) -> Float { changerArg != nil ? fallback : arg("--steps").flatMap(Float.init) ?? fallback }
+// Why Realistic (AI) mode can't run here (nil = it can).
+#if arch(arm64)
+let realisticUnavailable: String? = nil
+#else
+let realisticUnavailable: String? = "needs Apple silicon"
+#endif
+// --compute cpu|gpu|ane|all|auto: which chips run the AI voice (auto: the encoder on the Neural Engine, the voice on
+// the GPU, the CPU if those can't be used).
+if let name = arg("--compute") {
+    guard let units = computeUnits(named: name) else { print("--compute: cpu, gpu, ane, all or auto"); exit(1) }
+    VoiceModelStore.computeUnits = units
+}
+let realisticArg: Bool = {
+    switch arg("--quality") ?? "natural" {
+    case "natural": return false
+    case "realistic": return true
+    default: print("--quality: natural or realistic"); exit(1)
+    }
+}()
+
+if args.contains("--list-voices") {
+    let library = VoiceLibrary.shared
+    print("Voices (built in: \(VoiceLibrary.builtInFolder?.path ?? "-"); added: \(VoiceLibrary.userFolder.path)\(VoiceLibrary.extraFolder.map { "; --voices-dir: \($0.path)" } ?? "")):")
+    for voice in library.voices {
+        let m = voice.manifest
+        var modes: [String] = []
+        if let n = m.natural {
+            modes.append(String(format: "natural (target %.0f Hz, formant x%.2f, intonation %.2f)", n.targetHz, n.formant, n.intonation))
+        }
+        if let r = m.realistic {
+            let have = voice.modelURL.map { FileManager.default.fileExists(atPath: $0.path) } ?? false
+            modes.append("realistic (\(r.model)\(have ? "" : ", model file missing"))")
+        }
+        print("  \(m.id) \"\(m.name)\" v\(m.version)\(voice.builtIn ? " [built in]" : ""): \(modes.joined(separator: "; ")) — \(voice.folder.path)")
+    }
+    if library.voices.isEmpty { print("  none") }
+    for problem in library.problems { print("  skipped \(problem)") }
+    exit(0)
+}
 
 // The watchdog: a second copy of the app that gives the real mic back if the app ends without doing it.
 if let pid = arg("--watchdog").flatMap({ pid_t($0) }) { DefaultMic.watch(pid) }
@@ -133,6 +233,25 @@ func refuseIfMicsBusy() {
         exit(2)
     }
 }
+// A sound file as one channel at `rate`, to play into the voice chain as the "mic" (--test-voice, --test-button).
+func testVoiceFile(_ path: String, rate: Double) -> [Float] {
+    guard let file = try? AVAudioFile(forReading: URL(fileURLWithPath: path)),
+          let input = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length)),
+          (try? file.read(into: input)) != nil,
+          let target = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1),
+          let converter = AVAudioConverter(from: file.processingFormat, to: target),
+          let converted = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: AVAudioFrameCount(Double(file.length) * rate / file.processingFormat.sampleRate) + 1024)
+    else { print("Can't read \(path)"); exit(1) }
+    var given = false
+    _ = converter.convert(to: converted, error: nil) { _, status in
+        if given { status.pointee = .endOfStream; return nil }
+        given = true
+        status.pointee = .haveData
+        return input
+    }
+    return Array(UnsafeBufferPointer(start: converted.floatChannelData![0], count: Int(converted.frameLength)))
+}
+
 if ["--test", "--test-voice", "--test-button", "--test-default-mic"].contains(where: { args.contains($0) })
     || (args.contains("--test-sounds") && !args.contains("--recording")) { refuseIfMicsBusy() }
 
@@ -235,7 +354,7 @@ if let input = arg("--render-file") {
 if let input = arg("--render-voice") {
     let i = args.firstIndex(of: "--render-voice")!
     guard i + 2 < args.count else {
-        print("usage: --render-voice IN OUT [--steps N] [--cartoon-amount X] [--slow-deeper] [--voice-preset old]"); exit(1)
+        print("usage: --render-voice IN OUT [--steps N] [--cartoon-amount X] [--slow-deeper] [--voice-preset old] [--voice Woman [--strength S]]"); exit(1)
     }
     let preset = arg("--voice-preset") ?? "current"
     guard preset == "current" || preset == "old" else { print("--voice-preset: old or current"); exit(1) }
@@ -245,9 +364,29 @@ if let input = arg("--render-voice") {
         guard parts.count == 2, let t = Double(parts[0]), let n = Float(parts[1]) else { return nil }
         return (t, n)
     }
+    if changerArg != nil && realisticArg, let why = realisticUnavailable { print("Realistic mode: \(why); Natural mode is used.") }
+    if args.contains("--live-sim") {  // the live chain's timing, offline (see simulateVoiceChain; Natural mode only)
+        do {
+            try simulateVoiceChain(input: input, output: args[i + 2], halfSteps: voiceStepsArg(3),
+                                   cartoon: cartoonArg ?? 0, slowDeeper: slowDeeperArg, changer: changerArg,
+                                   blockFrames: arg("--buffer").flatMap(Int.init) ?? 128)
+            print("wrote \(args[i + 2])")
+            exit(0)
+        } catch {
+            print("live-sim failed: \((error as? Problem)?.message ?? "\(error)")")
+            exit(1)
+        }
+    }
     do {
-        try renderVoiceFile(input: input, output: args[i + 2], halfSteps: arg("--steps").flatMap(Float.init) ?? 3,
-                            cartoon: cartoonArg ?? 0, changes: changes, slowDeeper: slowDeeperArg, levelFix: preset != "old")
+        try renderVoiceFile(input: input, output: args[i + 2], halfSteps: voiceStepsArg(3),
+                            cartoon: cartoonArg ?? 0, changes: changes, slowDeeper: slowDeeperArg, levelFix: preset != "old",
+                            changer: changerArg)
+        // Realistic: the AI voice over the same file, inline (it never comes late), with the Natural render as its
+        // fallback sound (only used before the first piece is ready).
+        if let changerArg, realisticArg, realisticUnavailable == nil, let entry = arg("--voice").flatMap({ VoiceLibrary.shared.voice($0) }) {
+            let natural = try readMonoFile(args[i + 2])
+            try renderRealisticFile(input: input, natural: natural.samples, rate: natural.rate, output: args[i + 2], entry: entry, options: changerArg)
+        }
         print("wrote \(args[i + 2])")
         exit(0)
     } catch {
@@ -337,35 +476,29 @@ if args.contains("--test") {
 }
 
 if args.contains("--test-voice") {
-    let steps = arg("--steps").flatMap(Float.init) ?? 3
+    let steps = voiceStepsArg(3)
     let micUID = arg("--mic").flatMap { name in Mics.list().first { $0.name == name }?.uid }
     let voice = VoiceShifter(halfSteps: steps, cartoon: cartoonArg ?? 0, slowDeeper: slowDeeperArg, micUID: micUID)
+    if let changerArg, let entry = arg("--voice").flatMap({ VoiceLibrary.shared.voice($0) }) {  // --voice: the voice changer on
+        voice.changerTune = changerArg.tune
+        voice.changer = ChangerSettings(on: true, voiceID: entry.id, strength: changerArg.strength, realistic: realisticArg)
+    }
     guard let mic = voice.currentMic, let virtualMic = Mics.virtualMic else { print("No mic or Pitch Shift Mic not installed"); exit(1) }
     let rate = nominalRate(mic)
     let seconds = arg("--seconds").flatMap(Double.init) ?? 3
+    var usage = rusage()
+    getrusage(RUSAGE_SELF, &usage)
+    let cpuStart = Double(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) + Double(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) / 1e6
+    let wallStart = Date()
     let tone = arg("--tone").flatMap(Double.init)
-    var sourceSamples: [Float] = []
-    if let path = arg("--file") {
-        // Load a sound file as one channel at the mic's rate, to play into the chain in a loop.
-        let file = try! AVAudioFile(forReading: URL(fileURLWithPath: path))
-        let input = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length))!
-        try! file.read(into: input)
-        let target = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1)!
-        let converter = AVAudioConverter(from: file.processingFormat, to: target)!
-        let converted = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: AVAudioFrameCount(Double(file.length) * rate / file.processingFormat.sampleRate) + 1024)!
-        var given = false
-        _ = converter.convert(to: converted, error: nil) { _, status in
-            if given { status.pointee = .endOfStream; return nil }
-            given = true
-            status.pointee = .haveData
-            return input
-        }
-        sourceSamples = Array(UnsafeBufferPointer(start: converted.floatChannelData![0], count: Int(converted.frameLength)))
-    }
+    let sourceSamples: [Float] = arg("--file").map { testVoiceFile($0, rate: rate) } ?? []
     var phase = 0.0, position = 0
     let toneStart = Int(rate)  // the tone starts 1 s in, once recording runs, so its delay can be measured
     // --watch: the tone plays for half of every second, so the delay can be measured again each second.
+    // With --file, the delay is measured where the file's sound starts, each time it starts over.
     let watch = args.contains("--watch")
+    let fileOnset = sourceSamples.firstIndex { abs($0) > 0.02 } ?? 0
+    let watchFile = watch && tone == nil && !sourceSamples.isEmpty
     let toneStarts = UnsafeMutablePointer<Double>.allocate(capacity: Int(seconds) + 2)  // host time of each tone start (s)
     var toneCount = 0
     voice.testBufferFrames = arg("--buffer").flatMap(UInt32.init)
@@ -383,6 +516,10 @@ if args.contains("--test-voice") {
                 if on { phase += 2 * .pi * tone / rate }
                 position += 1
             } else if !sourceSamples.isEmpty {
+                if watchFile && position % sourceSamples.count == fileOnset && toneCount < Int(seconds) + 2, let chain = voice.chain {
+                    toneStarts[toneCount] = Double(AudioConvertHostTimeToNanos(chain.blockInputTime)) / 1e9 + Double(i) / rate
+                    toneCount += 1
+                }
                 buffer[i] = sourceSamples[position % sourceSamples.count]
                 position += 1
             } else {
@@ -431,11 +568,40 @@ if args.contains("--test-voice") {
                               ms(s.delay), s.frames)
             line += String(format: " | margin %.1f ms | dry-outs %d, trims %d (%.0f ms), replays %d (%.0f ms), overloads %d",
                            ms(s.margin), s.dryOuts, s.trims, ms(s.trimmed), s.replays, ms(s.replayed), s.overloads)
-            if tone != nil { line += delays.last.map { String(format: " | mic to Pitch Shift Mic %.0f ms", $0) } ?? " | mic to Pitch Shift Mic -" }
+            if tone != nil || watchFile {
+                line += delays.last.map { String(format: " | mic to Pitch Shift Mic %.0f ms", $0) } ?? " | mic to Pitch Shift Mic -"
+            }
             print(line)
+            if s.changing { print(changerStatsLine(s.changer, seconds: Date().timeIntervalSince(started).rounded())) }
+            if let ai = chain.aiStats { print(aiStatsLine(ai.stats, latencyMs: ai.latencyMs, seconds: Date().timeIntervalSince(started).rounded())) }
             if Date().timeIntervalSince(started) < seconds - 0.5 { DispatchQueue.main.asyncAfter(deadline: .now() + 1) { look() } }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { look() }
+    }
+    // Realistic: when the AI voice started playing (the models load in the background; Natural plays meanwhile).
+    let aiStarted = Date()
+    var aiReadyAfter: Double?
+    if chain.aiStats != nil {
+        func check() {
+            if aiReadyAfter == nil, let ai = chain.aiStats, ai.stats.loaded != 0 {
+                aiReadyAfter = Date().timeIntervalSince(aiStarted)
+                print(String(format: "AI voice playing after %.1f s (%@)", aiReadyAfter!, voice.changerState == .realistic ? "realistic" : "\(voice.changerState)"))
+            }
+            if !watch, let ai = chain.aiStats, Int(Date().timeIntervalSince(aiStarted)) % 10 == 9 {
+                print(aiStatsLine(ai.stats, latencyMs: ai.latencyMs, seconds: Date().timeIntervalSince(aiStarted).rounded()))
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { check() }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { check() }
+    }
+    if changerArg?.stats == true && !watch {  // once a second: what the voice changer is doing
+        let started = Date()
+        func report() {
+            let s = chain.stats.withLock { $0 }
+            if s.changing { print(changerStatsLine(s.changer, seconds: Date().timeIntervalSince(started).rounded())) }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { report() }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { report() }
     }
     if slowDeeperArg {  // once a second: the speaking rate and the extra shift in use
         let started = Date()
@@ -448,13 +614,30 @@ if args.contains("--test-voice") {
     }
     DispatchQueue.main.asyncAfter(deadline: .now() + seconds + 0.2) {
         let recorded = recorder.finish()
+        let changerState = voice.changerState  // before stopping (stopping turns it off)
         voice.stop()
         let peak = recorded.reduce(Float(0)) { max($0, abs($1)) }
         let firstSound = recorded.firstIndex { abs($0) > 0.02 }.map { Double($0) / recorder.sampleRate * 1000 }
         let s = chain.stats.withLock { $0 }
+        getrusage(RUSAGE_SELF, &usage)
+        let cpuEnd = Double(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) + Double(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) / 1e6
+        let cpuShare = (cpuEnd - cpuStart) / max(0.001, Date().timeIntervalSince(wallStart)) * 100
         var line = "voice test: mic=\(chain.micName) rate=\(Int(chain.sampleRate)) style=\(voice.cartoon) callback=\(s.frames) "
         line += String(format: "shifter+wait=%.0fms dry-outs=%d overloads=%d ", Double(s.delay) / chain.sampleRate * 1000, s.dryOuts, s.overloads)
         line += "recorded=\(recorded.count) peak=\(peak) firstSound=\(firstSound.map { "\(Int($0))ms" } ?? "none")"
+        line += String(format: " cpu=%.1f%% of one core (whole test)", cpuShare)
+        if let ai = chain.aiStats {  // Realistic: misses count only after the AI voice started playing
+            line += String(format: " | AI voice: ready after %@, delay %.0f ms fixed, pieces %lld, late %lld, Natural filled in %.2f s, piece %.1f ms avg / %.1f ms worst, AI thread %.0f%% of a core",
+                           aiReadyAfter.map { String(format: "%.1f s", $0) } ?? "never", ai.latencyMs, ai.stats.hops, ai.stats.misses,
+                           ai.stats.fallbackSeconds, ai.stats.averageHopMs, ai.stats.worstHopMs, ai.stats.cpuShare * 100)
+        }
+        if changerArg != nil {
+            line += " changer=\(changerState)"
+            if s.changing {
+                line += String(format: " (shift %+.2f half-steps, shape x%.3f, speaker median %.0f Hz, cost %.3f ms per 10 ms, worst %.3f)",
+                               s.changer.semitones, s.changer.formant, s.changer.medianHz, s.changer.analyseMs, s.changer.worstMs)
+            }
+        }
         if tone != nil, let heard = recorded.firstIndex(where: { abs($0) > 0.02 }), chain.firstInputTime > 0, recorder.firstInputTime > 0 {
             // From the tone starting at the mic to it coming out of Pitch Shift Mic.
             let toneAt = Double(AudioConvertHostTimeToNanos(chain.firstInputTime)) / 1e9 + Double(toneStart) / rate
@@ -469,14 +652,16 @@ if args.contains("--test-voice") {
                 for (i, x) in tail.enumerated() { re += Double(x) * cos(2 * .pi * f * Double(i) / sr); im += Double(x) * sin(2 * .pi * f * Double(i) / sr) }
                 return 2 * sqrt(re * re + im * im) / Double(tail.count)
             }
-            let expected = tone * pow(2, Double(steps) / 12)
+            let expected = tone * pow(2, (s.changing ? Double(s.changer.semitones) : Double(steps)) / 12)
             let best = stride(from: min(tone, expected) * 0.5, through: max(tone, expected) * 2, by: 0.5).max { level($0) < level($1) }!
             line += String(format: " | expected %.1f Hz, measured %.1f Hz, level %.3f, original left %.4f", expected, best, level(best), level(tone))
         }
         print(line)
         if !delays.isEmpty {
-            print(String(format: "watch: mic to Pitch Shift Mic %.0f..%.0f ms over %d tone starts (first %.0f, last %.0f)",
-                         delays.min()!, delays.max()!, delays.count, delays.first!, delays.last!))
+            let sorted = delays.sorted()
+            print(String(format: "watch: mic to Pitch Shift Mic %.0f..%.0f ms (median %.0f) over %d %@ starts (first %.0f, last %.0f)",
+                         delays.min()!, delays.max()!, sorted[sorted.count / 2], delays.count, watchFile ? "sound" : "tone",
+                         delays.first!, delays.last!))
         }
         if let path = arg("--out"), let format = AVAudioFormat(standardFormatWithSampleRate: recorder.sampleRate, channels: 1),
            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(recorded.count)) {
@@ -492,27 +677,52 @@ if args.contains("--test-voice") {
 }
 
 // Presses the Test button with a quiet tone as the "voice": records 5 s from Pitch Shift Mic, then plays it back.
+// --voice NAME [--quality realistic]: with the voice changer on, so it records the changed voice (Realistic: Test is
+// pressed once the AI voice is ready). --file F: a speech file (looped, its loudest point at --volume) instead of the
+// tone.
 if args.contains("--test-button") {
     let micUID = arg("--mic").flatMap { name in Mics.list().first { $0.name == name }?.uid }  // e.g. not a Bluetooth headset's
-    let voice = VoiceShifter(halfSteps: 3, cartoon: 0, micUID: micUID)
+    let voice = VoiceShifter(halfSteps: voiceStepsArg(3), cartoon: 0, micUID: micUID)
     let rate = voice.currentMic.map(nominalRate) ?? 48000
     let volume = arg("--volume").flatMap(Double.init) ?? 0.03
-    var phase = 0.0
+    var speech = arg("--file").map { testVoiceFile($0, rate: rate) } ?? []
+    if let peak = speech.map(abs).max(), peak > 0 { speech = speech.map { $0 * Float(volume) / peak } }
+    var phase = 0.0, position = 0
     voice.testSource = { buffer, frames in
-        for i in 0..<frames { buffer[i] = Float(volume * sin(phase)); phase += 2 * .pi * 440 / rate }
+        for i in 0..<frames {
+            if speech.isEmpty {
+                buffer[i] = Float(volume * sin(phase)); phase += 2 * .pi * 440 / rate
+            } else {
+                buffer[i] = speech[position % speech.count]; position += 1
+            }
+        }
+    }
+    if let changerArg, let entry = arg("--voice").flatMap({ VoiceLibrary.shared.voice($0) }) {  // --voice: the voice changer on
+        voice.changerTune = changerArg.tune
+        voice.changer = ChangerSettings(on: true, voiceID: entry.id, strength: changerArg.strength, realistic: realisticArg)
+        print("voice changer: \(entry.name), \(realisticArg && realisticUnavailable == nil ? "Realistic" : "Natural")")
     }
     let test = VoiceTest(voice: voice)
     let started = Date()
     test.onChange = {
         let silent = voice.params.withLock { $0.silent }
-        print(String(format: "%.1fs: %@ (voice %@, sending silence: %@, real mic open: %@)", Date().timeIntervalSince(started), "\(test.phase)",
-                     "\(voice.state)", "\(silent)", "\(voice.chain != nil)"))
+        print(String(format: "%.1fs: %@ (voice %@, sending silence: %@, real mic open: %@, voice changer %@)", Date().timeIntervalSince(started),
+                     "\(test.phase)", "\(voice.state)", "\(silent)", "\(voice.chain != nil)", "\(voice.changerState)"))
         if test.phase == .idle { voice.stop(); exit(0) }
     }
     voice.start()
     print("mic: \(voice.currentMic.map(deviceName) ?? "none")")
-    test.click()
-    DispatchQueue.main.asyncAfter(deadline: .now() + 15) { print("timed out"); exit(1) }
+    // Realistic: the AI voice loads in the background (up to a minute the first time); Test is pressed once it's ready.
+    func press(waited: Double) {
+        if voice.changer.realistic && voice.changerState == .loading && waited < 90 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { press(waited: waited + 0.25) }
+            return
+        }
+        if voice.changer.on { print(String(format: "pressing Test after %.1f s (voice changer %@)", waited, "\(voice.changerState)")) }
+        test.click()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { print("timed out"); exit(1) }
+    }
+    press(waited: 0)
     dispatchMain()
 }
 
@@ -571,6 +781,12 @@ if let path = arg("--test-sounds") {
         print(String(format: "%.2fs: %@", Date().timeIntervalSince(started), board.playing.map { "playing \($0)" } ?? "stopped"))
     }
     onQuitSignals { voice.stopAll(); exit(0) }
+    // --voice Woman [--quality realistic]: with the voice changer on (the sound must still arrive unchanged, after it;
+    // the tone then comes out at the voice's pitch, not at --steps).
+    if !voiceOff, let changerArg, let entry = arg("--voice").flatMap({ VoiceLibrary.shared.voice($0) }) {
+        voice.changerTune = changerArg.tune
+        voice.changer = ChangerSettings(on: true, voiceID: entry.id, strength: changerArg.strength, realistic: realisticArg)
+    }
     if voiceOff { voice.keepForSounds(true) } else { voice.start() }
     voice.hold(true)  // runs the chain like the Test button does (no app is listening yet)
     guard let chain = voice.chain else { print("voice did not start: \(voice.state)"); exit(1) }

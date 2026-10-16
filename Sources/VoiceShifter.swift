@@ -66,11 +66,40 @@ enum Mics {
 }
 
 // Settings the sound thread reads. Changed from the window, read without waiting on the sound thread.
-struct VoiceParams {
+// `changer` points into VoiceLibrary's table, which lives as long as the app (so the sound thread may keep reading it).
+struct VoiceParams: @unchecked Sendable {
     var halfSteps: Float
     var cartoon: Float      // voice style: 0 = Natural, 1 = Cartoon, in between = a blend
     var slowDeeper = false  // "Deeper when slow": talking slowly makes the voice lower
     var silent: Bool        // during Test playback, so the replay isn't sent into a live call
+    var changer: UnsafePointer<VoiceChangerVoice>? = nil  // the voice changer's voice (nil = off)
+    var strength: Float = 1                               // the voice changer's strength, 0 ... 1
+}
+
+// The voice changer card's settings: on/off, which voice (VoiceLibrary id), how strong, and Realistic (AI) or not.
+struct ChangerSettings: Equatable {
+    var on = false
+    var voiceID = "woman"
+    var strength: Float = 1
+    var realistic = false
+}
+
+// What the voice changer is doing, for the window.
+enum ChangerState: Equatable {
+    case off
+    case natural                 // Natural mode is playing
+    case loading                 // Realistic mode is loading its models (Natural plays meanwhile)
+    case realistic               // the AI voice is playing
+    case fallback(misses: Int)   // Realistic, but some pieces came late and Natural filled in
+    case unavailable(String)     // Realistic can't run here (for example "needs Apple silicon"); Natural plays
+}
+
+// What --render-voice and --test-voice ask of the voice changer.
+struct ChangerOptions {
+    var voice: UnsafePointer<VoiceChangerVoice>
+    var strength: Float = 1
+    var tune: [(String, Float)] = []  // --changer-tune "key=value,..."
+    var stats = false                 // --changer-stats: print what it does once a second
 }
 
 // The sound effect (Soundboard) to mix into Pitch Shift Mic. Set from the window, read by the sound thread without
@@ -323,11 +352,34 @@ func voiceLevelGain(halfSteps: Float, cartoon: Float) -> Float {
     return shapeMove > 0 ? pow(10, -0.25 * shapeMove / 20) : 1
 }
 
+// The level fix (voiceLevelGain) for any pitch and voice shape: `shapeMove` is how many half-steps the voice's shape
+// is moved back down against the pitch (pitch minus shape move). Used while the voice changer is on.
+func voiceLevelGain(shapeMove: Float) -> Float {
+    shapeMove > 0 ? pow(10, -0.25 * shapeMove / 20) : 1
+}
+
 // The voice's Rubber Band shifter (used by the live chain and by the offline check --render-voice).
 // A new style glides there over a short moment, so moving the slider never clicks. "Deeper when slow" adds an extra
 // shift on top of the set amount, which glides too.
+// While the voice changer is on, its pitch and voice shape (set every callback from voicechanger_analyse) replace
+// the set amount and style; turning it on or off blends from one to the other over 0.15 s. With the changer off
+// nothing here changes (the same Rubber Band calls as before).
+// The voice changer's Natural mode, and the plain shift from 6 half-steps up or down, use the pulse shifter
+// (Sources/Voice/PulseShifter.h) instead of Rubber Band: Rubber Band smears the voice's pulses into a steady buzz at
+// big moves (the changer moves 8 to 10 half-steps), the pulse shifter keeps them whole, with less delay. It takes
+// over (and hands back) at once, starting fresh like a shift leaving 0, when the changer is turned on or off or the
+// set amount crosses 6 ("Deeper when slow" doesn't count, so it never switches in the middle of a word). Below 6
+// with the changer off nothing changes (the same Rubber Band calls as before). `--changer-tune naturalEngine=0`
+// keeps Rubber Band for everything.
 final class VoiceStretcher {
     let state: RubberBandState
+    private let pulse: OpaquePointer?  // the pulse shifter (nil: Rubber Band only)
+    private(set) var pulseOn = false   // the pulse shifter is in use now
+    private let pulsePlainFrom: Float  // the plain shift uses it from this many half-steps (set amount, up or down)
+    // The changer's voice shape move is made this much bigger (in log terms) for the pulse shifter: moving whole
+    // pulses keeps more of the speaker's own voice than Rubber Band, so the same shape scale sounded less changed
+    // (VCTK men -> Woman: judged a woman 88 % at 1.21 vs Rubber Band's 95 %; at 1.21^1.4 100 %).
+    private let pulseShapePower: Double
     private(set) var halfSteps: Float  // the set amount
     private var cartoon: Float      // the style asked for
     private var cartoonNow: Float   // the style in use (glides toward `cartoon`)
@@ -341,10 +393,28 @@ final class VoiceStretcher {
     private var gain: Float = 1          // the output gain in use (follows `gainTarget` smoothly)
     private var gainTarget: Float = 1
     private let gainSmoothing: Float     // per sample, for a 30 ms glide
+    // The voice changer.
+    private(set) var changerOn = false
+    private var blend: Float = 0          // 0 = the set amount and style, 1 = the voice changer's pitch and shape
+    private let blendStep: Float          // per sample: the whole way in 0.15 s
+    private var changerPitch: Double = 1  // the changer's pitch scale (from voicechanger_analyse)
+    private var changerShape: Double = 1  // ... and voice shape (formant) scale, before dividing by the pitch
 
-    init?(rate: Double, halfSteps: Float, cartoon: Float, slowDeeper: Bool = false, levelFix: Bool = true) {
+    // `changer`: start with the voice changer fully on (offline renders; a new chain has nothing to blend from).
+    // `tune`: --changer-tune settings; naturalEngine (1 = pulse shifter, the default; 0 = Rubber Band), pulseShapePow
+    // and the pulse shifter's own keys (pulseLatencyMs, ...) are used here.
+    init?(rate: Double, halfSteps: Float, cartoon: Float, slowDeeper: Bool = false, levelFix: Bool = true, changer: Bool = false,
+          tune: [(String, Float)] = []) {
         guard let made = rubberband_new(UInt32(rate), 1, voiceShifterOptions, 1, pow(2, Double(halfSteps) / 12)) else { return nil }
         state = made
+        if (tune.last { $0.0 == "naturalEngine" }?.1 ?? 1) != 0, let shifter = pulseshifter_new(rate) {
+            for (key, value) in tune { _ = pulseshifter_tune(shifter, key, value) }
+            pulse = shifter
+        } else {
+            pulse = nil
+        }
+        pulseShapePower = Double(tune.last { $0.0 == "pulseShapePow" }?.1 ?? 1.4)
+        pulsePlainFrom = levelFix ? 6 : .infinity  // `--voice-preset old` renders as before: Rubber Band only
         self.halfSteps = halfSteps
         self.cartoon = max(0, min(1, cartoon))
         cartoonNow = self.cartoon
@@ -353,19 +423,53 @@ final class VoiceStretcher {
         extraGlide = Float(0.3 * rate)
         self.levelFix = levelFix
         gainSmoothing = Float(1 - exp(-1 / (0.03 * rate)))
+        blendStep = Float(1 / (0.15 * rate))
         rubberband_set_max_process_size(state, 4096)
         rubberband_set_formant_scale(state, voiceFormantScale(halfSteps: halfSteps, cartoon: self.cartoon))
-        aimGain()
+        if changer {
+            changerOn = true
+            pulseOn = pulse != nil
+            blend = 1
+            applyChanger()
+        } else if plainWantsPulse {
+            pulseOn = true
+            applyPlain(repitch: true)
+        } else {
+            aimGain()
+        }
         gain = gainTarget
     }
 
-    deinit { rubberband_delete(state) }
+    deinit {
+        rubberband_delete(state)
+        if let pulse { pulseshifter_delete(pulse) }
+    }
 
     // The pitch in use: the set amount plus the extra shift.
     var pitch: Float { halfSteps + extra }
 
-    // False when the voice goes through untouched (at 0, unless "Deeper when slow" is on).
-    var running: Bool { halfSteps != 0 || slowDeeper }
+    // The voice changer is on, or still blending out.
+    var changerActive: Bool { changerOn || blend > 0 }
+
+    // False when the voice goes through untouched (at 0, unless "Deeper when slow" or the voice changer is on).
+    var running: Bool { halfSteps != 0 || slowDeeper || changerActive }
+
+    // The plain shift's set amount is big enough for the pulse shifter.
+    private var plainWantsPulse: Bool { pulse != nil && abs(halfSteps) >= pulsePlainFrom }
+
+    // Gives the set amount and style to the shifter in use (not while the changer sets them). For Rubber Band these
+    // are the same calls as before the pulse shifter; it gets the pitch only when `repitch`.
+    private func applyPlain(repitch: Bool) {
+        if pulseOn, let pulse {  // the pulse shifter keeps the loudness itself
+            let scale = pow(2, Double(pitch) / 12)
+            pulseshifter_set(pulse, scale, pow(scale, Double(min(max(cartoonNow, 0), 1))))  // the shape moves pitch^style
+            gainTarget = 1
+            return
+        }
+        if repitch { rubberband_set_pitch_scale(state, pow(2, Double(pitch) / 12)) }
+        rubberband_set_formant_scale(state, voiceFormantScale(halfSteps: pitch, cartoon: cartoonNow))
+        aimGain()
+    }
 
     // Returns true when the shifter started fresh (coming back from normal pitch), so old sound should be dropped.
     func set(halfSteps new: Float) -> Bool {
@@ -373,11 +477,76 @@ final class VoiceStretcher {
         let fresh = !running && new != 0
         if fresh { rubberband_reset(state) }
         halfSteps = new
+        if changerActive {  // the changer sets Rubber Band (the amount only counts while blending)
+            applyChanger()
+            return fresh
+        }
+        if let pulse, plainWantsPulse != pulseOn {  // the amount crossed 6: the other shifter takes over, fresh
+            pulseOn = !pulseOn
+            if pulseOn { pulseshifter_reset(pulse) } else { rubberband_reset(state) }
+            applyPlain(repitch: true)
+            gain = gainTarget
+            return true
+        }
+        if pulseOn {
+            applyPlain(repitch: true)
+            return fresh
+        }
         if running { rubberband_set_pitch_scale(state, pow(2, Double(pitch) / 12)) }
         rubberband_set_formant_scale(state, voiceFormantScale(halfSteps: pitch, cartoon: cartoonNow))
         aimGain()
         if fresh { gain = gainTarget }  // nothing old is left to glide from
         return fresh
+    }
+
+    // Turns the voice changer on or off (it blends in or out over 0.15 s). Returns true when the shifter started
+    // fresh (it wasn't in use at 0), so old sound should be dropped.
+    func set(changer on: Bool) -> Bool {
+        guard on != changerOn else { return false }
+        if let pulse {  // the pulse shifter takes over, or hands back to the plain shift, at once
+            changerOn = on
+            blend = on ? 1 : 0
+            pulseOn = on || plainWantsPulse
+            if pulseOn { pulseshifter_reset(pulse) } else { rubberband_reset(state) }
+            if on { applyChanger() } else { applyPlain(repitch: true) }
+            gain = gainTarget
+            return true
+        }
+        let fresh = on && !running
+        if fresh { rubberband_reset(state) }
+        changerOn = on
+        if fresh {
+            blend = 1  // nothing old to blend from
+            applyChanger()
+            gain = gainTarget
+        }
+        return fresh
+    }
+
+    // The voice changer's pitch scale and Rubber Band formant scale for this callback (from voicechanger_analyse).
+    func set(changerPitch pitchScale: Double, formantScale: Double) {
+        changerPitch = pitchScale > 0 ? pitchScale : 1
+        changerShape = formantScale > 0 ? formantScale * changerPitch : 1
+        if changerActive { applyChanger() }
+    }
+
+    // Sets Rubber Band from the blend of the set amount/style and the voice changer: half-steps and the log of the
+    // voice shape are blended, then the shape is divided by the pitch (Rubber Band counts it on top of the pitch).
+    private func applyChanger() {
+        let plainSteps = Double(pitch)
+        let plainShapeLog = log(2) * plainSteps / 12 * Double(min(max(cartoonNow, 0), 1))  // the shape moves pitch^cartoon
+        let b = Double(blend)
+        let steps = (1 - b) * plainSteps + b * 12 * log2(changerPitch)
+        let shapeLog = (1 - b) * plainShapeLog + b * log(changerShape)
+        let scale = pow(2, steps / 12)
+        if pulseOn, let pulse {  // keeps the loudness itself
+            pulseshifter_set(pulse, scale, exp(shapeLog * pulseShapePower))
+            gainTarget = 1
+            return
+        }
+        rubberband_set_pitch_scale(state, scale)
+        rubberband_set_formant_scale(state, exp(shapeLog) / scale)
+        gainTarget = levelFix ? voiceLevelGain(shapeMove: Float(steps - 12 * shapeLog / log(2))) : 1
     }
 
     func set(cartoon new: Float) { cartoon = max(0, min(1, new)) }
@@ -392,9 +561,11 @@ final class VoiceStretcher {
         extra = 0
         extraTarget = 0
         guard running else { return fresh }
-        rubberband_set_pitch_scale(state, pow(2, Double(pitch) / 12))
-        rubberband_set_formant_scale(state, voiceFormantScale(halfSteps: pitch, cartoon: cartoonNow))
-        aimGain()
+        if changerActive {  // the changer sets Rubber Band (it gets the extra shift from the chain)
+            applyChanger()
+            return fresh
+        }
+        applyPlain(repitch: true)
         if fresh { gain = gainTarget }
         return fresh
     }
@@ -407,7 +578,18 @@ final class VoiceStretcher {
     }
 
     // Moves the style and the extra shift toward where they're heading; call once for each piece of `frames` samples.
+    // While the voice changer is on (or blending), this only moves the values: set(changerPitch:formantScale:),
+    // called right after for the same callback, sets Rubber Band.
     func glide(_ frames: Int) {
+        if changerActive {
+            let step = Float(frames)
+            cartoonNow = abs(cartoon - cartoonNow) <= glideStep * step ? cartoon : cartoonNow + (cartoon > cartoonNow ? glideStep : -glideStep) * step
+            extra = abs(extraTarget - extra) <= extraStep * step ? extraTarget : extra + (extraTarget > extra ? extraStep : -extraStep) * step
+            let goal: Float = changerOn ? 1 : 0
+            blend = abs(goal - blend) <= blendStep * step ? goal : blend + (goal > blend ? blendStep : -blendStep) * step
+            if !changerActive { applyPlain(repitch: true) }  // fully blended out: back to the set amount and style
+            return
+        }
         let restyle = cartoonNow != cartoon, repitch = extra != extraTarget
         guard restyle || repitch else { return }
         if restyle {
@@ -417,19 +599,23 @@ final class VoiceStretcher {
         if repitch {
             let step = extraStep * Float(frames)
             extra = abs(extraTarget - extra) <= step ? extraTarget : extra + (extraTarget > extra ? step : -step)
-            rubberband_set_pitch_scale(state, pow(2, Double(pitch) / 12))
         }
-        rubberband_set_formant_scale(state, voiceFormantScale(halfSteps: pitch, cartoon: cartoonNow))
-        aimGain()
+        applyPlain(repitch: repitch)
     }
 
     private func aimGain() {
+        guard !changerActive else { return }  // the changer's level is set in applyChanger
+        if pulseOn {  // the pulse shifter keeps the loudness itself
+            gainTarget = 1
+            return
+        }
         gainTarget = levelFix ? voiceLevelGain(halfSteps: pitch, cartoon: cartoonNow) : 1
     }
 
     // Takes up to `count` shifted samples from Rubber Band into `buffer`, at the level voiceLevelGain says
     // (gliding there), and returns how many it took.
     func retrieve(_ buffer: UnsafeMutablePointer<Float>, _ count: Int) -> Int {
+        if pulseOn, let pulse { return Int(pulseshifter_retrieve(pulse, buffer, Int32(count))) }
         var output: UnsafeMutablePointer<Float>? = buffer
         let got = Int(rubberband_retrieve(state, &output, UInt32(count)))
         guard gain != 1 || gainTarget != 1 else { return got }  // Cartoon and going down: untouched
@@ -440,6 +626,40 @@ final class VoiceStretcher {
         if abs(gain - gainTarget) < 1e-4 { gain = gainTarget }  // close enough (0.001 dB): stop gliding
         return got
     }
+
+    // Gives `count` mic samples to the shifter in use.
+    func process(_ samples: UnsafePointer<Float>, _ count: Int) {
+        if pulseOn, let pulse {
+            pulseshifter_process(pulse, samples, Int32(count))
+            return
+        }
+        var input: UnsafePointer<Float>? = samples
+        rubberband_process(state, &input, UInt32(count), 0)
+    }
+
+    // How many shifted samples are ready.
+    var available: Int { pulseOn ? Int(pulseshifter_available(pulse)) : Int(rubberband_available(state)) }
+
+    // Samples to drop from the start so the output lines up with the input (Rubber Band's start delay; the pulse
+    // shifter's output is lined up already).
+    var startSkip: Int { pulseOn ? 0 : Int(rubberband_get_start_delay(state)) }
+
+    // The part of the delay the shifter adds besides what it holds (Rubber Band's start delay minus its start pad).
+    var heldBack: Int { pulseOn ? 0 : Int(rubberband_get_start_delay(state)) - Int(rubberband_get_preferred_start_pad(state)) }
+
+    // For --test-voice --watch.
+    var delayNote: String {
+        if pulseOn { return "pulse shifter, fixed delay \(pulseshifter_latency(pulse)) samples" }
+        return "Rubber Band: start delay \(rubberband_get_start_delay(state)) samples, start pad \(rubberband_get_preferred_start_pad(state)) samples"
+    }
+}
+
+// --changer-tune keys used by the voice's shifter (VoiceStretcher), for the command line's key check.
+func isVoiceShifterTuneKey(_ key: String) -> Bool {
+    if key == "naturalEngine" || key == "pulseShapePow" { return true }
+    guard let probe = pulseshifter_new(48000) else { return false }
+    defer { pulseshifter_delete(probe) }
+    return pulseshifter_tune(probe, key, 1) != 0
 }
 
 // "Deeper when slow": how fast someone is talking, and how much lower that makes the voice.
@@ -622,7 +842,6 @@ final class VoiceChain {
     private var aggregate = AudioObjectID(kAudioObjectUnknown)
     private var proc: AudioDeviceIOProcID?
     private let stretcher: VoiceStretcher
-    private var shifter: RubberBandState { stretcher.state }
     private let params: OSAllocatedUnfairLock<VoiceParams>
     private var applied: VoiceParams
     private let micOutputStreams: Int
@@ -633,6 +852,14 @@ final class VoiceChain {
     private let piece: UnsafeMutablePointer<Float>
     private let ring: VoiceRing  // shifted sound waiting to go out
     private let speaking: SpeakingRate  // "Deeper when slow"
+    // The voice changer (Natural mode): made with the chain, used only while a voice is on.
+    private let changer: OpaquePointer
+    private let changerPitch: UnsafeMutablePointer<VoiceChangerPitch>
+    private let changerStats: UnsafeMutablePointer<VoiceChangerStats>
+    // Realistic mode (AI voice, Apple silicon): the stream that turns the mic into the AI voice at a fixed delay
+    // (Sources/Voice/VoiceModel.h). Made with the chain when Realistic is on; its models may come later (attach).
+    private var ai: OpaquePointer?
+    let realisticID: String?  // the voice the AI stream is for (nil = no AI stream)
     // Sound effects (Soundboard): mixed in after the voice, never through the mic or the pitch change.
     private let sounds: OSAllocatedUnfairLock<SoundPlay>
     private var callMix: CallMix
@@ -646,8 +873,13 @@ final class VoiceChain {
     private var counts = VoiceStats()
     private var overloadListener: Listener?
 
+    // `changerTune`: --changer-tune settings for the voice changer (command line only). `speaker`: the speaker's
+    // median pitch as an earlier chain measured it (so a new chain doesn't start from a guess).
     init(mic: AudioDeviceID, feed: AudioDeviceID, params: OSAllocatedUnfairLock<VoiceParams>, sounds: OSAllocatedUnfairLock<SoundPlay>,
-         bufferFrames: UInt32? = nil, testSource: ((UnsafeMutablePointer<Float>, Int) -> Void)? = nil) throws {
+         bufferFrames: UInt32? = nil, testSource: ((UnsafeMutablePointer<Float>, Int) -> Void)? = nil,
+         changerTune: [(String, Float)] = [], realistic: (id: String, model: OpaquePointer?)? = nil,
+         speaker: (hz: Float, frames: Float)? = nil) throws {
+        realisticID = realistic?.id
         self.testSource = testSource  // set before the sound starts, so a test never sends the real mic
         micName = deviceName(mic)
         micUID = deviceUID(mic)
@@ -665,10 +897,21 @@ final class VoiceChain {
         self.params = params
         let start = params.withLock { $0 }
         applied = start
-        guard let made = VoiceStretcher(rate: rate, halfSteps: start.halfSteps, cartoon: start.cartoon, slowDeeper: start.slowDeeper) else {
+        guard let made = VoiceStretcher(rate: rate, halfSteps: start.halfSteps, cartoon: start.cartoon, slowDeeper: start.slowDeeper,
+                                        changer: start.changer != nil, tune: changerTune),
+              let madeChanger = voicechanger_new(rate, 8192) else {
             throw Problem(message: "Can't use \(micName).")
         }
         stretcher = made
+        changer = madeChanger
+        for (key, value) in changerTune { _ = voicechanger_tune(changer, key, value) }
+        if let speaker { voicechanger_set_speaker(changer, speaker.hz, speaker.frames) }
+        voicechanger_set(changer, start.changer, start.strength)
+        voicechanger_reset(changer)
+        changerPitch = .allocate(capacity: 1)
+        changerPitch.initialize(to: VoiceChangerPitch())
+        changerStats = .allocate(capacity: 1)
+        changerStats.initialize(to: VoiceChangerStats())
         speaking = SpeakingRate(sampleRate: rate)
         self.sounds = sounds
         callMix = CallMix(rate: rate, take: sounds.withLock { $0.take })  // a sound already playing when the chain starts isn't sent
@@ -705,6 +948,11 @@ final class VoiceChain {
         if range.mMaximum > 0 { frames = UInt32(min(max(Double(frames), range.mMinimum), range.mMaximum)) }
         var sizeAddress = address(kAudioDevicePropertyBufferFrameSize)
         AudioObjectSetPropertyData(aggregate, &sizeAddress, 0, nil, UInt32(MemoryLayout<UInt32>.size), &frames)
+        if let realistic {  // the AI voice: its delay includes one callback, so it is made once the size is known
+            let callback = getValue(aggregate, kAudioDevicePropertyBufferFrameSize, default: frames)
+            ai = voicestream_new(realistic.model, rate, Int32(max(callback, 1)), 0, nil)
+            if let ai { for (key, value) in changerTune { _ = voicestream_tune(ai, key, value) } }
+        }
         overloadListener = Listener(aggregate, kAudioDeviceProcessorOverload) { [weak self] in
             self?.stats.withLock { $0.overloads += 1 }
         }
@@ -725,12 +973,11 @@ final class VoiceChain {
                 .map { getValue($0, kAudioStreamPropertyLatency, default: UInt32(0)) } ?? 0
             return "buffer \(buffer) (\(ms(buffer)) ms), latency \(ms(latency + stream)) ms, safety \(ms(safety)) ms"
         }
-        let pad = rubberband_get_preferred_start_pad(shifter), start = rubberband_get_start_delay(shifter)
         return """
             combined device: in \(io(aggregate, kAudioDevicePropertyScopeInput)) | out \(io(aggregate, kAudioDevicePropertyScopeOutput))
               mic \(micName): \(io(devices[0], kAudioDevicePropertyScopeInput))
               hidden feed: \(io(devices[2], kAudioDevicePropertyScopeOutput)); Pitch Shift Mic: \(io(devices[1], kAudioDevicePropertyScopeInput))
-              Rubber Band: start delay \(ms(start)) ms, start pad \(ms(pad)) ms, pieces up to \(maxPiece)
+              \(stretcher.delayNote) (\(Int(rate)) Hz), pieces up to \(maxPiece)
               waiting sound: starts at one callback + \(ms(UInt32(ring.startCushion))) ms, then kept \(ms(UInt32(ring.margin))) ms above the lowest point
             """
     }
@@ -795,11 +1042,31 @@ final class VoiceChain {
             slowReading.withLockIfAvailable { $0 = reading }
         }
 
+        // The voice changer listens to the mic and sets Rubber Band's pitch and voice shape for this callback
+        // ("Deeper when slow" moves only the pitch, on top).
+        let changing = stretcher.changerActive
+        if changing {
+            voicechanger_analyse(changer, source, Int32(frames), stretcher.extra, changerPitch)
+            stretcher.set(changerPitch: Double(changerPitch.pointee.pitchScale), formantScale: Double(changerPitch.pointee.formantScale))
+        }
+        if let ai {  // Realistic: the mic (before Rubber Band) and its pitch frames go to the AI voice
+            if !changing { changerPitch.pointee.newFrames = 0 }
+            voicestreamPush(ai, source, frames, changerPitch)
+        }
+
         // At normal pitch the mic goes straight out; otherwise the shifted sound replaces it in the same buffer.
         let shifting = stretcher.running
         if shifting {
             shift(source, frames)
             ring.read(into: source, frames)
+            if changing {  // sibilance, tone EQ, presence and breath, lined up with the mic sound it came from
+                voicechanger_post(changer, source, Int32(frames), Int32(clamping: soundDelay))
+            }
+            // Realistic: the AI voice at its fixed delay; when it isn't ready (loading, a late piece) Natural's sound,
+            // delayed to the same point, fills in (crossfaded). Never silence, never the raw mic.
+            if let ai { voicestream_pull(ai, source, Int32(clamping: soundDelay), source, Int32(frames)) }
+        } else if let ai {
+            voicestream_pull(ai, nil, 0, source, Int32(frames))  // (not reached while a voice is on: it always shifts)
         }
         for i in 0..<frames {
             let value = callMix.out(applied.silent ? 0 : source[i], shifting: shifting)
@@ -812,14 +1079,22 @@ final class VoiceChain {
         publish(frames, shifting: shifting)
     }
 
+    // From a mic sample to it going out: Rubber Band + the waiting sound (samples).
+    private var soundDelay: Int {
+        counts.given - counts.returned + ring.count + stretcher.heldBack
+    }
+
     // Copies the counts out for --watch (never waits: if the main thread is reading, this callback is left out).
     private func publish(_ frames: Int, shifting: Bool) {
         counts.frames = frames
         counts.ring = ring.count
         counts.sending = shifting && !ring.waiting
-        counts.delay = counts.sending
-            ? counts.given - counts.returned + ring.count + Int(rubberband_get_start_delay(shifter)) - Int(rubberband_get_preferred_start_pad(shifter))
-            : 0
+        counts.delay = counts.sending ? soundDelay : 0
+        counts.changing = stretcher.changerActive
+        if counts.changing {
+            voicechanger_get_stats(changer, changerStats)
+            counts.changer = changerStats.pointee
+        }
         counts.margin = ring.margin
         counts.dryOuts = ring.dryOuts
         counts.trims = ring.trims
@@ -840,13 +1115,12 @@ final class VoiceChain {
         var done = 0
         while done < frames {
             let count = min(maxPiece, frames - done)
-            var input: UnsafePointer<Float>? = UnsafePointer(source + done)
-            rubberband_process(shifter, &input, UInt32(count), 0)
+            stretcher.process(source + done, count)
             done += count
         }
         counts.given += frames
         while true {
-            let ready = min(Int(rubberband_available(shifter)), maxPiece)
+            let ready = min(stretcher.available, maxPiece)
             if ready <= 0 { break }
             let got = stretcher.retrieve(piece, ready)
             if got <= 0 { break }
@@ -871,9 +1145,18 @@ final class VoiceChain {
     private func apply(_ latest: VoiceParams) {
         stretcher.set(cartoon: latest.cartoon)
         if latest.slowDeeper && !applied.slowDeeper { speaking.reset() }
-        let changed = latest.halfSteps != stretcher.halfSteps || latest.slowDeeper != stretcher.slowDeeper
+        // The voice changer: a new voice or strength glides there; turning it on or off blends over 0.15 s.
+        if latest.changer != applied.changer || latest.strength != applied.strength {
+            voicechanger_set(changer, latest.changer, latest.strength)
+        }
+        let changerWasActive = stretcher.changerActive
+        let changerToggled = (latest.changer != nil) != stretcher.changerOn
+        let changerFresh = stretcher.set(changer: latest.changer != nil)
+        if stretcher.changerActive && !changerWasActive { voicechanger_reset(changer) }  // starts listening afresh
+        let amountMoved = latest.halfSteps != stretcher.halfSteps && !stretcher.changerOn  // ignored while a voice is on
+        let changed = amountMoved || latest.slowDeeper != stretcher.slowDeeper || changerToggled
         let restarted = stretcher.set(slowDeeper: latest.slowDeeper)
-        if stretcher.set(halfSteps: latest.halfSteps) || restarted {  // coming back from normal pitch: start fresh
+        if stretcher.set(halfSteps: latest.halfSteps) || restarted || changerFresh {  // coming back from normal pitch: start fresh
             counts.given = 0
             counts.returned = 0
             ring.reset()
@@ -893,9 +1176,28 @@ final class VoiceChain {
         aggregate = AudioObjectID(kAudioObjectUnknown)
     }
 
+    // Realistic: gives the AI stream its models once they are loaded (main thread). False if they don't fit it.
+    func attach(model: OpaquePointer) -> Bool {
+        guard let ai else { return false }
+        return voicestream_set_model(ai, model) != 0
+    }
+
+    // Realistic: what the AI voice is doing, and its fixed delay in ms (nil without an AI stream).
+    var aiStats: (stats: VoiceStreamStats, latencyMs: Double)? {
+        guard let ai else { return nil }
+        var s = VoiceStreamStats()
+        voicestream_get_stats(ai, &s)
+        return (s, Double(voicestream_latency_frames(ai)) / sampleRate * 1000)
+    }
+
     private func cleanUp() {
         piece.deallocate()
         scratch.deallocate()
+        if let ai { voicestream_delete(ai) }  // the sound has stopped, so nothing uses it any more
+        ai = nil
+        voicechanger_delete(changer)
+        changerPitch.deallocate()
+        changerStats.deallocate()
     }
 
     private var stopped = false
@@ -925,6 +1227,8 @@ struct VoiceStats {
     var replays = 0          // a few ms sent again (crossfaded) because the ring got very low
     var replayed = 0
     var overloads = 0        // Core Audio said a callback came too late
+    var changing = false     // the voice changer is on
+    var changer = VoiceChangerStats()  // what it is doing
 }
 
 enum VoiceState: Equatable {
@@ -943,6 +1247,16 @@ final class VoiceShifter {
     var halfSteps: Float { didSet { pushParams() } }
     var cartoon: Float { didSet { pushParams() } }  // voice style: 0 = Natural, 1 = Cartoon
     var slowDeeper: Bool { didSet { pushParams() } }  // "Deeper when slow"
+    // The voice changer card. Used only while "Your voice" is on (never in the Soundboard-only pass-through).
+    var changer = ChangerSettings() { didSet { if changer != oldValue { pushParams() } } }
+    private(set) var changerState: ChangerState = .off
+    var changerTune: [(String, Float)] = []  // --changer-tune (command line only; used when the chain is made)
+    // Realistic (AI) mode: the models load in the background (VoiceModelStore) while Natural plays; the chain is
+    // remade once when Realistic or the voice changes (the AI stream's fixed delay starts right away, Natural fills
+    // in until the models are ready); they are freed when Realistic goes off.
+    private let models = VoiceModelStore.shared
+    private var aiPolling = false
+    private var lastMisses: Int64 = 0, missesAt = Date.distantPast
     var micUID: String? { didSet { if oldValue != micUID { rebuild() } } }  // nil = the Mac's default mic
     var onChange: () -> Void = {}
     var testSource: ((UnsafeMutablePointer<Float>, Int) -> Void)?
@@ -961,6 +1275,9 @@ final class VoiceShifter {
     private var stopLater: DispatchWorkItem?
     private let debounce = Debouncer(0.3)
     private var rebuilds: [Date] = []
+    // The speaker's median pitch from the last chain that heard at least a second of voice: the next chain starts
+    // from it instead of the voice's guess (Realistic remakes the chain when the voice changes).
+    private var lastSpeaker: (hz: Float, frames: Float)?
 
     init(halfSteps: Float, cartoon: Float, slowDeeper: Bool = false, micUID: String?) {
         self.halfSteps = halfSteps
@@ -968,6 +1285,7 @@ final class VoiceShifter {
         self.slowDeeper = slowDeeper
         self.micUID = micUID
         params = OSAllocatedUnfairLock(initialState: VoiceParams(halfSteps: halfSteps, cartoon: cartoon, slowDeeper: slowDeeper, silent: false))
+        models.onChange = { [weak self] in self?.modelsChanged() }
     }
 
     var isOn: Bool { voiceSwitch }
@@ -1042,10 +1360,104 @@ final class VoiceShifter {
         params.withLock { $0.silent = silent }
     }
 
-    // With the voice off (only the Soundboard running) the voice goes through unchanged.
+    // With the voice off (only the Soundboard running) the voice goes through unchanged, and the voice changer only
+    // runs while "Your voice" is on.
     private func pushParams() {
-        let steps = voiceSwitch ? halfSteps : 0, cartoon = cartoon, slowDeeper = voiceSwitch && slowDeeper
-        params.withLock { $0.halfSteps = steps; $0.cartoon = cartoon; $0.slowDeeper = slowDeeper }
+        let voice = voiceSwitch && changer.on ? VoiceLibrary.shared.voice(changer.voiceID)?.natural : nil
+        // Only one at a time (the owner's rule): with a changer voice on, the changer alone sets the pitch, so the
+        // amount and "Deeper when slow" are not sent (the window also sets them to 0 / off).
+        let steps = voiceSwitch && voice == nil ? halfSteps : 0, cartoon = cartoon
+        let slowDeeper = voiceSwitch && voice == nil && slowDeeper
+        let new = VoiceParams(halfSteps: steps, cartoon: cartoon, slowDeeper: slowDeeper, silent: false, changer: voice,
+                              strength: max(0, min(1, changer.strength)))
+        params.withLock {
+            $0.halfSteps = new.halfSteps; $0.cartoon = new.cartoon; $0.slowDeeper = new.slowDeeper
+            $0.changer = new.changer; $0.strength = new.strength
+        }
+        updateChangerState(voiceFound: voice != nil)
+    }
+
+    // Natural mode plays whenever the changer is on. Realistic (AI): loading (Natural plays), realistic, fallback
+    // (some pieces came late in the last 10 s; Natural filled in), or unavailable (why; Natural plays).
+    private func updateChangerState(voiceFound: Bool) {
+        var new: ChangerState = .off
+        if changer.on && voiceSwitch {
+            if !voiceFound {
+                new = .unavailable("no voice \"\(changer.voiceID)\"")
+            } else if changer.realistic {
+                #if arch(arm64)
+                new = realisticState()
+                #else
+                new = .unavailable("needs Apple silicon")
+                #endif
+            } else {
+                new = .natural
+            }
+        }
+        updateRealistic()
+        guard new != changerState else { return }
+        changerState = new
+        onChange()
+    }
+
+    // The voice the AI is wanted for now (nil = Realistic is off, or this Mac can't run it).
+    private var realisticWanted: VoiceEntry? {
+        #if arch(arm64)
+        guard voiceSwitch && changer.on && changer.realistic, let entry = VoiceLibrary.shared.voice(changer.voiceID),
+              entry.manifest.realistic != nil else { return nil }
+        return entry
+        #else
+        return nil
+        #endif
+    }
+
+    private func realisticState() -> ChangerState {
+        guard let entry = VoiceLibrary.shared.voice(changer.voiceID) else { return .unavailable("no voice") }
+        guard entry.manifest.realistic != nil else { return .unavailable("\(entry.name) has no AI voice") }
+        switch models.status {
+        case .failed(let id, let why) where id == entry.id: return .unavailable(why)
+        case .ready(let id) where id == entry.id:
+            guard let ai = chain?.aiStats else { return .realistic }  // nobody listening yet: ready to go
+            if ai.stats.loaded == 0 { return .loading }               // fading in
+            if ai.stats.misses > lastMisses { lastMisses = ai.stats.misses; missesAt = Date() }
+            return Date().timeIntervalSince(missesAt) < 10 ? .fallback(misses: Int(ai.stats.misses)) : .realistic
+        default: return .loading
+        }
+    }
+
+    // Starts loading the AI voice, remakes the chain when its AI stream is for another voice (or none), and frees the
+    // models once nothing uses them.
+    private func updateRealistic() {
+        let want = realisticWanted
+        if let want { models.want(want) }
+        if running, let chain, chain.realisticID != want?.id {
+            DispatchQueue.main.async { [weak self] in  // not from inside pushParams
+                guard let self, let current = self.chain, current.realisticID != self.realisticWanted?.id else { return }
+                self.closeChain()
+                self.update()
+            }
+        }
+        if want == nil && models.status != .none && chain?.realisticID == nil { models.free() }
+        if want != nil && !aiPolling { pollRealistic() }
+    }
+
+    // Once a second while Realistic is on: loading -> realistic, and late pieces -> fallback.
+    private func pollRealistic() {
+        aiPolling = realisticWanted != nil
+        guard aiPolling else { return }
+        updateChangerState(voiceFound: true)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.pollRealistic() }
+    }
+
+    // The models finished loading (or failed): hand them to the running chain's AI stream.
+    private func modelsChanged() {
+        if case .ready(let id) = models.status, let chain, chain.realisticID == id, let model = models.model {
+            if !chain.attach(model: model) {  // made for other piece sizes (can't happen with one model set): remake
+                closeChain()
+                update()
+            }
+        }
+        updateChangerState(voiceFound: VoiceLibrary.shared.voice(changer.voiceID) != nil)
     }
 
     private func setState(_ new: VoiceState) {
@@ -1113,8 +1525,10 @@ final class VoiceShifter {
             stopLater = nil
             if chain == nil {
                 do {
+                    let ai = realisticWanted.map { (id: $0.id, model: models.model(for: $0.id)) }
                     let made = try VoiceChain(mic: mic, feed: feed, params: params, sounds: sounds,
-                                              bufferFrames: testBufferFrames, testSource: testSource)
+                                              bufferFrames: testBufferFrames, testSource: testSource, changerTune: changerTune,
+                                              realistic: ai, speaker: lastSpeaker)
                     chain = made
                 } catch {
                     setState(.problem((error as? Problem)?.message ?? "\(error)"))
@@ -1144,8 +1558,14 @@ final class VoiceShifter {
     }
 
     private func closeChain() {
+        if let chain {
+            let heard = chain.stats.withLock { $0.changer }
+            if heard.learnedFrames >= 100 && heard.medianHz > 0 { lastSpeaker = (heard.medianHz, Float(min(heard.learnedFrames, 100))) }
+        }
         chain?.close()
         chain = nil
+        models.freeRetired()  // an AI voice switched away from: its chain is gone now
+        if realisticWanted == nil && models.status != .none { models.free() }  // nothing uses the AI voice now
     }
 }
 
@@ -1301,9 +1721,11 @@ final class VoiceTest {
 // pieces like the live chain, and writes one channel. `changes` moves the style part way through
 // ((seconds, style) pairs), to check that it changes smoothly. With `slowDeeper` it prints the speaking rate and
 // the extra shift once per second of sound. `levelFix: false` renders it as before the level fix
-// (`--voice-preset old`, see voiceLevelGain), so old and new can be compared.
+// (`--voice-preset old`, see voiceLevelGain), so old and new can be compared. `changer`: the voice changer
+// (--voice), with the same classes and order as the live chain (analyse before Rubber Band, post after); with
+// `stats` it prints what the changer is doing once per second of sound.
 func renderVoiceFile(input: String, output: String, halfSteps: Float, cartoon: Float, changes: [(Double, Float)],
-                     slowDeeper: Bool = false, levelFix: Bool = true) throws {
+                     slowDeeper: Bool = false, levelFix: Bool = true, changer: ChangerOptions? = nil) throws {
     let file = try AVAudioFile(forReading: URL(fileURLWithPath: input))
     let rate = file.processingFormat.sampleRate
     let length = Int(file.length)
@@ -1320,15 +1742,27 @@ func renderVoiceFile(input: String, output: String, halfSteps: Float, cartoon: F
         for i in 0..<length { mono[i] += data[i] / Float(used) }
     }
     var result = mono
-    if halfSteps != 0 || slowDeeper {
+    if halfSteps != 0 || slowDeeper || changer != nil {
         guard let stretcher = VoiceStretcher(rate: rate, halfSteps: halfSteps, cartoon: cartoon, slowDeeper: slowDeeper,
-                                             levelFix: levelFix) else {
+                                             levelFix: levelFix, changer: changer != nil, tune: changer?.tune ?? []) else {
             throw Problem(message: "Could not start Rubber Band.")
         }
+        // The voice changer, made and set up like the live chain's.
+        var voiceChanger: OpaquePointer?
+        if let changer {
+            guard let made = voicechanger_new(rate, 4096) else { throw Problem(message: "Could not start the voice changer.") }
+            voiceChanger = made
+            for (key, value) in changer.tune { _ = voicechanger_tune(made, key, value) }
+            voicechanger_set(made, changer.voice, changer.strength)
+            voicechanger_reset(made)
+        }
+        defer { if let voiceChanger { voicechanger_delete(voiceChanger) } }
+        var analysis = VoiceChangerPitch()
+        var nextStats = 1
         let speaking = SpeakingRate(sampleRate: rate)
         var nextReport = 1
         let block = 512
-        var skip = Int(rubberband_get_start_delay(stretcher.state))  // so the output lines up with the input
+        var skip = stretcher.startSkip  // so the output lines up with the input
         var chunk = [Float](repeating: 0, count: block)
         var piece = [Float](repeating: 0, count: 4096)
         result = []
@@ -1346,18 +1780,31 @@ func renderVoiceFile(input: String, output: String, halfSteps: Float, cartoon: F
                     nextReport += 1
                 }
             }
-            chunk.withUnsafeBufferPointer { p in
-                var pointer: UnsafePointer<Float>? = p.baseAddress
-                rubberband_process(stretcher.state, &pointer, UInt32(block), 0)
+            if let voiceChanger {
+                chunk.withUnsafeBufferPointer { voicechanger_analyse(voiceChanger, $0.baseAddress!, Int32(block), stretcher.extra, &analysis) }
+                stretcher.set(changerPitch: Double(analysis.pitchScale), formantScale: Double(analysis.formantScale))
             }
+            chunk.withUnsafeBufferPointer { stretcher.process($0.baseAddress!, block) }
             position += block
-            while rubberband_available(stretcher.state) > 0 {
-                let want = min(Int(rubberband_available(stretcher.state)), piece.count)
+            while stretcher.available > 0 {
+                let want = min(stretcher.available, piece.count)
                 let got = piece.withUnsafeMutableBufferPointer { stretcher.retrieve($0.baseAddress!, want) }
                 if got <= 0 { break }
                 let drop = min(skip, got)
                 skip -= drop
+                if let voiceChanger, got > drop {  // lined up exactly: output sample n came from input sample n
+                    let delay = position - (result.count + got - drop)
+                    piece.withUnsafeMutableBufferPointer {
+                        voicechanger_post(voiceChanger, $0.baseAddress! + drop, Int32(got - drop), Int32(delay))
+                    }
+                }
                 result.append(contentsOf: piece[drop..<got])
+            }
+            if let voiceChanger, changer?.stats == true, position >= nextStats * Int(rate), position <= length {
+                var s = VoiceChangerStats()
+                voicechanger_get_stats(voiceChanger, &s)
+                print(changerStatsLine(s, seconds: Double(nextStats)))
+                nextStats += 1
             }
         }
         if result.count > length { result.removeLast(result.count - length) }
@@ -1370,4 +1817,97 @@ func renderVoiceFile(input: String, output: String, halfSteps: Float, cartoon: F
     _ = result.withUnsafeBufferPointer { memcpy(buffer.floatChannelData![0], $0.baseAddress!, result.count * MemoryLayout<Float>.size) }
     let out = try AVAudioFile(forWriting: URL(fileURLWithPath: output), settings: format.settings)
     try out.write(from: buffer)
+}
+
+// One line about what the voice changer is doing (--changer-stats, --test-voice --watch).
+func changerStatsLine(_ s: VoiceChangerStats, seconds: Double) -> String {
+    let eq = withUnsafeBytes(of: s.eqDb) { Array($0.bindMemory(to: Float.self)) }.map { String(format: "%+.1f", $0) }.joined(separator: " ")
+    return String(format: "%4.0fs  changer: strength %.2f, speaker median %.0f Hz, shift %+.2f half-steps, shape x%.3f, voiced %.0f%%, creak %.1f%%, EQ [%@] dB, cost %.3f ms per 10 ms (worst %.3f)",
+                  seconds, s.strength, s.medianHz, s.semitones, s.formant, 100 * s.voicedShare, 100 * s.creakShare, eq, s.analyseMs, s.worstMs)
+}
+
+// Offline copy of the live chain's timing (--render-voice ... --live-sim [--buffer 128]): the file goes through the
+// same steps as VoiceChain.render, in callback-sized pieces (Rubber Band, the waiting sound in a VoiceRing, the voice
+// changer's analyse and post), and the result is written as the chain would send it (late by the chain's delay).
+// Prints the Rubber Band + waiting-sound delay (the part of the mic-to-Pitch-Shift-Mic delay this code adds) and
+// the ring's dry-outs, trims and replays. No devices are used.
+func simulateVoiceChain(input: String, output: String, halfSteps: Float, cartoon: Float, slowDeeper: Bool,
+                        changer: ChangerOptions?, blockFrames: Int) throws {
+    let file = try AVAudioFile(forReading: URL(fileURLWithPath: input))
+    let rate = file.processingFormat.sampleRate
+    let length = Int(file.length)
+    guard let source = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(length)) else {
+        throw Problem(message: "Could not read \(input).")
+    }
+    try file.read(into: source)
+    let channels = Int(file.processingFormat.channelCount), used = channels <= 2 ? channels : 1
+    var mono = [Float](repeating: 0, count: length)
+    for c in 0..<used { for i in 0..<length { mono[i] += source.floatChannelData![c][i] / Float(used) } }
+    guard let stretcher = VoiceStretcher(rate: rate, halfSteps: halfSteps, cartoon: cartoon, slowDeeper: slowDeeper,
+                                         changer: changer != nil, tune: changer?.tune ?? []), stretcher.running,
+          let voiceChanger = voicechanger_new(rate, Int32(max(4096, blockFrames))) else {
+        throw Problem(message: "Nothing to shift (0 half-steps and no voice), or Rubber Band didn't start.")
+    }
+    defer { voicechanger_delete(voiceChanger) }
+    if let changer {
+        for (key, value) in changer.tune { _ = voicechanger_tune(voiceChanger, key, value) }
+        voicechanger_set(voiceChanger, changer.voice, changer.strength)
+        voicechanger_reset(voiceChanger)
+    }
+    let ring = VoiceRing(rate: rate)
+    let speaking = SpeakingRate(sampleRate: rate)
+    var block = [Float](repeating: 0, count: blockFrames)
+    var piece = [Float](repeating: 0, count: 4096)
+    var analysis = VoiceChangerPitch()
+    var given = 0, returned = 0
+    var delays: [Double] = []  // ms, once per callback while sending
+    var result: [Float] = []
+    result.reserveCapacity(length + Int(rate))
+    var position = 0
+    while position < length + Int(rate / 2) {
+        let pitchBefore = stretcher.pitch
+        stretcher.glide(blockFrames)
+        if stretcher.pitch != pitchBefore { ring.amountChanged() }
+        for i in 0..<blockFrames { block[i] = position + i < length ? mono[position + i] : 0 }
+        position += blockFrames
+        if slowDeeper {
+            block.withUnsafeBufferPointer { speaking.listen($0.baseAddress!, blockFrames) }
+            stretcher.set(extra: speaking.extra)
+        }
+        if stretcher.changerActive {
+            block.withUnsafeBufferPointer { voicechanger_analyse(voiceChanger, $0.baseAddress!, Int32(blockFrames), stretcher.extra, &analysis) }
+            stretcher.set(changerPitch: Double(analysis.pitchScale), formantScale: Double(analysis.formantScale))
+        }
+        block.withUnsafeBufferPointer { stretcher.process($0.baseAddress!, blockFrames) }
+        given += blockFrames
+        while true {
+            let ready = min(stretcher.available, piece.count)
+            if ready <= 0 { break }
+            let got = piece.withUnsafeMutableBufferPointer { stretcher.retrieve($0.baseAddress!, ready) }
+            if got <= 0 { break }
+            returned += got
+            piece.withUnsafeBufferPointer { ring.write($0.baseAddress!, got) }
+        }
+        ring.settle(blockFrames)
+        block.withUnsafeMutableBufferPointer { ring.read(into: $0.baseAddress!, blockFrames) }
+        let delay = given - returned + ring.count + stretcher.heldBack  // as the live chain counts it
+        if stretcher.changerActive {
+            block.withUnsafeMutableBufferPointer { voicechanger_post(voiceChanger, $0.baseAddress!, Int32(blockFrames), Int32(delay)) }
+        }
+        if !ring.waiting { delays.append(Double(delay) / rate * 1000) }
+        for i in 0..<blockFrames { result.append(softLimit(block[i])) }
+    }
+    let steady = Array(delays.suffix(delays.count * 4 / 5)).sorted()  // after the first fifth (start-up trims)
+    if !steady.isEmpty {
+        print(String(format: "live-sim: callback %d, Rubber Band + waiting sound %.1f ms median (%.1f ... %.1f) over the last 80%%; dry-outs %d, trims %d (%.0f ms), replays %d (%.0f ms), margin %.1f ms",
+                     blockFrames, steady[steady.count / 2], steady.first!, steady.last!, ring.dryOuts, ring.trims,
+                     Double(ring.trimmed) / rate * 1000, ring.replays, Double(ring.replayed) / rate * 1000, Double(ring.margin) / rate * 1000))
+    }
+    guard let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1),
+          let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(max(1, result.count))) else {
+        throw Problem(message: "Could not write \(output).")
+    }
+    buffer.frameLength = AVAudioFrameCount(result.count)
+    _ = result.withUnsafeBufferPointer { memcpy(buffer.floatChannelData![0], $0.baseAddress!, result.count * MemoryLayout<Float>.size) }
+    try AVAudioFile(forWriting: URL(fileURLWithPath: output), settings: format.settings).write(from: buffer)
 }
