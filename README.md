@@ -63,8 +63,25 @@ More help: [windows/README.md](windows/README.md).
 - Slide from **Light** to **Full** to choose how strong the change is.
 - Turn on **Realistic** for an AI voice that sounds more like a real person (Macs with Apple silicon). It adds about a quarter of a second of delay. The first time, it takes up to half a minute to get ready; the plain voice changer plays meanwhile. With Realistic on, the slider moves only the pitch, from **Your pitch** to the voice's.
 - Only one at a time: a voice sets your pitch, so turning one on puts the amount at 0 and turns **Deeper when slow** off. Changing the amount or turning **Deeper when slow** on turns the voice changer off. The **Natural**…**Cartoon** slider is not used while a voice is on. **Test** and the Soundboard still work.
+- Add your own voices with the **⋯** button next to the voice menu (see [Your own voices](#your-own-voices)).
 
 All of them can be on at the same time. Closing the window keeps Pitch Shift running. Quit it with ⌘Q.
+
+## Your own voices (Mac)
+
+The voice changer can also use voices you download. They sound best with **Realistic** on (Macs with Apple silicon).
+
+- **Where to find voices:** people share RVC voices on sites like [Hugging Face](https://huggingface.co/models?search=rvc) (search for "RVC v2"). You need the voice's `.pth` file (it often comes in a `.zip` with an `.index` file, which Pitch Shift doesn't need). Voices made at 32, 40 or 48 kHz work; older "v1" voices don't.
+- **Turn it into a Pitch Shift voice:** open Terminal, paste this line, type a space, drag the `.pth` (or `.zip`) file onto the Terminal window, and press Return:
+
+```
+curl -fsSL https://raw.githubusercontent.com/Gromhogg/pitch-shift/main/tools/convert-voice.sh | bash -s --
+```
+
+- It asks how high the voice is (High for most women's voices, Low for most men's). The first time, it downloads what it needs (about 0.5 GB, a few minutes) into `~/Library/Application Support/Pitch Shift/Converter` (delete that folder to remove it). It never asks for your password. After that, each voice takes about half a minute.
+- The new voice shows up in the Voice changer's voice menu. Pick it and turn on **Realistic**.
+- **The Voices folder:** click the **⋯** button next to the voice menu, then **Open Voices Folder**. Each voice is a folder in there. In the same menu, **Add Voice…** adds a voice folder (or a `.zip` of one) that someone shared with you, and **Rename…** and **Remove** change the voice you picked. Built-in voices can't be removed.
+- Voices copied from a real person, and fan-made voices of characters, are your own responsibility: only use voices you're allowed to use, and don't pretend to be someone you're not.
 
 ## If something goes wrong
 
