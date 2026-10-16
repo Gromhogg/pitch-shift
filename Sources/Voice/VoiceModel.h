@@ -3,7 +3,8 @@
 // using Natural mode.
 //   sound thread: voicestream_push (copies the mic + the pitch from voicechanger_analyse) and voicestream_pull (takes
 //   the finished AI voice, a fixed delay later; while loading, on a late piece or an error it plays Natural mode's
-//   sound delayed to the same fixed delay instead, crossfaded; never silence and never the raw mic).
+//   sound delayed to the same fixed delay instead, crossfaded; never the raw mic). A new stream plays at its fixed
+//   delay from the start: silence until Natural's sound reaches it, then the AI voice from its first piece.
 //   worker thread (made by voicestream_new): resample, encoder, generator, crossfade into the output ring.
 //
 // Plain C API (Objective-C++ inside), so Swift can call it through the bridging header.
@@ -50,7 +51,8 @@ typedef struct VoiceStreamStats {
     double worstHopMs;       // ... and worst
     double cpuShare;         // worker thread's share of one core
     int lookaheadMs;         // the look-ahead the pieces are made with now
-    int64_t switches;        // look-ahead switches made (at quiet moments or after waiting a few seconds)
+    int64_t switches;        // look-ahead switches made (at quiet moments or after waiting 1.2 s)
+    int aiNow;               // 1 = the AI voice is what plays now; 0 = Natural fills in (starting, loading, late)
 } VoiceStreamStats;
 
 // Loads the encoder and the voice (.mlmodelc folders). computeUnits: VOICEMODEL_COMPUTE_*. Slow the first time
@@ -85,7 +87,8 @@ int voicestream_set_model(VoiceStream *stream, VoiceModel *model);
 
 // Asks for another look-ahead (ms, rounded to 10 ms, limited to what the model can do) without making a new stream
 // (any thread). The AI voice keeps playing; the switch is made between two pieces at the next quiet moment (so
-// nothing is heard twice or lost), or after a few seconds at the latest (then a crossfade). Offline: right away.
+// nothing is heard twice or lost), or after 1.2 s at the latest (then a crossfade; made within 1.5 s of the ask).
+// Offline: right away.
 void voicestream_set_lookahead(VoiceStream *stream, int lookaheadMs);
 
 // The intonation the pitch frames were mapped with (1 + strength * (voice intonation - 1); 0 = unknown). The stream
