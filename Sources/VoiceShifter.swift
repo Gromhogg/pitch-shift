@@ -177,6 +177,65 @@ struct SoundMix {
     return x < 0 ? -eased : eased
 }
 
+// What Pitch Shift Mic sends after the voice: the Soundboard's sound mixed in, and the mic muted while a sound plays
+// on the Mac's own speakers. Used on the voice chain's sound thread (VoiceChain) and by the offline check
+// (--render-sounds), so both do exactly the same. Makes no memory and never waits.
+struct CallMix {
+    private(set) var mix: SoundMix
+    private var muteMic = false   // the playing sound is on the Mac's speakers
+    private var muteLeft = 0      // samples the mic stays muted after a sound on the speakers ends
+    private var micGain: Float = 1
+    private let fadeStep: Float   // 10 ms from full to nothing
+    private let muteAfter: Int    // 150 ms
+
+    // `take`: the SoundPlay's take now (a sound already playing isn't picked up).
+    init(rate: Double, take: Int) {
+        mix = SoundMix(rate: rate, take: take)
+        fadeStep = Float(1 / (0.01 * rate))
+        muteAfter = Int(rate * 0.15)
+    }
+
+    // The Soundboard's latest state (read once per callback): a new sound, Stop, or a new volume.
+    mutating func follow(_ play: SoundPlay) {
+        if play.take != mix.take {
+            // A new sound, or Stop: the one playing fades out (SoundMix). Cutting one on the speakers starts the
+            // 150 ms hold.
+            if mix.start(play) && muteMic { muteLeft = muteAfter }
+            if mix.playing { muteMic = play.muteMic }
+        }
+        mix.follow(volume: play.volume)
+    }
+
+    // A sound playing on the Mac's speakers: the mic would hear it and send it into the call a second time, so the
+    // mic fades out (10 ms) while it plays and for 150 ms after. Headphones: nothing is muted.
+    mutating func muteIfNeeded(_ source: UnsafeMutablePointer<Float>, _ frames: Int) {
+        let muted = (mix.playing && muteMic) || muteLeft > 0
+        if muted || micGain < 1 {
+            for i in 0..<frames {
+                micGain = muted ? max(0, micGain - fadeStep) : min(1, micGain + fadeStep)
+                source[i] *= micGain
+            }
+        }
+        muteLeft = max(0, muteLeft - frames)
+    }
+
+    // One sample out: the voice (`shifting`: it went through the pitch change) with the sound mixed in.
+    @inline(__always) mutating func out(_ voice: Float, shifting: Bool) -> Float {
+        if mix.active {
+            var ended = false
+            let value = softLimit(voice + mix.next(&ended))
+            if ended && muteMic { muteLeft = muteAfter }  // played to the end
+            return value
+        } else if shifting {
+            // The shifted voice can peak a few dB above the mic: ease its loudest moments instead of cutting them
+            // off at full scale (a hard cut sounds harsh and buzzy).
+            return softLimit(voice)
+        } else {
+            return max(-1, min(1, voice))
+        }
+    }
+}
+
 // Rubber Band settings for the voice (the Windows version uses the same ones, with a Natural/Cartoon switch).
 // Not the "live shifter" (rubberband_live_*): it only keeps the voice's shape (formants) up to about 10 kHz and
 // moves everything above that up like Cartoon, which put a loud hiss on every word in Natural ("buzzy", like a Z).
@@ -519,12 +578,7 @@ final class VoiceChain {
     private let speaking: SpeakingRate  // "Deeper when slow"
     // Sound effects (Soundboard): mixed in after the voice, never through the mic or the pitch change.
     private let sounds: OSAllocatedUnfairLock<SoundPlay>
-    private var mix: SoundMix
-    private var muteMic = false   // the playing sound is on the Mac's speakers
-    private var muteLeft = 0      // samples the mic stays muted after a sound on the speakers ends
-    private var micGain: Float = 1
-    private let fadeStep: Float   // 10 ms from full to nothing
-    private let muteAfter: Int    // 150 ms
+    private var callMix: CallMix
     // For the command-line test: replaces the mic with a made-up sound.
     var testSource: ((UnsafeMutablePointer<Float>, Int) -> Void)?
     private(set) var firstInputTime: UInt64 = 0  // host time of the first mic sample (for the delay test)
@@ -560,9 +614,7 @@ final class VoiceChain {
         stretcher = made
         speaking = SpeakingRate(sampleRate: rate)
         self.sounds = sounds
-        mix = SoundMix(rate: rate, take: sounds.withLock { $0.take })  // a sound already playing when the chain starts isn't sent
-        fadeStep = Float(1 / (0.01 * rate))
-        muteAfter = Int(rate * 0.15)
+        callMix = CallMix(rate: rate, take: sounds.withLock { $0.take })  // a sound already playing when the chain starts isn't sent
         piece = .allocate(capacity: maxPiece)
         ring = VoiceRing(rate: rate)
 
@@ -675,20 +727,9 @@ final class VoiceChain {
             for i in 0..<frames { source[i] = 0 }
         }
 
-        // A sound playing on the Mac's speakers: the mic would hear it and send it into the call a second time, so
-        // the mic fades out (10 ms) while it plays and for 150 ms after. Headphones: nothing is muted.
-        if let play = sounds.withLockIfAvailable({ $0 }) {
-            if play.take != mix.take { startSound(play) }
-            mix.follow(volume: play.volume)
-        }
-        let muted = (mix.playing && muteMic) || muteLeft > 0
-        if muted || micGain < 1 {
-            for i in 0..<frames {
-                micGain = muted ? max(0, micGain - fadeStep) : min(1, micGain + fadeStep)
-                source[i] *= micGain
-            }
-        }
-        muteLeft = max(0, muteLeft - frames)
+        // The Soundboard's sound; on the Mac's speakers the mic is muted while it plays (CallMix).
+        if let play = sounds.withLockIfAvailable({ $0 }) { callMix.follow(play) }
+        callMix.muteIfNeeded(source, frames)
 
         if applied.slowDeeper {
             speaking.listen(source, frames)
@@ -704,18 +745,7 @@ final class VoiceChain {
             ring.read(into: source, frames)
         }
         for i in 0..<frames {
-            var value = applied.silent ? 0 : source[i]
-            if mix.active {
-                var ended = false
-                value = softLimit(value + mix.next(&ended))
-                if ended && muteMic { muteLeft = muteAfter }  // played to the end
-            } else if shifting {
-                // The shifted voice can peak a few dB above the mic: ease its loudest moments instead of cutting
-                // them off at full scale (a hard cut sounds harsh and buzzy).
-                value = softLimit(value)
-            } else {
-                value = max(-1, min(1, value))
-            }
+            let value = callMix.out(applied.silent ? 0 : source[i], shifting: shifting)
             for b in micOutputStreams..<outs.count {
                 guard let d = outs[b].mData?.assumingMemoryBound(to: Float.self) else { continue }
                 let ch = Int(outs[b].mNumberChannels)
@@ -746,12 +776,6 @@ final class VoiceChain {
             s.overloads = overloads
             s.lowest = now.sending ? min(lowest, now.ring) : lowest
         }
-    }
-
-    // A new sound, or Stop: the one playing fades out (SoundMix). Cutting one on the speakers starts the 150 ms hold.
-    private func startSound(_ play: SoundPlay) {
-        if mix.start(play) && muteMic { muteLeft = muteAfter }
-        if mix.playing { muteMic = play.muteMic }
     }
 
     // Gives one callback's sound to Rubber Band and moves everything it has ready into the ring.

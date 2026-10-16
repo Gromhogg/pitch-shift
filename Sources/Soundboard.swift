@@ -902,7 +902,59 @@ final class SoundboardPanel: NSObject, NSWindowDelegate, NSPopoverDelegate {
     @objc private func stopClicked() { board.stop() }
 }
 
-// MARK: Checks (--test-sounds)
+// MARK: Checks (--test-sounds, --render-sounds)
+
+// Offline check (--render-sounds): what Pitch Shift Mic would send while the Soundboard plays over a voice, made with
+// the voice chain's own mixing (CallMix) in callbacks of `buffer` samples, with no devices. `voice` is one channel at
+// `rate` (already shifted if wanted; `shifted`: it went through the pitch change, which the chain eases at its
+// loudest). Each start is a click on the sound; like the app, the sound is cleared 0.1 s after its end, unless the
+// next click comes first. The sound thread sees a click at the start of its next callback. Also times the mixing
+// part of each callback (nanoseconds; worst and average, with a sound playing and without).
+func renderSounds(voice: [Float], rate: Double, shifted: Bool, clip: SoundClip, starts: [Double], volume: Float,
+                  speakers: Bool, buffer: Int) -> (out: [Float], timing: String) {
+    var events: [(at: Int, play: SoundPlay)] = []
+    let sorted = starts.sorted()
+    for (n, start) in sorted.enumerated() {
+        let at = Int(start * rate)
+        events.append((at, SoundPlay(samples: clip.samples, count: clip.count, rate: clip.rate, take: 0, muteMic: speakers, volume: volume)))
+        let end = at + Int((clip.seconds + 0.1) * rate)
+        if n + 1 == sorted.count || Int(sorted[n + 1] * rate) > end { events.append((end, SoundPlay())) }
+    }
+    var state = SoundPlay()
+    var callMix = CallMix(rate: rate, take: state.take)
+    var out = [Float](repeating: 0, count: voice.count)
+    var block = [Float](repeating: 0, count: buffer)
+    var next = 0
+    var worst = [UInt64](repeating: 0, count: 2), total = [UInt64](repeating: 0, count: 2), calls = [Int](repeating: 0, count: 2)
+    var position = 0
+    while position < voice.count {
+        let frames = min(buffer, voice.count - position)
+        while next < events.count && events[next].at <= position {
+            var play = events[next].play
+            play.take = state.take + 1
+            state = play
+            next += 1
+        }
+        for i in 0..<frames { block[i] = voice[position + i] }
+        let started = DispatchTime.now().uptimeNanoseconds
+        let playing = callMix.mix.active ? 1 : 0
+        block.withUnsafeMutableBufferPointer { b in
+            callMix.follow(state)
+            callMix.muteIfNeeded(b.baseAddress!, frames)
+            for i in 0..<frames { b[i] = callMix.out(b[i], shifting: shifted) }
+        }
+        let took = DispatchTime.now().uptimeNanoseconds - started
+        worst[playing] = max(worst[playing], took)
+        total[playing] += took
+        calls[playing] += 1
+        for i in 0..<frames { out[position + i] = block[i] }
+        position += frames
+    }
+    func line(_ k: Int) -> String {
+        calls[k] == 0 ? "-" : String(format: "worst %d ns, average %.0f ns over %d callbacks", worst[k], Double(total[k]) / Double(calls[k]), calls[k])
+    }
+    return (out, "mixing time per callback of \(buffer): with a sound \(line(1)); without \(line(0))")
+}
 
 // r[lag] = Σ a[lag + i]·b[i], for every lag where b fits inside a (with Accelerate's FFT).
 func correlate(_ a: [Float], _ b: [Float]) -> [Float] {
