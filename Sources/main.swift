@@ -46,6 +46,15 @@
 //                                              Treble as if it were playing; --tone-db sets bass and treble in dB)
 //   --render-file IN OUT [--steps 5] [--advanced] [--steps-at "4:8,8:-5"] [--tone-amount 0.5] [--tone-at "2:1,4:-1"]
 //                [--tone-db 6,-6]              shifts a sound file with the app's own code (normal or advanced)
+//   --render-file ... --as-free, --render-voice ... --as-free
+//                                              as the free version plays it (Pitch Shift Pro locked): Bass ↔ Treble in
+//                                              the middle, the voice style at Cartoon, Deeper when slow off
+// Pitch Shift Pro (Sources/Pro.swift, notes/paid-unlock-plan.md):
+//   --pro-status                               locked or unlocked, and why
+//   --pro-key KEY                              unlocks with a key, like the unlock window (checks typos, asks the server,
+//                                              keeps the signed token)
+//   --pro-reset                                locks Pro again (forgets the key and token)
+//                [--pro-file F] [--pro-server URL]   checks only: keep the key and token in F, ask that server
 import AppKit
 import AVFoundation
 import CoreAudio
@@ -61,8 +70,17 @@ func arg(_ name: String) -> String? {
 // drop, light, tone, slow; --cartoon-amount sets the voice style slider; sounds opens the Soundboard with example
 // names, rename shows the first name being changed, volume the first sound's volume slider and drop files being
 // dragged over it; "tone" shows Advanced processing on, and --tone-amount sets the Bass ↔ Treble slider; slow turns
-// on "Deeper when slow").
+// on "Deeper when slow"; pro-locked shows Pitch Shift Pro locked, pro-unlocked unlocked (the default for pictures),
+// pro-unlock the unlock window, with pro-typo a key with a typo in it, with pro-done the "Unlocked" message, with
+// pro-alone as its own window instead of a sheet).
 let preview = arg("--preview")
+let previewStates = Set((preview ?? "").split(separator: ",").map(String.init))
+
+// Pitch Shift Pro. Checks only: --pro-file F keeps the key and token in F, --pro-server URL asks that server.
+if let path = arg("--pro-file") { Pro.shared.file = URL(fileURLWithPath: path) }
+if let server = arg("--pro-server") { Pro.shared.server = server }
+// --as-free: --render-file and --render-voice play as the free version does.
+let asFree = args.contains("--as-free")
 
 var signalSources: [DispatchSourceSignal] = []
 func onQuitSignals(_ handler: @escaping () -> Void) {
@@ -177,6 +195,34 @@ if args.contains("--list") {
     exit(0)
 }
 
+if args.contains("--pro-status") {
+    Pro.shared.load()
+    print(Pro.shared.status)
+    exit(0)
+}
+
+if args.contains("--pro-reset") {
+    Pro.shared.reset()
+    print("Pro: locked (removed \(Pro.shared.file.path))")
+    exit(0)
+}
+
+if let typed = arg("--pro-key") {
+    Pro.shared.load()
+    Pro.shared.activate(typed) { outcome in
+        switch outcome {
+        case .unlocked:
+            print("Unlocked. \(Pro.shared.status)")
+            exit(0)
+        case .problem(let text):
+            print("Not unlocked: \(text)")
+            exit(1)
+        }
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 30) { print("Not unlocked: no answer in 30 s"); exit(1) }
+    dispatchMain()
+}
+
 // Read only: once a second, the sound output's sample rate and streams, its own mic (Bluetooth headphones), and
 // every app that is recording and from which devices. Headphones in call mode show 8000-24000 Hz.
 if args.contains("--watch-output") {
@@ -214,9 +260,11 @@ if let input = arg("--render-file") {
     }
     let started = Date()
     do {
+        // --as-free: Bass ↔ Treble stays in the middle, as in the free version.
         try renderFile(input: input, output: args[i + 2], halfSteps: arg("--steps").flatMap(Float.init) ?? 2,
                        advanced: args.contains("--advanced"), changes: changes,
-                       tone: toneDbArg ?? AdvancedProcessor.toneDb(tilt: toneArg ?? 0), toneChanges: toneChanges)
+                       tone: asFree ? AdvancedProcessor.toneDb(tilt: Free.tone) : toneDbArg ?? AdvancedProcessor.toneDb(tilt: toneArg ?? 0),
+                       toneChanges: asFree ? [] : toneChanges)
         print(String(format: "wrote %@ (%.1f s)", args[i + 2], Date().timeIntervalSince(started)))
         exit(0)
     } catch {
@@ -239,8 +287,10 @@ if let input = arg("--render-voice") {
         return (t, n)
     }
     do {
+        // --as-free: the style stays at Cartoon and Deeper when slow off, as in the free version.
         try renderVoiceFile(input: input, output: args[i + 2], halfSteps: arg("--steps").flatMap(Float.init) ?? 3,
-                            cartoon: cartoonArg ?? 0, changes: changes, slowDeeper: slowDeeperArg, levelFix: preset != "old")
+                            cartoon: asFree ? Free.cartoon : cartoonArg ?? 0, changes: asFree ? [] : changes,
+                            slowDeeper: asFree ? Free.slowDeeper : slowDeeperArg, levelFix: preset != "old")
         print("wrote \(args[i + 2])")
         exit(0)
     } catch {
@@ -569,6 +619,15 @@ if let path = arg("--test-sounds") {
         exit(0)
     }
     dispatchMain()
+}
+
+// Pitch Shift Pro: pictures show the state asked for (unlocked unless pro-locked or the unlock window is asked for)
+// and touch no file; the app reads its saved token.
+if preview != nil {
+    let locked = previewStates.contains("pro-locked") || (previewStates.contains("pro-unlock") && !previewStates.contains("pro-unlocked"))
+    Pro.shared.pretend(unlocked: !locked)
+} else {
+    Pro.shared.load(retry: true)
 }
 
 let app = NSApplication.shared
