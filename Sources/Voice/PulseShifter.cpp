@@ -42,6 +42,7 @@ struct Tuning {
     float holdAp = 0.5f;       // ... if its dip is below this ...
     float holdRangeDb = 20;    // ... and it's within this far of the recent loudest
     float usualSeconds = 2;    // how fast the usual pitch follows the voice
+    float window = 1;          // voiced pieces are this share of two input periods long (shorter = smoother)
 };
 
 struct TuneKey {
@@ -56,6 +57,7 @@ const TuneKey kKeys[] = {
     {"pulseUnvoicedMs", &Tuning::unvoicedMs}, {"pulseGainPow", &Tuning::gainPow},
     {"pulseCreakRatio", &Tuning::creakRatio}, {"pulseHoldMs", &Tuning::holdMs}, {"pulseHoldAp", &Tuning::holdAp},
     {"pulseHoldRangeDb", &Tuning::holdRangeDb}, {"pulseUsualSeconds", &Tuning::usualSeconds},
+    {"pulseWindow", &Tuning::window},
 };
 
 struct Biquad {
@@ -470,9 +472,9 @@ struct PulseShifter {
             double halfLen, step;
             float gain = 1;
             if (m.voiced) {
-                halfLen = m.period / shape;
+                halfLen = t.window * m.period / shape;
                 step = m.period / pitch;
-                gain = (float)std::exp(-t.gainPow * std::log(pitch / shape));
+                gain = (float)std::exp(-t.gainPow * std::log(t.window * pitch / shape));
             } else {
                 halfLen = unvoiced;
                 step = unvoiced;
