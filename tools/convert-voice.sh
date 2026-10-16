@@ -10,7 +10,7 @@
 # in all) into ~/Library/Application Support/Pitch Shift/Converter/. Nothing else on the Mac changes, and it never
 # needs your password. Delete that folder to remove them. The new voice lands in
 # ~/Library/Application Support/Pitch Shift/Voices/ and shows up in Pitch Shift's voice menu.
-# Needs a Mac with Apple silicon (Realistic voices run only there).
+# Needs a Mac with Apple silicon (AI voices run only there).
 set -euo pipefail
 
 CONVERTER="${PITCH_SHIFT_CONVERTER_HOME:-$HOME/Library/Application Support/Pitch Shift/Converter}"
@@ -23,7 +23,7 @@ fail() { printf "Can't convert: %s\n" "$*" >&2; exit 1; }
 
 [ "$(uname -s)" = Darwin ] || fail "this converter is for Macs."
 [ "$(sysctl -n hw.optional.arm64 2>/dev/null || echo 0)" = 1 ] \
-  || fail "Realistic voices need a Mac with Apple silicon (M1 or newer), so there is nothing to convert for on this Mac."
+  || fail "AI voices need a Mac with Apple silicon (M1 or newer), so there is nothing to convert for on this Mac."
 
 model=""
 pitch=""

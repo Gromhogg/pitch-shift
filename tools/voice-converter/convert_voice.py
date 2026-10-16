@@ -2,11 +2,17 @@
 """Turns a downloaded RVC v2 voice (a .pth file, or a .zip with one inside) into a Pitch Shift voice folder.
 
   python3 convert_voice.py MODEL.pth [--name NAME] [--pitch high|medium|low|HZ] [--voices-dir DIR] [--app APP]
+                           [--ahead-ms 700]
 
 Writes DIR/<id>/ (default DIR: ~/Library/Application Support/Pitch Shift/Voices):
   voice.json      the voice's name, its Natural mode settings (from --pitch) and its AI voice; credits = the file name
-  <id>.mlmodelc   the AI voice, Core ML with 8-bit weights, made for Pitch Shift's Realistic mode
-Pitch Shift's own speech reader (contentvec.mlmodelc, inside the app) is used with it, so it is not copied.
+  <id>.mlmodelc   the AI voice, Core ML with 8-bit weights, made for Pitch Shift's AI voice ("Faster <-> More real")
+Pitch Shift's own speech reader (contentvec_ahead.mlmodelc, inside the app) is used with it, so it is not copied.
+
+The AI voice is made in the look-ahead shape of Pitch Shift 3.1 (as research/voicechanger/convert/convert_generator.py
+--context-ms 1000 --ahead-ms 700 --right-ms 40): one file serves every look-ahead from 0 to 700 ms; the window is
+1.92 s (T 192 frames), the flow runs over all of it and the decoder only on the 31 frames the app picks (input
+"pick"). --ahead-ms 0 makes the first shape instead (Pitch Shift 3.0, contentvec.mlmodelc; no look-ahead).
 
 Accepts RVC v2 voices made at 32, 40 or 48 kHz (RVC WebUI, Applio and their forks). Refuses RVC v1 voices and
 voices made without pitch. Usually run by tools/convert-voice.sh, which sets up Python and the packages first.
@@ -14,9 +20,9 @@ voices made without pitch. Usually run by tools/convert-voice.sh, which sets up 
 The model code below is re-written from RVC-Project/Retrieval-based-Voice-Conversion-WebUI (tag 2.2.231006,
 infer/lib/infer_pack/*.py, MIT License, Copyright (c) 2023 liujing04, 源文雨, Ftps), inference only: masks dropped
 (every frame of the fixed window is used), weight norm folded into plain weights, the NSF sine/noise source moved out
-of the model (the app makes it, keeping the phase exact across pieces), the speaker baked in, and only the last frames
+of the model (the app makes it, keeping the phase exact across pieces), the speaker baked in, and only some frames
 decoded (as RVC's real-time code does). Keep the window layout and the model's inputs in step with
-Sources/Voice/VoiceModel.mm and the app's contentvec.mlmodelc.
+Sources/Voice/VoiceModel.mm and the app's contentvec_ahead.mlmodelc.
 """
 import argparse
 import json
@@ -37,26 +43,38 @@ import torch.nn.functional as F
 
 # ------------------------------------------------------------------------------------------- the window layout
 
-# All in 10 ms frames. The app's built-in voices use a 160 ms hop with 1 s of past sound (context 1010 ms after
-# rounding T to an even number). The context is read from the app's contentvec.mlmodelc when it can be found.
+# All in 10 ms frames. The app's built-in voices use a 160 ms hop with 1 s of past sound, plus (look-ahead shape,
+# Pitch Shift 3.1) up to 700 ms of look-ahead in the same window, and 40 ms decoded after each piece and dropped
+# (context 1710 ms after rounding T to an even number: T 192). The window is read from the app's speech reader
+# (contentvec_ahead.mlmodelc) when it can be found.
 HOP_MS, XFADE_MS, SOLA_MS, MARGIN_MS, DEFAULT_CONTEXT_MS = 160, 40, 10, 60, 1000
+DEFAULT_AHEAD_MS, RIGHT_MS = 700, 40
 
 
-def window_layout(hop_ms=HOP_MS, context_ms=DEFAULT_CONTEXT_MS, xfade_ms=XFADE_MS, sola_ms=SOLA_MS, margin_ms=MARGIN_MS):
-    H, C, X, S, M = hop_ms // 10, context_ms // 10, xfade_ms // 10, sola_ms // 10, margin_ms // 10
+def window_layout(hop_ms=HOP_MS, context_ms=DEFAULT_CONTEXT_MS, xfade_ms=XFADE_MS, sola_ms=SOLA_MS, margin_ms=MARGIN_MS,
+                  ahead_ms=0, right_ms=RIGHT_MS):
+    """ahead_ms 0: the first shape (the flow on the last DEC + 24 frames, the decoder on the last DEC). ahead_ms > 0:
+    the window grows by ahead_ms, the flow covers all of it (FLOW = T) and the decoder runs on DEC = M + H + X + S + R
+    frames the app picks (as research/voicechanger/convert/convert_generator.py --ahead-ms)."""
+    H, C, X, S, M, A = hop_ms // 10, context_ms // 10, xfade_ms // 10, sola_ms // 10, margin_ms // 10, ahead_ms // 10
+    C += A
     T = C + X + S + H
     if T % 2:
         C += 1
         T += 1
-    return dict(T=T, H=H, C=C, X=X, S=S, M=M, DEC=H + X + S + M, FLOW=H + X + S + M + 24)
+    if A:
+        R = right_ms // 10
+        assert T - A - (H + X + S) - M >= 0, "look-ahead too big for the window"
+        return dict(T=T, H=H, C=C, X=X, S=S, M=M, A=A, R=R, DEC=M + H + X + S + R, FLOW=T)
+    return dict(T=T, H=H, C=C, X=X, S=S, M=M, A=0, R=0, DEC=H + X + S + M, FLOW=H + X + S + M + 24)
 
 
-def app_window_frames(app):
-    """T (10 ms frames) of the app's speech reader, from contentvec.mlmodelc/model.mil ("audio" is [1, T*160])."""
+def app_window_frames(app, reader="contentvec_ahead.mlmodelc"):
+    """T (10 ms frames) of the app's speech reader, from <reader>/model.mil ("audio" is [1, T*160]), and the app."""
     for base in [app, "/Applications/Pitch Shift.app", os.path.expanduser("~/Applications/Pitch Shift.app")]:
         if not base:
             continue
-        mil = os.path.join(base, "Contents/Resources/Voices/contentvec.mlmodelc/model.mil")
+        mil = os.path.join(base, "Contents/Resources/Voices", reader, "model.mil")
         if not os.path.isfile(mil):
             continue
         with open(mil, "r", errors="replace") as f:
@@ -412,6 +430,27 @@ class RVCGenerator(nn.Module):
         del self.dec.cond
 
 
+class AheadGenerator(nn.Module):
+    """The look-ahead shape (Pitch Shift 3.1): features (1, T/2, 768), pitch (1, T), source (1, 1, DEC*upp),
+    noise (1, 192, T), pick (DEC) consecutive window frame numbers (oldest = 0) -> audio (1, DEC*upp) of the picked
+    frames. The text encoder and the flow run over the whole window (cheap), the decoder only on the picked frames, so
+    the app chooses per piece how far from the newest end its sound comes (the look-ahead) with one file."""
+
+    def __init__(self, g):
+        super().__init__()
+        self.g = g
+
+    def forward(self, features, pitch, source, noise, pick):
+        g = self.g
+        st = g.enc_p(features, pitch)
+        c = st.shape[1] // 2
+        z = st[:, :c] + torch.exp(st[:, c:]) * noise * g.noise_scale
+        for f in reversed(g.flows):
+            z = torch.flip(z, [1])
+            z = f.reverse(z, g.g)
+        return g.dec(torch.index_select(z, 2, pick), source, g.g).squeeze(1)
+
+
 # ------------------------------------------------------------------------------------------- Core ML
 
 def quantize(mlmodel):
@@ -442,43 +481,57 @@ def example_inputs(g, L, seed=0):
     pitch = torch.from_numpy(r.integers(1, 200, (1, T)).astype(np.int64))
     src = torch.from_numpy((0.1 * np.sin(np.arange(DEC * g.upp) * 2 * np.pi * 200 / g.sr)).astype(np.float32)[None, None])
     noise = torch.from_numpy(r.standard_normal((1, 192, FLOW)).astype(np.float32))
+    if L["A"]:
+        return feats, pitch, src, noise, torch.arange(T - DEC, T, dtype=torch.int64)
     return feats, pitch, src, noise
 
 
 def check_inputs(g, L, seed=1):
     """Speech-like inputs for the check: slowly changing features and a steady pitch (random features make a chaotic,
-    quiet sound that no 16-bit copy follows closely)."""
+    quiet sound that no 16-bit copy follows closely). Look-ahead shape: the frames for 150 ms of look-ahead (the
+    app's default)."""
     r = np.random.default_rng(seed)
     T, DEC, FLOW = L["T"], L["DEC"], L["FLOW"]
     feats = np.cumsum(r.standard_normal((1, T // 2, 768)).astype(np.float32) * 0.05, axis=1)
     pitch = np.full((1, T), 60, np.int64)  # coarse bin 60 = about 180 Hz
     src = (0.1 * np.sin(np.arange(DEC * g.upp) * 2 * np.pi * 180 / g.sr)).astype(np.float32)[None, None]
     noise = r.standard_normal((1, 192, FLOW)).astype(np.float32)
-    return torch.from_numpy(feats), torch.from_numpy(pitch), torch.from_numpy(src), torch.from_numpy(noise)
+    out = [torch.from_numpy(feats), torch.from_numpy(pitch), torch.from_numpy(src), torch.from_numpy(noise)]
+    if L["A"]:
+        la = min(15, L["A"])
+        out.append(torch.arange(T - DEC - la, T - la, dtype=torch.int64))
+    return tuple(out)
 
 
 def convert(g, L, work, compiled_dst):
     """Traces, converts, quantises and compiles the generator into compiled_dst (.mlmodelc). Returns the check's SNR."""
     import coremltools as ct
+    model = AheadGenerator(g).eval() if L["A"] else g
     ex = example_inputs(g, L)
     check = check_inputs(g, L)
     with torch.no_grad():
-        traced = torch.jit.trace(g, ex)
-        reference = g(*check).numpy()
+        traced = torch.jit.trace(model, ex)
+        reference = model(*check).numpy()
     T, DEC, FLOW = L["T"], L["DEC"], L["FLOW"]
-    ml = ct.convert(traced, inputs=[ct.TensorType(name="features", shape=(1, T // 2, 768), dtype=np.float32),
-                                    ct.TensorType(name="pitch", shape=(1, T), dtype=np.int32),
-                                    ct.TensorType(name="source", shape=(1, 1, DEC * g.upp), dtype=np.float32),
-                                    ct.TensorType(name="noise", shape=(1, 192, FLOW), dtype=np.float32)],
+    inputs = [ct.TensorType(name="features", shape=(1, T // 2, 768), dtype=np.float32),
+              ct.TensorType(name="pitch", shape=(1, T), dtype=np.int32),
+              ct.TensorType(name="source", shape=(1, 1, DEC * g.upp), dtype=np.float32),
+              ct.TensorType(name="noise", shape=(1, 192, FLOW), dtype=np.float32)]
+    if L["A"]:
+        inputs.append(ct.TensorType(name="pick", shape=(DEC,), dtype=np.int32))
+    ml = ct.convert(traced, inputs=inputs,
                     outputs=[ct.TensorType(name="audio", dtype=np.float32)],
                     minimum_deployment_target=ct.target.macOS14, convert_to="mlprogram",
                     compute_precision=ct.precision.FLOAT16)
     ml = quantize(ml)
-    ml.short_description = "RVC v2 voice for Pitch Shift, %d Hz, hop %d ms: T %d, DEC %d, FLOW %d" % (g.sr, L["H"] * 10, T, DEC, FLOW)
-    ml.user_defined_metadata.update({"rate": str(g.sr), "upp": str(g.upp), "window_frames": str(T), "dec_frames": str(DEC),
-                                     "flow_frames": str(FLOW), "hop_ms": str(L["H"] * 10), "context_ms": str(L["C"] * 10),
-                                     "sid": "0", "xfade_ms": str(L["X"] * 10), "sola_ms": str(L["S"] * 10),
-                                     "margin_ms": str(L["M"] * 10)})
+    ml.short_description = "RVC v2 voice for Pitch Shift, %d Hz, hop %d ms: T %d, DEC %d, FLOW %d%s" % (
+        g.sr, L["H"] * 10, T, DEC, FLOW, ", look-ahead up to %d ms" % (L["A"] * 10) if L["A"] else "")
+    meta = {"rate": str(g.sr), "upp": str(g.upp), "window_frames": str(T), "dec_frames": str(DEC),
+            "flow_frames": str(FLOW), "hop_ms": str(L["H"] * 10), "context_ms": str(L["C"] * 10),
+            "sid": "0", "xfade_ms": str(L["X"] * 10), "sola_ms": str(L["S"] * 10), "margin_ms": str(L["M"] * 10)}
+    if L["A"]:
+        meta.update({"right_ms": str(L["R"] * 10), "max_ahead_ms": str(L["A"] * 10), "pick_frames": str(DEC), "shape": "ahead1"})
+    ml.user_defined_metadata.update(meta)
     package = os.path.join(work, "voice.mlpackage")
     ml.save(package)
     # Compile the SAVED package (its metadata is in it) and check it against PyTorch on the CPU.
@@ -486,9 +539,11 @@ def convert(g, L, work, compiled_dst):
     if os.path.exists(compiled_dst):
         shutil.rmtree(compiled_dst)
     shutil.copytree(saved.get_compiled_model_path(), compiled_dst)
-    feats, pitch, src, noise = check
-    out = ct.models.CompiledMLModel(compiled_dst, compute_units=ct.ComputeUnit.CPU_ONLY).predict(
-        {"features": feats.numpy(), "pitch": pitch.numpy().astype(np.int32), "source": src.numpy(), "noise": noise.numpy()})["audio"]
+    feats, pitch, src, noise = check[:4]
+    feed = {"features": feats.numpy(), "pitch": pitch.numpy().astype(np.int32), "source": src.numpy(), "noise": noise.numpy()}
+    if L["A"]:
+        feed["pick"] = check[4].numpy().astype(np.int32)
+    out = ct.models.CompiledMLModel(compiled_dst, compute_units=ct.ComputeUnit.CPU_ONLY).predict(feed)["audio"]
     out = np.asarray(out, np.float64).ravel()
     ref = np.asarray(reference, np.float64).ravel()
     if not np.all(np.isfinite(out)) or np.abs(out).max() < 1e-5:
@@ -546,7 +601,7 @@ changer's voice menu.
 
 A voice folder holds:
 - voice.json: the voice's name and settings. Pitch Shift writes it for you when you add a voice.
-- a .mlmodelc folder (optional): the AI voice for Realistic mode (Macs with Apple silicon). Without one, the voice
+- a .mlmodelc folder (optional): the AI voice (Macs with Apple silicon). Without one, the voice
   uses the plain voice changer.
 
 To add a voice:
@@ -593,6 +648,8 @@ def main():
     ap.add_argument("--pitch", default="medium", help="how high the voice is: high (most women's voices), medium, low (most men's voices), or Hz")
     ap.add_argument("--voices-dir", default=os.path.expanduser("~/Library/Application Support/Pitch Shift/Voices"))
     ap.add_argument("--app", default=None, help="Pitch Shift.app to match (default: the one in Applications)")
+    ap.add_argument("--ahead-ms", type=int, default=DEFAULT_AHEAD_MS, choices=range(0, 1001, 10), metavar="MS",
+                    help="the most look-ahead the voice can use (700, Pitch Shift 3.1); 0 = the first shape (Pitch Shift 3.0)")
     a = ap.parse_args()
     path = os.path.abspath(os.path.expanduser(a.model))
     if not os.path.isfile(path):
@@ -602,12 +659,15 @@ def main():
     try:
         pth, shown = find_pth(path, work)
         sd, params, info = load_checkpoint(pth)
-        T, app = app_window_frames(a.app)
-        L = window_layout()
+        reader = "contentvec_ahead.mlmodelc" if a.ahead_ms else "contentvec.mlmodelc"
+        T, app = app_window_frames(a.app, reader)
+        L = window_layout(ahead_ms=a.ahead_ms)
         if T and T != L["T"]:
-            L = window_layout(context_ms=(T - L["X"] - L["S"] - L["H"]) * 10)
+            L = window_layout(context_ms=(T - L["X"] - L["S"] - L["H"]) * 10 - a.ahead_ms, ahead_ms=a.ahead_ms)
             if L["T"] != T:
                 raise Refused("this Pitch Shift's speech reader has an unexpected size (%d frames)" % T)
+        if not T and a.ahead_ms and app_window_frames(a.app, "contentvec.mlmodelc")[0]:
+            print("Note: the Pitch Shift on this Mac is older than 3.1. Update it to use this voice.")
         name = (a.name or os.path.splitext(os.path.basename(path))[0]).strip()[:60] or "Voice"
         base = slug(name)
         os.makedirs(a.voices_dir, exist_ok=True)
@@ -632,7 +692,7 @@ def main():
             "name": name,
             "version": 1,
             "natural": natural,
-            "realistic": {"model": model_name, "encoder": "contentvec.mlmodelc", "rate": params["sr"], "eqAmount": 0.5},
+            "realistic": {"model": model_name, "encoder": reader, "rate": params["sr"], "eqAmount": 0.5},
             "credits": "Converted from %s with Pitch Shift's voice converter (RVC v2, %d kHz)." % (shown, params["sr"] // 1000),
         }
         with open(os.path.join(stage, "voice.json"), "w") as f:
@@ -642,7 +702,7 @@ def main():
         shutil.move(stage, dst)
         print("Check: the converted voice matches the original (%.0f dB clear of differences; 15 or more is fine). %.0f s." % (snr, time.time() - t0))
         print("Done: \"%s\" is in %s" % (name, dst))
-        print("In Pitch Shift: Voice changer -> pick \"%s\" in the voice menu, and turn on Realistic." % name)
+        print("In Pitch Shift: Voice changer -> pick \"%s\" in the voice menu, and move Faster ↔ More real right of Faster." % name)
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
