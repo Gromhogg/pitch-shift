@@ -37,6 +37,9 @@
 //                [--live-sim [--buffer 128]]   instead: the live chain's steps in callback-sized pieces (with the
 //                                              waiting sound), printing the delay they add (no devices)
 //   --list-voices [--voices-dir DIR]           the voice changer's voices (and files that were skipped)
+//   --add-voice PATH [--pitch high|medium|low|HZ] [--voices-dir DIR]
+//                                              adds a voice folder or a .zip of one, as "Add Voice…" does (into DIR,
+//                                              else the Voices folder); --rename-voice ID NAME, --remove-voice ID
 //   --render-sounds VOICE OUT --sound FILE [--at 5,20] [--sound-volume 1] [--speakers] [--voice-db 0] [--shifted]
 //                [--buffer 128] [--sound-preset old]
 //                                              Soundboard, offline (no devices): VOICE as the mic, FILE clicked at each
@@ -89,11 +92,11 @@ func arg(_ name: String) -> String? {
 // slider; sounds opens the Soundboard with example names, rename shows the first name being changed, volume the first
 // sound's volume slider and drop files being dragged over it; "tone" shows Advanced processing on, and --tone-amount
 // sets the Bass ↔ Treble slider; slow turns on "Deeper when slow"; changer turns on the Voice changer (and Your voice)
-// with Woman, changer-man with Man, --strength sets its Strength slider, changer-realistic/-loading/-fallback show
-// the AI voice (the slider's default) working/getting ready/standing in with Natural, changer-slider-* puts the
-// "Faster ↔ More real" slider at Natural, the first AI step, the default, the far right or NN percent,
-// changer-intel the card as on an Intel Mac (the slider stays at Natural); resize drags the window's corner through
-// the three layouts).
+// with Woman, changer-man with Man (--voice NAME: that voice, an added one too), --strength sets its Strength slider,
+// changer-realistic/-loading/-fallback show the AI voice (the slider's default) working/getting ready/standing in
+// with Natural, changer-slider-* puts the "Faster ↔ More real" slider at Natural, the first AI step, the default, the
+// far right or NN percent, changer-intel the card as on an Intel Mac (the slider stays at Natural); resize drags the
+// window's corner through the three layouts).
 let preview = arg("--preview")
 
 var signalSources: [DispatchSourceSignal] = []
@@ -217,6 +220,49 @@ if args.contains("--list-voices") {
     if library.voices.isEmpty { print("  none") }
     for problem in library.problems { print("  skipped \(problem)") }
     exit(0)
+}
+
+// --add-voice PATH [--pitch high|medium|low|HZ]: adds a voice folder (or a .zip of one) as "Add Voice…" does, into
+// --voices-dir DIR if given, else the Voices folder (--pitch: for a voice with no Natural settings; default medium).
+// --rename-voice ID NAME, --remove-voice ID (to the Trash): an added voice in the same folder (never a built-in one).
+if let path = arg("--add-voice") {
+    let folder = VoiceLibrary.extraFolder ?? VoiceLibrary.userFolder
+    do {
+        let found = try VoiceImport.examine(URL(fileURLWithPath: path))
+        defer { found.discard() }
+        var pitch: [String: Any]?
+        if found.needsPitch {
+            let asked = arg("--pitch") ?? "medium"
+            if let kind = VoicePitch(rawValue: asked.lowercased()) {
+                pitch = kind.natural
+            } else if let hz = Double(asked), (60...400).contains(hz) {
+                pitch = VoicePitch.natural(hz: hz)
+            } else {
+                print("--pitch: high, medium, low or a number of Hz (60-400)"); exit(1)
+            }
+            print("\(found.name) has no Natural settings: using pitch \(asked)")
+        }
+        let taken = Set(VoiceLibrary.shared.voices.map { $0.id.lowercased() })
+        let id = try found.install(into: folder, pitch: pitch, taken: taken, names: Set(VoiceLibrary.shared.voices.map { $0.name.lowercased() }))
+        print("Added \"\(found.name)\" as \(id) in \(folder.path)")
+        exit(0)
+    } catch {
+        print("Can't add this voice: \((error as? Problem)?.message ?? "\(error)")"); exit(2)
+    }
+}
+if let i = args.firstIndex(where: { $0 == "--rename-voice" || $0 == "--remove-voice" }) {
+    let folder = VoiceLibrary.extraFolder ?? VoiceLibrary.userFolder
+    let renaming = args[i] == "--rename-voice"
+    guard i + (renaming ? 2 : 1) < args.count, let entry = VoiceLibrary.shared.voice(args[i + 1]) else {
+        print(renaming ? "usage: --rename-voice ID NAME" : "usage: --remove-voice ID", "(an added voice; --list-voices shows them)"); exit(1)
+    }
+    do {
+        if renaming { try VoiceImport.rename(entry, to: args[i + 2], in: folder) } else { try VoiceImport.remove(entry, in: folder) }
+        print(renaming ? "Renamed \(entry.id) to \"\(args[i + 2])\"" : "Moved \(entry.name) to the Trash")
+        exit(0)
+    } catch {
+        print("Can't change this voice: \((error as? Problem)?.message ?? "\(error)")"); exit(2)
+    }
 }
 
 // The watchdog: a second copy of the app that gives the real mic back if the app ends without doing it.

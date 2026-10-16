@@ -8,7 +8,7 @@
 //                                             ContentVec (Core ML) -> features
 //                                             pitch per 10 ms frame (from A1's tracker, nearest frame) -> 1..255
 //                                             NSF source (float64 phase, carried across hops) + fixed noise
-//                                             generator (Core ML) -> the last DEC frames at 48 kHz
+//                                             generator (Core ML) -> the last DEC frames at the voice's rate (48, 40 or 32 kHz)
 //                                             drop the left margin -> SOLA crossfade -> loudness = the mic's
 //                                             -> (resample to the chain rate) -> ring `out` (+ a provisional tail)
 //   pull: out <-- ring `out` at a fixed delay, or Natural's sound delayed to the same delay (10 ms crossfades)
@@ -364,6 +364,7 @@ struct VoiceStream {
     int baseBack = 0;              // chain samples from "now" back to the converted index being played (no look-ahead part)
     double inLag16 = 0;            // 16 kHz samples the input resampler holds back
     double outLag = 0;             // chain samples the output resampler holds back
+    int outRate = 48000;           // the model rate outLag (part of the fixed delay) was measured for
     int rampLen = 480;             // 10 ms crossfade between the AI voice and Natural
     int modelRate = 48000;
 
@@ -1032,7 +1033,17 @@ VoiceModel *voicemodel_load(const char *encoderPath, const char *voicePath, int 
         m->solaMs = metaInt(meta, @"sola_ms", 10);
         m->marginMs = metaInt(meta, @"margin_ms", m->decFrames * 10 - m->hopMs - m->xfadeMs - m->solaMs);
         if (m->contextMs <= 0) m->contextMs = m->T * 10 - m->hopMs - m->xfadeMs - m->solaMs;
+        // RVC v2 voices come at 32, 40 or 48 kHz (many downloaded voices are 40 kHz); the output is resampled to
+        // the chain's rate (libsamplerate, as for any mic rate).
+        if (m->rate != 32000 && m->rate != 40000 && m->rate != 48000) {
+            char why[96];
+            std::snprintf(why, sizeof why, "the voice model's sample rate (%d Hz) isn't supported: it needs 32, 40 or 48 kHz", m->rate);
+            say(err, errSize, why);
+            delete m;
+            return nullptr;
+        }
         // the look-ahead shape: a "pick" input says which window frames to decode; the flow covers the whole window
+        // (older voice files have no "pick" input: they load as before and use no look-ahead)
         if (MLFeatureDescription *pick = vd.inputDescriptionsByName[@"pick"]) {
             NSArray<NSNumber *> *ps = pick.multiArrayConstraint.shape;
             m->picks = true;
@@ -1048,7 +1059,7 @@ VoiceModel *voicemodel_load(const char *encoderPath, const char *voicePath, int 
             }
         }
         if (m->decFrames * m->upp != m->decSamples || m->flowFrames < m->decFrames || m->T < m->flowFrames ||
-            m->decFrames * 10 < m->hopMs + m->xfadeMs + m->solaMs || m->rate != 48000) {
+            m->decFrames * 10 < m->hopMs + m->xfadeMs + m->solaMs || m->upp != m->rate / 100) {
             say(err, errSize, "the voice model files have unexpected sizes");
             delete m;
             return nullptr;
@@ -1076,6 +1087,10 @@ VoiceModel *voicemodel_load(const char *encoderPath, const char *voicePath, int 
         char buf[256];
         std::snprintf(buf, sizeof buf, "encoder on %s, voice on %s; hop %d ms, past sound %d ms; one hop %.0f ms; ready in %.1f s",
                       unitsName(ue), unitsName(uv), m->hopMs, m->contextMs, m->probeHopMs, (nowMs() - t0) / 1000);
+        if (m->rate != 48000) {  // (48 kHz, like the built-in voices, isn't mentioned)
+            size_t used = std::strlen(buf);
+            std::snprintf(buf + used, sizeof buf - used, "; %d kHz voice", m->rate / 1000);
+        }
         m->describe = buf;
         if (m->picks) m->describe += "; look-ahead up to " + std::to_string(m->maxAheadMs) + " ms";
         return m;
@@ -1093,8 +1108,9 @@ double voicestream_delay_ms(const VoiceModel *model, double chainRate, int maxFr
     const int hop = model ? model->hopMs : 160, xf = model ? model->xfadeMs : 40, sola = model ? model->solaMs : 10;
     const int reserve = 70;  // (a CPU-only model gets 70 too)
     const int la = model ? std::clamp(lookaheadMs / 10 * 10, 0, model->maxAheadMs) : std::max(0, lookaheadMs / 10 * 10);
+    const double voiceRate = model ? model->rate : 48000;  // (a 32 or 40 kHz voice's resampler holds back a bit more)
     const int frames = latencyFrames(chainRate, maxFrames, false, hop, xf, sola, reserve, la,
-                                     Resampler::lag(kRate16 / chainRate), Resampler::lag(chainRate / 48000.0));
+                                     Resampler::lag(kRate16 / chainRate), Resampler::lag(chainRate / voiceRate));
     return frames / chainRate * 1000;
 }
 
@@ -1112,7 +1128,8 @@ VoiceStream *voicestream_new(VoiceModel *model, double chainRate, int maxFrames,
     if (model && model->cpuOnly) s->reserveMs = std::max(s->reserveMs, 70);  // the CPU's slow hops need more room
     s->rampLen = std::max(1, (int)std::lrint(chainRate * 0.01));
     s->inLag16 = Resampler::lag(kRate16 / chainRate);
-    s->outLag = Resampler::lag(chainRate / 48000.0);
+    s->outRate = model ? model->rate : 48000;  // no model yet: the built-in voices' rate
+    s->outLag = Resampler::lag(chainRate / s->outRate);
     // fixed delay = hop + crossfade + search + reserve + look-ahead + what the resamplers hold back + one callback;
     // the sound thread reads converted index (now - baseBack), whatever the look-ahead
     s->baseBack = s->latencyFor(0) - (int)std::llround((s->X + s->S) * chainRate / 100);
@@ -1153,6 +1170,7 @@ int voicestream_set_model(VoiceStream *stream, VoiceModel *model) {
     if (!stream || !model) return 0;
     if (model->hopMs != stream->H * 10 || model->xfadeMs != stream->X * 10 || model->solaMs != stream->S * 10) return 0;
     if (model->cpuOnly && stream->reserveMs < 70) return 0;  // its delay would be too short for the CPU: make a new stream
+    if (model->rate != stream->outRate) return 0;  // a 32 or 40 kHz voice: its resampler's delay differs, make a new stream
     if (stream->offline) { stream->adopt(model); return 1; }
     stream->pending.store(model);
     dispatch_semaphore_signal(stream->wake);

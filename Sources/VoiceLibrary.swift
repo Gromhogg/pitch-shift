@@ -3,7 +3,9 @@
 // so a voice there replaces a built-in one with the same id (for tuning). Each file:
 //   {id, name, version, natural{targetHz, assumedInputHz, intonation, formant, breathDb, presenceDb, sibilanceKeep,
 //    eqAmount, ltas[21]}, realistic{model, encoder, rate, eqAmount}, credits}
-// A voice with only a "natural" block works on every Mac. Bad files are skipped and listed in `problems`.
+// A voice with only a "natural" block works on every Mac. Bad files are skipped and listed in `problems`. An added
+// voice with no speech reader (encoder) of its own uses the built-in one (contentvec_ahead.mlmodelc since 3.1; see
+// sharedEncoder). Adding, renaming and removing voices: VoiceImport.swift.
 import Foundation
 
 struct VoiceManifest: Decodable, Equatable {
@@ -37,17 +39,32 @@ struct VoiceManifest: Decodable, Equatable {
 final class VoiceEntry {
     let manifest: VoiceManifest
     let folder: URL      // where its files are
+    let file: URL        // its json file
     let builtIn: Bool
     let natural: UnsafePointer<VoiceChangerVoice>?
 
     var id: String { manifest.id }
     var name: String { manifest.name }
     var modelURL: URL? { manifest.realistic.map { folder.appendingPathComponent($0.model) } }
-    var encoderURL: URL? { manifest.realistic.map { folder.appendingPathComponent($0.encoder) } }
+    // The voice's own speech reader, or (for an added voice that has none) the built-in one (VoiceLibrary.sharedEncoder).
+    var encoderURL: URL? {
+        guard let realistic = manifest.realistic else { return nil }
+        let own = folder.appendingPathComponent(realistic.encoder)
+        guard !builtIn, !FileManager.default.fileExists(atPath: own.path) else { return own }
+        return VoiceLibrary.sharedEncoder(named: realistic.encoder) ?? own
+    }
+    // Added by the user in the Voices folder (so it can be renamed and removed; built-in and --voices-dir ones can't).
+    var isUserVoice: Bool { !builtIn && isInside(VoiceLibrary.userFolder) }
 
-    init(manifest: VoiceManifest, folder: URL, builtIn: Bool) {
+    func isInside(_ voices: URL) -> Bool {
+        let dir = file.deletingLastPathComponent().standardizedFileURL.path, root = voices.standardizedFileURL.path
+        return dir == root || dir.hasPrefix(root + "/")
+    }
+
+    init(manifest: VoiceManifest, folder: URL, file: URL, builtIn: Bool) {
         self.manifest = manifest
         self.folder = folder
+        self.file = file
         self.builtIn = builtIn
         natural = manifest.natural.map { n in
             var voice = VoiceChangerVoice()
@@ -79,6 +96,15 @@ final class VoiceLibrary {
     private var made: [String: VoiceEntry] = [:]  // every entry ever made, by path, so pointers stay valid
 
     static var builtInFolder: URL? { Bundle.main.resourceURL?.appendingPathComponent("Voices") }
+    // The built-in speech reader for an added voice that has none of its own: the one it names if the app has it, else
+    // the look-ahead one (3.1 and later; it also reads for voices made in the first shape), else contentvec.mlmodelc.
+    static func sharedEncoder(named name: String) -> URL? {
+        guard let shared = builtInFolder else { return nil }
+        let fm = FileManager.default
+        let candidates = [(name as NSString).lastPathComponent, "contentvec_ahead.mlmodelc", "contentvec.mlmodelc"]
+        return candidates.map { shared.appendingPathComponent($0) }.first { fm.fileExists(atPath: $0.path) }
+            ?? shared.appendingPathComponent("contentvec_ahead.mlmodelc")
+    }
     static var userFolder: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Pitch Shift/Voices")
@@ -112,7 +138,7 @@ final class VoiceLibrary {
         let fm = FileManager.default
         guard let items = try? fm.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) else { return [] }
         var files: [URL] = []
-        for item in items.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+        for item in items.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) where !item.lastPathComponent.hasPrefix(".") {
             if item.pathExtension == "json" {
                 files.append(item)
             } else if fm.fileExists(atPath: item.appendingPathComponent("voice.json").path) {
@@ -135,7 +161,7 @@ final class VoiceLibrary {
                 }
             }
             if let old = made[file.path], old.manifest == manifest, old.builtIn == builtIn { return old }
-            let entry = VoiceEntry(manifest: manifest, folder: file.deletingLastPathComponent(), builtIn: builtIn)
+            let entry = VoiceEntry(manifest: manifest, folder: file.deletingLastPathComponent(), file: file, builtIn: builtIn)
             made[file.path] = entry
             return entry
         } catch {
