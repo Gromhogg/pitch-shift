@@ -35,17 +35,35 @@ final class VoiceTools: NSObject {
 
     var views: [NSView] { [button, busy] }
 
+    // Pitch Shift Pro is locked: the button is greyed out and a click opens the unlock window.
+    var locked = false {
+        didSet {
+            guard oldValue != locked else { return }
+            drawButton()
+            button.toolTip = locked ? "Pitch Shift Pro" : "Add or manage your own voices"
+            button.setAccessibilityHelp(locked ? "Pitch Shift Pro" : nil)
+        }
+    }
+    private var points: CGFloat = 0
+
     // Sizes the button with the window (scale 1 = smallest window).
     func size(for scale: CGFloat) {
-        let points = Theme.fontSize(Theme.controlSize(scale)) + 3
-        button.image = NSImage(systemSymbolName: "ellipsis.circle", accessibilityDescription: "Your own voices")?
-            .withSymbolConfiguration(.init(pointSize: points, weight: .regular).applying(.init(paletteColors: [Theme.mid])))
+        points = Theme.fontSize(Theme.controlSize(scale)) + 3
+        drawButton()
         widths.forEach { $0.constant = (points + 6).rounded() }
+    }
+
+    private func drawButton() {
+        guard points > 0 else { return }
+        button.image = NSImage(systemSymbolName: "ellipsis.circle", accessibilityDescription: "Your own voices")?
+            .withSymbolConfiguration(.init(pointSize: points, weight: .regular)
+                .applying(.init(paletteColors: [locked ? NSColor.tertiaryLabelColor : Theme.mid])))
     }
 
     // MARK: The menu
 
     @objc private func showMenu() {
+        guard !locked else { app.showUnlock(); return }  // adding voices is part of Pitch Shift Pro
         let menu = NSMenu()
         menu.autoenablesItems = false
         add(menu, "Add Voice…", #selector(addVoice))

@@ -1,0 +1,21 @@
+{
+  "name": "pitch-shift-pro-server",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Pitch Shift Pro unlock keys: a Cloudflare Worker (Stripe webhook, thank-you page, activation).",
+  "license": "GPL-3.0-or-later",
+  "type": "module",
+  "scripts": {
+    "test": "node --test",
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "make-keys": "node scripts/make-keys.mjs --put"
+  },
+  "devDependencies": {
+    "wrangler": "4.151.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "workerd@1.20261012.1": true
+  }
+}
