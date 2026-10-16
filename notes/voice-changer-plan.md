@@ -260,3 +260,113 @@ for 15 minutes because the Pitch Shift app was open).
 `a1/harness/` (render, measure, pass-mark tables), `a4/` (`tune.sh`, `check1.sh`, `blind.py`, `devtests.sh`,
 `live_fallback.py`; tuning tables in `a4/results/r1…r3*/set_*.md`), `pretrained/` (voice blends), `convert/` (Core ML),
 `bench/` (real-time test program), `results/` (A2's reports).
+
+## No more stutters, and "Faster ↔ More real" (3.1, 2026-10-16)
+
+**What the owner heard** (Realistic, Woman, good mic, nothing else running): "still stutters … even if I speak
+clearly"; a held note "jumped up and down unnaturally … some very faint roboticness"; and on the offline Woman US
+samples (A–D) all of them stuttered at "a judicial review" (the "ooh" in judicial and the "a"). So it was not GPU load.
+
+**How it was measured** (offline, the app's own `--render-voice`, Woman US at D = 235 Hz / intonation 1.7, each clip
+after ~8 s of the same speaker so the pitch median is settled; tools in `research/voicechanger/smooth/`):
+- *Piece seams*: for every crossfade between two 160 ms pieces, how alike the two pieces' sound is there
+  (normalised correlation of the crossfaded parts, 1 = the same sound) in the loud parts; "poor" < 0.8, "bad" < 0.5;
+  and how often the crossfade's timing jumped (≥ 1 ms: a skip or a repeat of that much sound).
+- *Sudden sound changes* (5 ms frames where the output's spectrum jumps > 7 dB while the input's moves < 3 dB),
+  output pitch jumps (> 2 half-steps in 20 ms where the input moved < 0.7) and voice breaks (15–100 ms unvoiced in the
+  output inside voiced input), on the 10 clips of the two American men of the listening folder (p311, p334).
+- *Held notes*: synthetic held vowels (a VCTK man's vowel stretched to 3 s with Praat, slight vibrato and drift;
+  no recordings of the owner): pitch jitter (the part of the pitch line faster than a 70 ms smooth), sudden steps,
+  and drift (how far the output slides over the note beyond what the singer did).
+- *Words and quality*: Whisper base.en word errors and Distill-MOS on the 70 men's clips of `woman_us.md`.
+
+**Causes found, in order of size:**
+1. **The speech reader hears a cut-off word at every piece** (the encoder's right edge). Each 160 ms piece comes
+   from the newest end of the window, so the end of the next piece is guessed from sound that stops mid-word; the
+   next piece then makes the same 50 ms again knowing more, and the two are crossfaded. They differ: today 53 % of the
+   loud seams were poor (mean likeness 0.67, 24 % bad). In "a judicial review" (seams where the listening sample had
+   them) 5 of 6 seams were poor, two of them very bad (0.17 at "di", 0.15 at "cial"), and the /dʒ/ came out as a
+   squeak. → **Look-ahead**: the piece now comes from LA frames before the newest end, so the reader hears what
+   follows it. One model file serves every look-ahead (the decoder runs on window frames the stream picks).
+2. **The crossfade search moved the timing** at 35 % of the seams (up to 10 ms skipped or repeated). It was there to
+   line up pieces made from different guesses; with look-ahead the pieces already line up, so the timing is kept
+   (with no look-ahead it still searches, as before).
+3. **A held note slid away**: the AI's pitch is mapped from the speaker's median, and holding a note for a second or
+   two pulled the median there, so the output slid 2.5–3.7 half-steps back toward the voice's pitch in quarter-step
+   stairs ("jumped up and down"). → The AI voice keeps its own median: a held note doesn't teach it, and once it
+   knows the speaker it moves at most 0.01 half-steps per 10 ms (Natural keeps its own, unchanged).
+4. **The intonation scaled the small fast wobbles too** (×1.7 at D: tracker noise, the little dips at consonants, a
+   held note's flutter). → With look-ahead the frames on both sides are known, so the pitch line is lightly
+   smoothed (±10 ms) and only the melody (a ±70 ms line) is made 1.7 times bigger; the fast part keeps the speaker's
+   own size.
+5. **Voice breaks**: frames the tracker calls unvoiced inside a voiced sound (a /dʒ/, a flicker in a held vowel) made
+   the AI whisper for 10–60 ms. → Unvoiced gaps up to 80 ms inside a loud sound are bridged (not stops or pauses: the
+   level must stay within 9 dB of both sides), only where the frames after are known (look-ahead).
+6. **Loudness matching pumped**: the AI's loudness was set to the mic's every 10 ms from 20 ms windows; a 50 ms window
+   keeps the speaker's loudness without pumping the AI's own (quality +0.03…0.05 Distill-MOS).
+7. With the most look-ahead the 1.22 s window left only 0.3 s of past sound (words got worse past 200 ms), so the new
+   files have a 1.92 s window: 1 s of past sound even at 700 ms of look-ahead, at the same speed (25 ms per piece).
+   The encoder was rebuilt for it from the app's own 8-bit file (no download; same weights up to 8-bit rounding,
+   features cosine 0.9997).
+
+**Before → after** (Woman US at D; "today" = main 330be7e, the Realistic switch; default = the slider at 0.25,
+150 ms look-ahead; most real = 1, 700 ms):
+
+| measure | today | default | most real |
+|---|---|---|---|
+| "a judicial review": poor joins (of 6, where the listening sample had them) | 5 (0.64, 0.78, 0.17, 0.15, 0.64) | **0** (all ≥ 0.93) | **0** (all ≥ 0.98) |
+| joins in loud parts, 10 clips + warm-ups: bad / poor / timing jumps / mean likeness | 207 / 490 / 335 / 0.67 of 847 | **7 / 51 / 0 / 0.94** of 867 | **7 / 41 / 0 / 0.95** of 899 |
+| sudden sound changes / pitch jumps / voice breaks (10 clips) | 14 / 10 / 8 | 5 / 6 / 0 | 6 / 8 / 1 |
+| held notes: jitter vs the singer's (4 notes; goal ≤ 1.3×) | 0.83 / 0.99 / 1.29 / **19.3** | 0.51 / 0.69 / 0.73 / 1.04 | 0.50 / 0.82 / 0.82 / 1.02 |
+| held notes: slide over the note (half-steps) / sudden steps | −3.69 / −3.17 / −2.45 / −0.97; 6 steps | ≤ 0.10; 0 | ≤ 0.10; 0 |
+| word errors, 70 men (30-clip subset) | 9.4 % (9.1 %) | 7.9 % (5.5 %) | **7.0 % (3.7 %)** |
+| quality (Distill-MOS) | 3.51 | 3.64 | 3.62 |
+
+(The listening-folder renders of `woman_us.md` were made with the research loop, without the app's loudness match: D
+7.9 %, C 7.2 % words there; the app itself measured 9.4 % today on the same 70 clips.)
+
+**The slider, position by position** (stream delay measured in real time with the app's own code: the output lined
+up within 6 ms of it at 0 / 150 / 400 / 700 ms; the card adds one callback and what the mic and Pitch Shift Mic report,
+about 20 ms on a MacBook):
+
+| slider | look-ahead | stream delay | card shows | word errors (70 / 30) | quality |
+|---|---|---|---|---|---|
+| 0 (Faster) | Natural, no AI | 42 ms | about 0.08 s | (Natural) | |
+| 0.05 | 0 ms | 285.5 ms | about 0.31 s | 9.8 % / 8.7 % | 3.56 |
+| 0.19 | 100 ms | 385.5 ms | about 0.41 s | 7.7 % / 4.1 % | 3.64 |
+| **0.25 (default)** | **150 ms** | **435.5 ms** | **about 0.46 s** | 7.9 % / 5.5 % | 3.64 |
+| 0.32 | 200 ms | 485.5 ms | about 0.51 s | 7.9 % / 5.5 % | 3.64 |
+| 0.59 | 400 ms | 685.5 ms | about 0.71 s | 7.4 % / 5.0 % | 3.63 |
+| 0.86 | 600 ms | 885.5 ms | about 0.91 s | 7.4 % / 5.5 % | 3.62 |
+| 1 (More real) | 700 ms | 985.5 ms | about 1.01 s | 7.0 % / 3.7 % | 3.62 |
+
+**Why the default is 150 ms:** it is the first position where none of the joins in "a judicial review" is poor and
+the joins reach their plateau (mean likeness 0.94; 100 ms still had one poor join at the "a" and twice the bad ones);
+word errors are within noise from 100 ms on (one word = 0.2 points), so more look-ahead mainly buys a little more
+clarity for the extra delay. Under 100 ms the stutter comes back (at 0 ms it is today's sound).
+
+**Real-time checks** (the app's stream code paced in real time, 128-sample callbacks, `research/voicechanger/smooth/
+bench/`): 75 s at the default and at the most-real end: 0 late pieces (pieces 47 ms on average, 55 ms worst; the time
+kept in hand is now 70 ms, it was 60, so +10 ms of delay); look-ahead switches 150 → 700 → 0 → 150 ms while playing:
+each made at a pause, 0 late pieces, no Natural fill-in; forced late pieces (200 ms extra every 8th piece): Natural
+filled in 14 s with 0 frames at the speaker's own pitch. With a synthetic GPU load (a matrix job keeping the GPU 80 %
+busy): 228 late pieces in 75 s, Natural filled in 4.3 s (6 %); the same with `--compute cpu`: 0 late (the CPU does
+it in 49 ms, 31 % of a core). A game can still make the AI voice fall behind; switching to the CPU by itself when that
+happens is a possible next step.
+
+**Model files (look-ahead shape, not uploaded yet):** `contentvec_ahead` 82,964,437 B, `woman_ahead` 24,920,126 B,
+`man_ahead` 24,920,084 B (in `voices/models.txt`), and `woman_us_ahead` 24,920,238 B (SHA-256 75c1816e…a3217a) for
+Woman US. Made with `research/voicechanger/convert/convert_generator.py --context-ms 1000 --ahead-ms 700 --right-ms 40`
+and `convert_contentvec.py --context-ms 1710` from weights rebuilt by `contentvec_from_app.py`; with `--ahead-ms 0` the
+converter still makes the first shape byte for byte. Old voice files (first shape) still load: no look-ahead.
+
+**Checks:** changer off 14/14 renders byte-identical to main; Natural (Woman and Man, 15 renders incl. `--live-sim`)
+byte-identical to main; the Intel half under Rosetta says "needs Apple silicon" and its Natural render matches Apple
+silicon's (largest difference 0.00005); no new compiler warnings; hidden previews of the card at 870×369, 588×575,
+306×844 and 1300×640 (light and dark, Natural, first AI step, default, most real, loading, standing in, Intel). The
+card is 33 pt taller (smallest windows 588×581 and 306×850; side by side 870×369 is unchanged).
+
+**Left / not sure:** nobody has listened yet; the jitter goal was met on synthetic held notes, not a real singer;
+Whisper hears the "a" of "a judicial review" as "its" in most versions (also today's), a breathy start the AI voice
+adds; slider moves in a room that is never quiet switch after 3 s with a crossfade (heard as a small jump); the delay
+on the card uses what Core Audio reports for the mic and Pitch Shift Mic (a live measurement is still to do).
