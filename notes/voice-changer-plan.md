@@ -41,7 +41,7 @@ Order in `render()`: mic → `voicechanger_analyse` (pitch tracker, pitch mappin
 - **Presence ("smile"):** +`presenceDb·s` peak at 3 kHz, Q 0.9. **Breath:** noise in 4 bands (1.5–2.5, 2.5–4, 4–6, 6–9 kHz), each following the output's own band loudness (5/30 ms), × 10^(breathDb/20)·s, only when voiced.
 - **Start values:** Woman {200 Hz, assumed 120, intonation 1.2, formant 1.18, breath −30 dB, presence +2.5, sibilanceKeep 0, eq 0.5}; Man {112 Hz, assumed 205, 0.85, 0.85, off, 0, 0.7, 0.5}.
 - **Swift wiring:** `VoiceParams` gets `changer: UnsafePointer<VoiceChangerVoice>?` (points into VoiceLibrary's app-lifetime table) and `strength`; `VoiceStretcher.running = halfSteps != 0 || slowDeeper || changerActive`, `set(changer:)`, `set(changerPitch:formantScale:)` every callback, strength glides 0.15 s on/off; `VoiceChain` owns the `VoiceChanger*` and passes `stretcher.extra` (Deeper when slow) as `extraSemitones`; `VoiceShifter.changer {on, voiceID, strength, realistic}`, sent only when the voice switch and the changer are on (the Soundboard-only pass-through never runs it); `changerState` for the window: off / natural / loading / realistic / fallback(misses) / unavailable(reason); `renderVoiceFile(..., changer:)` uses the same classes.
-- **With a voice on:** the amount number and − 0 + are ignored and dimmed (tooltip "Voice changer is on"); the Natural↔Cartoon slider is ignored and dimmed; "Deeper when slow" still applies on top (pitch only); the Soundboard mixes in after the changer; Test plays back the changed voice.
+- **With a voice on (changed 2026-10-15 evening, the owner's rule "only one at a time"):** turning a voice on sets the amount to 0 and "Deeper when slow" off (saved); the number and − 0 + still work and a non-zero amount turns the changer off (tooltip says so); "Deeper when slow" is greyed out and turning it on also turns the changer off; the Natural↔Cartoon slider is ignored and dimmed; the engine never sends an amount or "Deeper when slow" with a voice on; the Soundboard mixes in after the changer; Test plays back the changed voice.
 
 ### Realistic mode (AI, Apple silicon only)
 - **Model:** RVC v2 style — one shared ContentVec encoder (768-dim, layer 12, 50 frames/s at 16 kHz) + one 48 kHz NSF-HiFiGAN generator per voice; pitch is an explicit input driven by our mapping (creak held at a normal pitch → the model sings through it: fry gone).
@@ -98,8 +98,8 @@ Rules for all: device tests only with the delay branch's guards (refuse while an
 
 **For the user:** a third card "Voice changer" with a switch, a voice picker (Woman, Man, then any voices added to
 `~/Library/Application Support/Pitch Shift/Voices/`), a Light…Full Strength slider and a "Realistic" switch (hidden on
-Intel Macs). Turning it on also turns "Your voice" on; the voice card's amount and Natural…Cartoon slider are then
-dimmed; "Deeper when slow" still works on top; the Soundboard mixes in after it. Smallest windows: three cards in a
+Intel Macs). Turning it on also turns "Your voice" on, sets the amount to 0 and "Deeper when slow" off (only one at a
+time; see "Fixes after the first listen"); the Soundboard mixes in after it. Smallest windows: three cards in a
 row 870×369, two columns 588×548, one column 306×817 (the card is 163 pt tall, not the planned 190).
 
 - **Natural mode** (every Mac, the default): `Sources/Voice/VoiceChanger.{h,cpp}`, as designed above. No added delay
@@ -175,6 +175,75 @@ on "judged man" and on the voice print and +1.2 points on word errors, which was
 | 8. No leak of the real voice | forced late pieces: Natural filled in with 0 frames at the speaker's own pitch (A2's real-time test program) |
 | Build | clean, the same compiler warnings as main |
 | Live device tests | **not run yet**: the guard refused every time because the Pitch Shift app was open (the scripts are ready, see below) |
+
+### Fixes after the first listen (2026-10-15 evening)
+
+The owner tried the test build: "voice cracks on the high end for the female voice (I think at the e's it was
+struggling) and sudden voice drops for the guy, at the same e soundings", in **Realistic** mode, saying "testing
+testing".
+
+**Cause (measured):** the pitch reader's octave fix compared each 10 ms frame with the median of the last 2 s of
+raw pitch and doubled any frame more than 9 half-steps below it. A real fall at the end of a word ("testing",
+"sweets", "these": the "i"/"ee" sounds) goes that low, so it was read an octave too high for several frames. The AI
+voice follows the read pitch directly, so it jumped an octave there (Woman: a crack upward; Man: a jump out of the
+low voice). Natural showed it smaller (only through the intonation part). Example, Daniel's "sweets": real pitch
+95 → 67 Hz, read as 133 Hz; the Man voice's pitch went 79 → 120 Hz. A second, smaller cause: a new chain starts
+the speaker's median from a guess (Woman 120 Hz, Man 205 Hz) and the median jumped to the real one after about a
+second, moving the whole pitch at once.
+
+**Fix (`Sources/Voice/VoiceChanger.cpp`, `voicechanger_analyse`):** the median-based fix is gone. Each voiced frame's
+pitch may be YIN's value, half or double it; a small running path search picks the one that moves least from frame
+to frame (1 point per half-step; taking double costs 3.5, half 4.5; past 10 half-steps from a known median 0.5 per
+half-step), and a frame's choice is settled when the next frame is in (the same one-frame lag as before, so no
+delay is added). The pitch handed to the AI voice: through creak it moves with a gradual fall (not below 0.62 × the
+median) and holds through a sudden drop or rough frames; an aperiodic moment up to 80 ms after voice holds it but
+never starts it; it is eased into 9 (at most 12) half-steps above and 6 (at most 9) below the voice's own pitch, and
+moves at most 2 half-steps per 10 ms while singing. The speaker's median glides (0.3 half-steps per 10 ms) instead
+of jumping; its first guess is still worth 1 s of voice, but frames more than 7 half-steps from it wear it off 40
+times faster, so a guess that doesn't fit (a man using the Man voice) is gone after ~0.1 s (a light guess for
+everyone cost Natural Man's voice print 90 → 82 %); a new chain starts from the median the last one measured
+(`voicechanger_set_speaker`, so switching voices in Realistic doesn't start from a guess again). Tuning keys:
+`octUpCost octDownCost jumpCost rangeSt rangeCost contFrames gapFrames warmFrames seedFarSt seedFarFade medianGlideSt
+aiBandSt aiMaxSt aiBandLowSt aiMinSt aiHoldFrames aiSlewSt`.
+
+**Numbers** (test set: "testing testing, one two three, easy peasy, see me eat these sweets, testing testing" by
+Samantha, Daniel, Eddy, Shelley, Reed, Flo + 8 held-out VCTK speakers with many "e" sounds; Praat as reference;
+crack = the output pitch jumps more than 6 half-steps within 30 ms while the input stays within 3 for ±30 ms):
+
+| | before | after |
+|---|---|---|
+| Realistic Woman cracks (14 clips, offline, cold start) | 11 | 4 |
+| Realistic Man cracks | 5 | 2 |
+| Realistic, real-time test program (input looped, 20 s each) | Woman 8 in 46 s, Man 13 in 54 s | Woman 4 in 44 s, Man 1 in 53 s |
+| Natural Woman / Man cracks | 5 / 5 | 1 / 3 |
+| tracker octave errors vs Praat (all 14 clips, cold) | 181 (165 where Praat reads creak) | 65 (51) |
+| AI pitch jumps > 6 half-steps in 30 ms, Woman / Man (cold; warmed up) | 22 / 14; 22 / 18 | 4 / 0; 2 / 3 |
+
+What is left: Realistic still turns very creaky word ends into a short whisper (the reader calls them unvoiced;
+singing them with YIN's rough pitch was tried and made it worse), a sound that starts with two misread frames glides
+up for ~40 ms, and once the voice model itself rendered a low word end an octave down (the pitch it was given was
+smooth). Natural's ones are the speaker's own creak passed through. Natural delay unchanged (live-sim, 3 clips × 2
+voices: 44.1–71.7 ms vs 44.4–72.3 before; Man 1.8 and 3.4 ms lower on two clips), changer off 14/14 byte-identical,
+Realistic offline 214 ms fixed and 0 late pieces, live test program 275.5 ms and 0 late pieces, no new compiler
+warnings, the Intel half matches (Natural, largest difference 0.00006).
+
+Natural marks after the fix (VCTK held-out set, warmed up, same measures as above):
+
+| | judged | voice print | quality vs plain | word errors | pitch | creak |
+|---|---|---|---|---|---|---|
+| Woman, before → after | 95 → 95 % | 92 → 92 % | +0.03 → +0.02 | 5.7 → 6.1 % | 189 → 199 Hz | 0.055 → 0.055 |
+| Man, before → after | 100 → 100 % | 90 → 88 % (one clip) | −0.13 → −0.15 | 8.1 → 8.5 % | 111 → 111 Hz | 0.069 → 0.067 |
+
+**Only one at a time (owner's rule, same evening):** a voice from the Voice changer and a pitch change can't be on
+together. Turning a voice on sets the amount to 0 and "Deeper when slow" off (saved; they stay so when the changer
+goes off); a non-zero amount (− 0 + or typing) or turning "Deeper when slow" on turns the changer off (tooltips say
+so; "Deeper when slow" is greyed out but still works); the engine never sends an amount or "Deeper when slow" with a
+voice on; settings saved with both on: the changer wins. In Realistic mode the Light…Full slider only moves the pitch
+(the AI voice always sounds like the voice), so it reads "Your pitch … Woman's pitch" there (relabelled rather than
+hidden: hiding it would change the card's height and the window's layouts). Command line: `--steps` and
+`--slow-deeper` are ignored with `--voice` (a note is printed). `--test-button --voice Woman [--quality realistic]
+[--file F]` records and plays back the changed voice (not run: it plays sound out loud; the live tests were refused
+for 15 minutes because the Pitch Shift app was open).
 
 ### Shortfalls, in plain words
 - **Natural** fools the man/woman classifier, but a voice print still hears the same person: "a man with a
