@@ -3,6 +3,8 @@
 # checkout or the main one) or downloads them from the address below, checks the SHA-256 sum and unpacks them into
 # Contents/Resources/Voices/. To publish: upload the three zips as assets of a GitHub release and put its tag in place
 # of PLACEHOLDER (made by research/voicechanger/pack_voices.sh from the blend in research/voicechanger/pretrained/).
+# 3.0.0 shipped the first-shape files (contentvec, woman, man) from the v3.0.0 release; the look-ahead files below
+# are not uploaded yet.
 # The look-ahead shape (Pitch Shift 3.1, "_ahead"): one file per voice serves every "Faster ↔ More real" position
 # (convert_generator.py --context-ms 1000 --ahead-ms 700 --right-ms 40; the encoder: convert_contentvec.py
 # --context-ms 1710, 1.92 s window). Older voice files (the first shape) still load and use no look-ahead.
