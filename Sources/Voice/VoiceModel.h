@@ -30,13 +30,15 @@ enum {
 typedef struct VoiceModel VoiceModel;    // the loaded models (shared by the streams that use them)
 typedef struct VoiceStream VoiceStream;  // one running conversion (one per voice chain)
 
-// Sizes of the pieces the worker converts (milliseconds). Defaults: 160 / 480 / 40 / 10 / 60.
+// Sizes of the pieces the worker converts (milliseconds). Defaults: 160 / 480 / 40 / 10 / 70 / 0 (the reserve was 60 before 3.1: the real-time pieces took up to 54-60 ms).
 typedef struct VoiceStreamConfig {
     int hopMs;        // new sound per piece
     int contextMs;    // past sound the encoder also hears
     int crossfadeMs;  // crossfade between pieces
     int solaMs;       // how far the crossfade may search for the best fit
     int reserveMs;    // time kept in hand for a slow piece
+    int lookaheadMs;  // sound after each piece the speech reader also hears (adds this much delay; 0 = none). Only
+                      // models made in the look-ahead shape can use it (voicemodel_max_lookahead_ms); others use 0.
 } VoiceStreamConfig;
 
 typedef struct VoiceStreamStats {
@@ -47,6 +49,8 @@ typedef struct VoiceStreamStats {
     double averageHopMs;     // worker time per piece: average ...
     double worstHopMs;       // ... and worst
     double cpuShare;         // worker thread's share of one core
+    int lookaheadMs;         // the look-ahead the pieces are made with now
+    int64_t switches;        // look-ahead switches made (at quiet moments or after waiting a few seconds)
 } VoiceStreamStats;
 
 // Loads the encoder and the voice (.mlmodelc folders). computeUnits: VOICEMODEL_COMPUTE_*. Slow the first time
@@ -57,6 +61,13 @@ void voicemodel_free(VoiceModel *model);  // only after every stream using it is
 
 // One line for logs and --changer-stats: which chips run it, hop and past sound, time per hop, load time.
 const char *voicemodel_describe(const VoiceModel *model);
+
+// The most look-ahead this model can use (ms): 0 for models made before the look-ahead shape.
+int voicemodel_max_lookahead_ms(const VoiceModel *model);
+
+// The fixed delay a stream would have (ms), the same sum voicestream_new makes: model NULL = the default 160 ms
+// pieces on the GPU (a CPU-only model gets the bigger reserve). For the window's "Delay: about ..." line.
+double voicestream_delay_ms(const VoiceModel *model, double chainRate, int maxFrames, int lookaheadMs);
 
 // chainRate: the voice chain's sample rate. maxFrames: the largest `frames` given to push/pull (one callback; it is
 // part of the fixed delay, so pass the real callback size, not a worst case). offline: 1 = convert inline in push (for
@@ -72,12 +83,27 @@ void voicestream_delete(VoiceStream *stream);
 // made with no model expects 48 kHz); make a new stream then.
 int voicestream_set_model(VoiceStream *stream, VoiceModel *model);
 
+// Asks for another look-ahead (ms, rounded to 10 ms, limited to what the model can do) without making a new stream
+// (any thread). The AI voice keeps playing; the switch is made between two pieces at the next quiet moment (so
+// nothing is heard twice or lost), or after a few seconds at the latest (then a crossfade). Offline: right away.
+void voicestream_set_lookahead(VoiceStream *stream, int lookaheadMs);
+
+// The intonation the pitch frames were mapped with (1 + strength * (voice intonation - 1); 0 = unknown). The stream
+// keeps the speaker's melody that much bigger but brings the small, fast moves (the wobble of a held note, the dips
+// at consonants) back to the speaker's own size. Real-time safe (sound thread: from the chain's settings).
+void voicestream_set_intonation(VoiceStream *stream, float intonation);
+
 // Test settings (--changer-tune): "aiSlowMs" = extra time added to each piece (forces late pieces),
-// "aiSlowEvery" = only every Nth piece, "aiGainMaxDb" = the most the loudness match may lift (default 18).
-// Returns 1 if the key is known.
+// "aiSlowEvery" = only every Nth piece, "aiGainMaxDb" = the most the loudness match may lift (default 18),
+// "aiGainMs" = its window (50); the pitch the AI voice follows (with look-ahead): "aiSmoothFrames" (light smoothing,
+// frames on each side, 1), "aiSlowFrames" (the melody line, 7), "aiIntonation" (as voicestream_set_intonation),
+// "aiGapFrames" (unvoiced gaps up to this long inside a loud sound are bridged, 8), "aiOnsetFrames" (a vowel's
+// unvoiced lead-in frames that take its first pitch, 3); "aiSolaMode" (-1 by look-ahead,
+// 0 search, 1 keep the timing, 2 search near), "aiQuietDb" (a pause for look-ahead switches, -45),
+// "aiLookaheadMs" (as voicestream_set_lookahead). Returns 1 if the key is known.
 int voicestream_tune(VoiceStream *stream, const char *key, float value);
 
-// The fixed delay from mic to output, in chain samples.
+// The fixed delay from mic to output, in chain samples (with the look-ahead in use, or the one asked for).
 int voicestream_latency_frames(const VoiceStream *stream);
 
 // Sound thread: the next `frames` mic samples and the target pitch of the n 10 ms frames that finished

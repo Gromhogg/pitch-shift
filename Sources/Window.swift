@@ -1032,9 +1032,10 @@ enum Keys {
     static let voiceNatural = "voiceNatural"  // the old Natural/Cartoon switch (version 2.0), read once to carry over
     static let voiceSlowDeeper = "voiceSlowDeeper"  // "Deeper when slow"
     // The Voice changer: on/off, the voice's id ("woman", "man", or an added voice), Strength 0 (light) ... 1 (full),
-    // "natural" or "realistic", and "Don't show again" ticked on the Realistic alert.
+    // and "Faster ↔ More real" 0 ... 1 (ChangerSettings.realism). changerQuality ("natural" / "realistic", the
+    // switch before the slider) is read once to carry over, then removed.
     static let changerOn = "changerOn", changerVoice = "changerVoice", changerStrength = "changerStrength"
-    static let changerQuality = "changerQuality", hideChangerAlert = "hideChangerAlert"
+    static let changerRealism = "changerRealism", changerQuality = "changerQuality"
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
@@ -1081,15 +1082,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     // The Voice changer as saved (before the voice starts). Pictures show Woman (Man with changer-man), Strength 1 (or
-    // --strength), Realistic with changer-realistic/-loading/-fallback, and save nothing.
+    // --strength), the AI voice at the slider's default with changer-realistic/-loading/-fallback, the slider at
+    // changer-slider-natural / -fast / -default / -max / -NN (NN percent), and save nothing.
     func restoreChanger() {
         if let preview {
             voice.changer.on = preview.contains("changer")
             voice.changer.voiceID = arg("--voice").flatMap { VoiceLibrary.shared.voice($0)?.id }
                 ?? (preview.contains("changer-man") ? "man" : "woman")  // --voice NAME: that voice (an added one too)
             voice.changer.strength = arg("--strength").flatMap(Float.init).map { max(0, min(1, $0)) } ?? 1
-            voice.changer.realistic = realisticOffered
-                && ["changer-realistic", "changer-loading", "changer-fallback"].contains { preview.contains($0) }
+            var realism: Float = ["changer-realistic", "changer-loading", "changer-fallback"].contains { preview.contains($0) }
+                ? ChangerSettings.defaultRealism : 0
+            if let range = preview.range(of: "changer-slider-") {
+                let word = preview[range.upperBound...].prefix { $0.isLetter || $0.isNumber }
+                switch word {
+                case "natural": realism = 0
+                case "fast": realism = ChangerSettings.aiStart
+                case "default": realism = ChangerSettings.defaultRealism
+                case "max": realism = 1
+                default: realism = Float(word).map { max(0, min(1, $0 / 100)) } ?? ChangerSettings.defaultRealism
+                }
+            }
+            voice.changer.realism = realisticOffered ? realism : 0
             if voice.changer.on { voice.halfSteps = 0; voice.slowDeeper = false }  // as it would be (nothing saved)
             return
         }
@@ -1099,7 +1112,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         voice.changer.voiceID = VoiceLibrary.shared.voice(saved)?.id ?? "woman"
         let strength = (defaults.object(forKey: Keys.changerStrength) as? NSNumber)?.floatValue ?? 1
         voice.changer.strength = strength.isFinite ? max(0, min(1, strength)) : 1
-        voice.changer.realistic = realisticOffered && defaults.string(forKey: Keys.changerQuality) == "realistic"
+        // The slider; the Realistic switch of the version before becomes its default AI position (or Natural).
+        if let quality = defaults.string(forKey: Keys.changerQuality) {
+            defaults.set(quality == "realistic" ? ChangerSettings.defaultRealism : 0, forKey: Keys.changerRealism)
+            defaults.removeObject(forKey: Keys.changerQuality)
+        }
+        // Not set yet: the slider's default (the AI voice with the least delay that speaks smoothly).
+        let realism = (defaults.object(forKey: Keys.changerRealism) as? NSNumber)?.floatValue ?? ChangerSettings.defaultRealism
+        voice.changer.realism = realisticOffered && realism.isFinite ? max(0, min(1, realism)) : 0
         // Only one at a time: saved with a pitch change too (an older version allowed both), the changer wins.
         if voice.changer.on && (voice.halfSteps != 0 || voice.slowDeeper) { clearPitchChange() }
     }
@@ -1114,7 +1134,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         defaults.set(false, forKey: Keys.voiceSlowDeeper)
     }
 
-    // Realistic voices need Apple silicon (the Intel half of the app has no AI). Pictures: changer-intel hides it.
+    // Realistic voices need Apple silicon (the Intel half of the app has no AI). Pictures: changer-intel shows the
+    // card as on an Intel Mac (the slider stays at Natural).
     var realisticOffered: Bool {
         #if arch(arm64)
         return preview?.contains("changer-intel") != true
@@ -1127,14 +1148,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     var hearCard: ShiftCard!
     var voiceCard: ShiftCard!
     var changerCard: ShiftCard!
-    // The Voice changer's Strength (0 = light, 1 = full) and its "Realistic" switch (the AI voice, Apple silicon).
+    // The Voice changer's Strength (0 = light, 1 = full) and its "Faster ↔ More real" slider (0 = Natural, then the AI
+    // voice, Apple silicon, hearing further ahead), with the delay it gives under it.
     let strength = GradientSlider(left: "Light", right: "Full", name: "Strength") { value in
         value <= 0 ? "Light" : value >= 1 ? "Full" : "\(Int((value * 100).rounded())) percent"
     }
-    let realisticSwitch = GradientSwitch()
+    let realism = GradientSlider(left: "Faster", right: "More real", name: "Faster or more real") { _ in "" }
+    let delayLabel = NSTextField(labelWithString: "Delay: about 0.1 s")
     let realisticLoading = NSProgressIndicator()  // while the realistic voice is being prepared
     let realisticWarning = NSImageView()          // it fell behind, or can't run (the tooltip says why)
-    var realisticRow: CardRow!
+    var delayRow: CardRow!
+    private var realismApply: DispatchWorkItem?   // a slider move is used once the knob rests (no new chain mid-drag)
     lazy var voiceTools = VoiceTools(app: self)  // the voices button next to the voice picker (VoiceTools.swift)
     let advancedSwitch = GradientSwitch()
     let style = GradientSlider(left: "Natural", right: "Cartoon", name: "Voice style") { value in
@@ -1354,23 +1378,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             strength.scale = scale
             strength.rowHeight = Theme.controlSize(scale) == .large ? 22 : 19  // like the Realistic switch
         }
-        realisticSwitch.onChange = { [weak self] on in self?.realisticPicked(on) }
+        realism.onChange = { [weak self] value in self?.realismPicked(value) }
+        realism.describe = { [unowned self] value in delayText(for: value, spoken: true) }
+        let realismRow = CardRow(views: [realism])
+        realismRow.onScale = { [unowned self] scale in
+            realism.scale = scale
+            realism.rowHeight = Theme.controlSize(scale) == .large ? 22 : 19  // like Strength
+        }
+        delayLabel.textColor = .secondaryLabelColor
+        delayLabel.setAccessibilityElement(false)  // the slider says it
         realisticLoading.style = .spinning
         realisticLoading.controlSize = .small
         realisticLoading.isDisplayedWhenStopped = false
         realisticLoading.isHidden = true
         realisticLoading.setAccessibilityLabel("Getting the realistic voice ready")
         realisticWarning.isHidden = true
-        realisticRow = ShiftCard.switchRow("Realistic", realisticSwitch, notes: [realisticLoading, realisticWarning])
-        let sizeRow = realisticRow.onScale  // the label and switch sizes (switchRow)
-        realisticRow.onScale = { [unowned self] scale in
-            sizeRow(scale)
+        let delayLine = NSStackView(views: [delayLabel, realisticLoading, realisticWarning])
+        delayLine.spacing = 5
+        delayRow = CardRow(views: [delayLine])
+        delayRow.onScale = { [unowned self] scale in
             let points = 11 + (scale - 1) * 2.5
+            delayLabel.font = .systemFont(ofSize: points)
             realisticWarning.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: "Natural for now")?
                 .withSymbolConfiguration(.init(pointSize: points, weight: .regular).applying(.init(paletteColors: [.secondaryLabelColor])))
         }
-        realisticRow.isHidden = !realisticOffered
-        changerCard = ShiftCard(title: "Voice changer", extraRows: [strengthRow, realisticRow], showsAmount: false)
+        changerCard = ShiftCard(title: "Voice changer", extraRows: [strengthRow, realismRow], showsAmount: false)
+        changerCard.addRow(delayRow, tight: true)
         changerCard.picker.menu?.delegate = self
         changerCard.picker.target = self
         changerCard.picker.action = #selector(changerVoicePicked)
@@ -1386,7 +1419,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
         // Tab goes through one card, then the next.
         let order = hearCard.keyViews + [advancedSwitch, tone] + voiceCard.keyViews
-            + [style, testButton, slowSwitch, installButton, soundsButton] + changerCard.keyViews + [strength, realisticSwitch]
+            + [style, testButton, slowSwitch, installButton, soundsButton] + changerCard.keyViews + [strength, realism]
         background.nextKeyView = order[0]
         for (view, next) in zip(order, order.dropFirst() + [order[0]]) { view.nextKeyView = next }
 
@@ -1851,8 +1884,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     // MARK: Voice changer
 
-    private var changerAlert: NSAlert?
-
     // Turning the Voice changer on also turns Your voice on, and sets the amount to 0 and "Deeper when slow" off
     // (only one at a time: the changer sets the pitch).
     func setChanger(_ on: Bool) {
@@ -1870,39 +1901,36 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         defaults.set(value, forKey: Keys.changerStrength)
     }
 
-    // Turning Realistic on shows an alert first (it adds delay), unless "Don't show again" was ticked.
-    func realisticPicked(_ on: Bool) {
-        if on && !defaults.bool(forKey: Keys.hideChangerAlert) {
-            askRealistic()
-            return
+    // "Faster ↔ More real": the delay under it follows the knob right away; the voice changes once the knob rests
+    // for a moment (so dragging across the Natural end doesn't start the voice over and over).
+    func realismPicked(_ value: Float) {
+        refreshDelay()
+        realismApply?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            realismApply = nil
+            voice.changer.realism = value
+            if preview == nil { defaults.set(value, forKey: Keys.changerRealism) }
+            refresh()
         }
-        voice.changer.realistic = on
-        if preview == nil { defaults.set(on ? "realistic" : "natural", forKey: Keys.changerQuality) }
-        refresh()
+        realismApply = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: work)
     }
 
-    // A sheet on the window: Turn On, or Cancel (the switch goes back off and nothing is saved).
-    func askRealistic() {
-        guard changerAlert == nil else { return }
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = "Realistic voices add delay"
-        alert.informativeText = "Your voice reaches the call about a quarter second later."
-        alert.addButton(withTitle: "Turn On").bezelColor = Theme.purple
-        alert.addButton(withTitle: "Cancel")
-        alert.showsSuppressionButton = true
-        alert.suppressionButton?.title = "Don't show again"
-        changerAlert = alert
-        alert.beginSheetModal(for: window) { [weak self] answer in
-            guard let self else { return }
-            changerAlert = nil
-            if answer == .alertFirstButtonReturn && preview == nil {  // pictures change nothing
-                if alert.suppressionButton?.state == .on { defaults.set(true, forKey: Keys.hideChangerAlert) }
-                voice.changer.realistic = true
-                defaults.set("realistic", forKey: Keys.changerQuality)
-            }
-            refresh()  // shows the switch as it really is (off after Cancel)
-        }
+    // "Delay: about 0.43 s" for a slider position (spoken: for VoiceOver, with the setting's name first).
+    func delayText(for value: Float, spoken: Bool = false) -> String {
+        var settings = voice.changer
+        settings.realism = realisticOffered ? value : 0
+        let seconds = voice.changerDelay(for: settings)
+        let text = String(format: "%.2f", seconds)
+        guard spoken else { return "Delay: about \(text) s" }
+        return (settings.realistic ? "Realistic" : "Natural") + ", delay about \(text) seconds"
+    }
+
+    private func refreshDelay() {
+        let text = delayText(for: realism.value)
+        if delayLabel.stringValue != text { delayLabel.stringValue = text }
+        realism.setAccessibilityValueDescription(delayText(for: realism.value, spoken: true))
     }
 
     // MARK: Switches
@@ -1970,7 +1998,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     // For screenshots (--preview hear-on,voice-on,waiting,typing,recording,playing,listening,hover,menu,roll,
     // resize,no-driver,advanced-alert,sounds,rename,volume,drop,light,tone,slow,changer,changer-man,
-    // changer-realistic,changer-loading,changer-fallback,changer-alert,changer-intel [--size 800x400]): shows a
+    // changer-realistic,changer-loading,changer-fallback,changer-slider-natural|fast|default|max|NN,changer-intel
+    // [--size 800x400]): shows a
     // state, no sound. Any changer state also shows Your voice on.
     func showPreview() {
         guard let preview else { return }
@@ -2014,12 +2043,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 self.advancedSwitch.isOn = true
                 self.askAdvanced()
-            }
-        }
-        if preview.contains("changer-alert") {  // the alert shown when Realistic is turned on
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                self.realisticSwitch.isOn = true
-                self.askRealistic()
             }
         }
         if preview.contains("resize") {  // drags the window's corner through all three layouts, ending one above the other
@@ -2142,8 +2165,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     // The Voice changer card: on while its switch and Your voice are on (`active`); the switch and picker work while
-    // Pitch Shift Mic and a mic are there (`usable`). Next to "Realistic": a spinner while the realistic voice gets
-    // ready, a small warning sign when Natural is standing in (the tooltip says why).
+    // Pitch Shift Mic and a mic are there (`usable`). Under "Faster ↔ More real": the delay, a spinner while the
+    // realistic voice gets ready, a small warning sign when Natural is standing in (the tooltip says why).
     private func showChanger(active: Bool, usable: Bool) {
         changerCard.show(on: voice.changer.on, active: active)
         changerCard.toggle.isEnabled = usable
@@ -2167,8 +2190,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             strength.describe = { $0 <= 0 ? "Light" : $0 >= 1 ? "Full" : "\(Int(($0 * 100).rounded())) percent" }
             strength.setAccessibilityLabel("Strength")
         }
-        if changerAlert == nil { realisticSwitch.isOn = voice.changer.realistic }  // stays on while the alert asks
-        realisticSwitch.isEnabled = active && hasRealistic
+        if realismApply == nil { realism.value = realisticOffered ? voice.changer.realism : 0 }  // (not while it moves)
+        realism.isEnabled = active && hasRealistic && realisticOffered
+        refreshDelay()
 
         enum Look { case natural, loading, realistic, fallback(Int), unavailable(String) }
         var look: Look
@@ -2185,7 +2209,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             if preview.contains("changer-fallback") { look = .fallback(3) }
         }
         var note: String?, loading = false, warning = false
-        if let chosen, !hasRealistic {
+        if !realisticOffered {
+            note = "The more real voices need a Mac with Apple silicon"
+        } else if let chosen, !hasRealistic {
             note = "\(chosen.name) has no realistic version"
         } else if active && voice.changer.realistic {
             switch look {
@@ -2207,7 +2233,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             if loading { realisticLoading.startAnimation(nil) } else { realisticLoading.stopAnimation(nil) }
         }
         realisticWarning.isHidden = !warning
-        realisticRow.toolTip = note
-        realisticSwitch.setAccessibilityHelp(note)
+        realism.toolTip = note
+        delayRow.toolTip = note
+        realism.setAccessibilityHelp(note)
     }
 }

@@ -27,7 +27,10 @@
 //     moves with a gradual fall or rise (not below 0.62 x median, mapped) and holds through a sudden drop or rough
 //     frames; an aperiodic moment up to 80 ms after voice holds it (never starts it); then it is eased into 9 (at
 //     most 12) half-steps above and 6 (at most 9) below the voice's own median, and moves at most 2 half-steps per
-//     10 ms while it sings (gaps up to 30 ms count as singing),
+//     10 ms while it sings (gaps up to 30 ms count as singing); the AI voice maps from its own median (aiMedianMode
+//     1): the same frames teach it, except inside a held note (30 frames within 0.8 half-steps of their mean), and
+//     once it knows the speaker (300 frames) it moves at most 0.01 half-steps per frame, so a long note is not pulled
+//     back toward the voice's pitch while it is held (Natural keeps its own median, unchanged),
 //   - voice shape (formants): formant ^ (strength * |off| / |12 log2(target / assumedInputHz)|, limited to 1),
 //     gliding over 150 ms; Rubber Band gets shape / pitch.
 // post (after Rubber Band), per output sample, all plain filters (no added delay):
@@ -45,7 +48,8 @@
 // voicedMinDb, creakHz, creakRatio, creakJitter, creakApLow, creakApHigh, smoothMs, formantGlideMs, strengthGlideS,
 // maxSemitones, medianSeconds, seedFrames, seedFarSt, seedFarFade, eqMaxDb, eqStepDb, eqSeconds, eqStartSeconds, presenceHz, presenceQ,
 // sibilanceHz, breathAttackMs, breathReleaseMs, octUpCost, octDownCost, jumpCost, rangeSt, rangeCost, contFrames,
-// gapFrames, warmFrames, medianGlideSt, aiBandSt, aiMaxSt, aiBandLowSt, aiMinSt, aiHoldFrames, aiSlewSt.
+// gapFrames, warmFrames, medianGlideSt, aiBandSt, aiMaxSt, aiBandLowSt, aiMinSt, aiHoldFrames, aiSlewSt, aiMedianMode,
+// aiSteadyFrames, aiSteadySt, aiMedianGlideSt, aiMedianWarmFrames.
 #include "VoiceChanger.h"
 
 #include <algorithm>
@@ -148,6 +152,13 @@ struct Tuning {
     float aiMinSt = 9;
     float aiHoldFrames = 8;          // an aperiodic moment this soon after voice keeps the AI voice singing
     float aiSlewSt = 2;              // the most it moves per frame inside voiced sound
+    // the AI voice's own idea of the speaker's median (Natural keeps the one above): a held note doesn't teach it,
+    // and once it knows the speaker it moves slowly, so a long note stays where it was sung
+    float aiMedianMode = 1;          // 0 = the same median as Natural (before 3.1), 1 = the AI's own
+    float aiSteadyFrames = 30;       // a voiced stretch this long within aiSteadySt of its own mean is a held note
+    float aiSteadySt = 0.8f;
+    float aiMedianGlideSt = 0.01f;   // once it knows the speaker: the most it moves per frame
+    float aiMedianWarmFrames = 300;  // ... after this many learned frames (before: as fast as Natural's)
 };
 
 struct TuneKey {
@@ -171,7 +182,9 @@ const TuneKey kTuneKeys[] = {
     {"seedFarFade", &Tuning::seedFarFade},
     {"medianGlideSt", &Tuning::medianGlideSt}, {"aiBandSt", &Tuning::aiBandSt}, {"aiMaxSt", &Tuning::aiMaxSt},
     {"aiBandLowSt", &Tuning::aiBandLowSt}, {"aiMinSt", &Tuning::aiMinSt}, {"aiHoldFrames", &Tuning::aiHoldFrames},
-    {"aiSlewSt", &Tuning::aiSlewSt},
+    {"aiSlewSt", &Tuning::aiSlewSt}, {"aiMedianMode", &Tuning::aiMedianMode}, {"aiSteadyFrames", &Tuning::aiSteadyFrames},
+    {"aiSteadySt", &Tuning::aiSteadySt}, {"aiMedianGlideSt", &Tuning::aiMedianGlideSt},
+    {"aiMedianWarmFrames", &Tuning::aiMedianWarmFrames},
 };
 
 struct VoiceKey {
@@ -300,6 +313,15 @@ struct VoiceChanger {
     int aiAge = 999;
     int voicedAge = 999;        // frames since the last voiced frame (after the median of 3)
     float medianHz = 120;
+    // The AI voice's own median (aiMedianMode 1): its own histogram without held notes, and a slower glide.
+    float aiBins[kPitchBins] = {};
+    int16_t aiRing[1024] = {};
+    int aiCount = 0, aiAt = 0;
+    int64_t aiLearned = 0;
+    float aiMedianUse = 0;
+    int steadyRun = 0;          // voiced frames in a row near their own mean (a held note)
+    float steadyMean = 0;
+    float aiLastDev = 0;
     // Decisions for post.
     uint8_t flagRing[kFlagFrames] = {};
     int64_t flagCentre[kFlagFrames] = {};
@@ -402,6 +424,43 @@ struct VoiceChanger {
         // speaker the guess doesn't fit, e.g. a man using the Man voice).
         const bool far = std::fabs(semitones(f0 / binHz(seedBin))) > tuning.seedFarSt;
         seedWeight = std::max(0.0f, seedWeight - (far ? tuning.seedFarFade : 0.25f));
+        learnAiMedian(f0);
+    }
+
+    // The AI's median learns the same frames, except inside a held note (so holding a note doesn't pull it there).
+    void learnAiMedian(float f0) {
+        const float s = semitones(f0 / 100.0);
+        if (steadyRun > 0 && std::fabs(s - steadyMean) < tuning.aiSteadySt) {
+            steadyRun = std::min(steadyRun + 1, 100000);
+            steadyMean += (s - steadyMean) / (float)std::min(steadyRun, 50);
+        } else {
+            steadyRun = 1;
+            steadyMean = s;
+        }
+        if (steadyRun > (int)tuning.aiSteadyFrames) return;
+        const int bin = pitchBin(f0);
+        while (aiCount >= mapCap) {
+            const int oldest = (aiAt - aiCount + 1024) % 1024;
+            aiBins[aiRing[oldest]] -= 1;
+            aiCount--;
+        }
+        aiRing[aiAt] = (int16_t)bin;
+        aiBins[bin] += 1;
+        aiAt = (aiAt + 1) % 1024;
+        aiCount++;
+        aiLearned++;
+    }
+
+    // Once a frame: the AI's median in use (aiMedianMode 1) moves toward its measured one; fast while it is still
+    // finding the speaker (like Natural's), then at most aiMedianGlideSt per frame.
+    float aiMedianNow() {
+        const float measured = (float)binHz(medianBin(aiBins, seedBin, seedWeight));
+        if (!(aiMedianUse > 0)) { aiMedianUse = measured; return aiMedianUse; }
+        const bool finding = aiLearned < (int64_t)tuning.aiMedianWarmFrames && !(speakerHz > 0);
+        const float most = finding ? tuning.medianGlideSt : tuning.aiMedianGlideSt;
+        const float d = std::clamp(semitones(measured / aiMedianUse), -most, most);
+        aiMedianUse = (float)(aiMedianUse * std::exp2(d / 12));
+        return aiMedianUse;
     }
 
     float noiseFloor() const {  // 10th percentile of the levels of the last ~5 s
@@ -539,6 +598,14 @@ struct VoiceChanger {
         medianHz = median;
         const bool voiced = f0 > 0;
         voicedAge = voiced ? 0 : std::min(voicedAge + 1, 1000);
+        if (!voiced && voicedAge > (int)tuning.gapFrames) steadyRun = 0;
+        const bool aiOwn = tuning.aiMedianMode >= 0.5f;
+        const float aiMedian = aiOwn ? aiMedianNow() : median;  // the median the AI voice's pitch is mapped from
+        // the AI's pitch change for a frame this far from its median (half-steps; aiOwn only)
+        auto aiTotal = [&](float dev) {
+            return std::clamp(strength * (semitones(voice.targetHz / aiMedian) + (voice.intonation - 1) * dev) + extra,
+                              -tuning.maxSemitones, tuning.maxSemitones);
+        };
         bool creak = false, rough = false;
         if (voiced) {
             if (prevCount < 3) prev[prevCount++] = f0;
@@ -575,6 +642,10 @@ struct VoiceChanger {
             const float total = std::clamp(strength * shiftFrame + extra, -tuning.maxSemitones, tuning.maxSemitones);
             target = f0 * std::exp2(total / 12);
             aiWant = target;
+            if (aiOwn) {
+                aiLastDev = std::clamp(semitones(f0 / aiMedian), -12.0f, 12.0f);
+                aiWant = f0 * std::exp2(aiTotal(aiLastDev) / 12);
+            }
             lastGoodHz = target;
             lastGoodAge = 0;
             voicedFrames++;
@@ -596,8 +667,9 @@ struct VoiceChanger {
             if (creak && shiftKnown) {
                 // (an aperiodic frame keeps it going only up to aiHoldFrames after the last voiced frame)
                 const bool going = aiHz > 0 && aiAge <= (int)tuning.contFrames && voicedAge <= (int)tuning.aiHoldFrames;
-                const float total = std::clamp(strength * shiftFrame + extra, -tuning.maxSemitones, tuning.maxSemitones);
-                const float floorHz = tuning.creakRatio * median * std::exp2(total / 12);
+                const float total = aiOwn ? aiTotal(aiLastDev)
+                                          : std::clamp(strength * shiftFrame + extra, -tuning.maxSemitones, tuning.maxSemitones);
+                const float floorHz = tuning.creakRatio * aiMedian * std::exp2(total / 12);
                 if (going) {
                     float ratio = 1;
                     if (voiced && !rough && prevCount >= 2) {
@@ -611,8 +683,8 @@ struct VoiceChanger {
             }
         }
         // Realistic mode's pitch: the band's centre is where the speaker's median lands.
-        const float bandCentre = shiftKnown ? median * std::exp2(std::clamp(strength * semitones(voice.targetHz / median) + extra,
-                                                                               -tuning.maxSemitones, tuning.maxSemitones) / 12) : 0;
+        const float bandCentre = shiftKnown ? aiMedian * std::exp2(std::clamp(strength * semitones(voice.targetHz / aiMedian) + extra,
+                                                                                 -tuning.maxSemitones, tuning.maxSemitones) / 12) : 0;
         const float aiTarget = aiPitch(aiWant, bandCentre);
         const int64_t index = ++flagLatest;
         flagRing[index % kFlagFrames] = (uint8_t)(voiced || creak);
@@ -710,7 +782,7 @@ struct VoiceChanger {
         lastGoodAge = 999;
         for (int k = 0; k < 3; ++k) { octHz[k] = 0; octPath[k] = 0; }
         octAge = 999;
-        aiHz = 0; aiAge = 999; voicedAge = 999;
+        aiHz = 0; aiAge = 999; voicedAge = 999; steadyRun = 0;
         flagLatest = -1;
         frames = voicedFrames = creakFrames = 0;
         sibTop.clear(); sibOrigTop.clear();
@@ -859,6 +931,7 @@ void voicechanger_set_speaker(VoiceChanger *c, float medianHz, float weightFrame
     c->speakerWeight = ok ? weightFrames : 0;
     c->seeded = false;   // the first guess is made again
     c->medianUse = 0;
+    c->aiMedianUse = 0;
     if (c->hasVoice) c->applyVoice();
 }
 
