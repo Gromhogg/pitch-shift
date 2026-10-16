@@ -1,8 +1,8 @@
 // Pitch Shift: plays an app's sound (or all sound) and/or your voice at a higher or lower pitch, live.
 // Checks from Terminal (inside "Pitch Shift.app/Contents/MacOS/PitchShift"):
 //   --list                                     sound devices (with model UIDs; and which are in use), Pitch Shift Mic,
-//                                              the saved Bass ↔ Treble per output, the voice's mic, and which app each
-//                                              sound process belongs to
+//                                              the saved Bass ↔ Treble and Auto EQ per output, the voice's mic, and
+//                                              which app each sound process belongs to
 //   --watch-output [--seconds 10]              once a second: the output's sample rate (Bluetooth call mode shows
 //                                              8000-24000 Hz), its own mic, and which apps record from which devices
 // The device tests (--test, --test-voice, --test-button, --test-sounds, --test-default-mic) refuse to start while Pitch
@@ -67,14 +67,18 @@
 //                                              --voice-off: as with "Your voice" off and the Soundboard open: the
 //                                              tone must come through at its own pitch (440 Hz), no shift.
 //   --test ... --advanced [--record-out F.wav] [--steps-at "3:8,6:-5"] [--tone-amount 0.5] [--tone-at "2:1,4:-1"]
-//              [--as-device UID] [--tone-db 6,-6]
+//              [--as-device UID] [--tone-db 6,-6] [--auto-eq] [--eq-offsets 0,0,0,0,0]
 //                                              "What you hear" with Advanced processing on (--watch prints the delay;
 //                                              --record-out saves what it played; --steps-at changes the amount live;
 //                                              --tone-amount sets the Bass ↔ Treble slider, −1 … 1, for the output;
 //                                              --tone-at moves it live; --as-device uses that device's saved Bass ↔
-//                                              Treble as if it were playing; --tone-db sets bass and treble in dB)
+//                                              Treble and Auto EQ as if it were playing; --tone-db sets bass and
+//                                              treble in dB; --auto-eq turns on Auto EQ, --eq-offsets gives its five
+//                                              manual offsets in dB, Sub, Bass, Mids, Highs, Air, instead of the saved
+//                                              Auto EQ; --watch also prints its gains and levels while it's in use)
 //   --render-file IN OUT [--steps 5] [--advanced] [--steps-at "4:8,8:-5"] [--tone-amount 0.5] [--tone-at "2:1,4:-1"]
-//                [--tone-db 6,-6]              shifts a sound file with the app's own code (normal or advanced)
+//                [--tone-db 6,-6] [--auto-eq] [--eq-offsets 0,0,0,0,0]
+//                                              shifts a sound file with the app's own code (normal or advanced)
 import AppKit
 import AVFoundation
 import CoreAudio
@@ -84,19 +88,21 @@ func arg(_ name: String) -> String? {
     guard let i = args.firstIndex(of: name), i + 1 < args.count else { return nil }
     return args[i + 1]
 }
-// --preview STATES [--size 800x400] [--cartoon-amount 0.5] [--tone-amount -0.4] [--strength 0.6]: show the window in
-// a state for screenshots, without touching any sound or settings, and without switching apps (states: hear-on,
-// voice-on, waiting, typing, recording, playing, listening, hover, menu, roll, resize, no-driver, advanced-alert,
-// sounds, rename, volume, drop, light, tone, slow, changer, changer-man, changer-realistic, changer-loading,
-// changer-fallback, changer-slider-natural|fast|default|max|NN, changer-intel; --cartoon-amount sets the voice style
-// slider; sounds opens the Soundboard with example names, rename shows the first name being changed, volume the first
-// sound's volume slider and drop files being dragged over it; "tone" shows Advanced processing on, and --tone-amount
-// sets the Bass ↔ Treble slider; slow turns on "Deeper when slow"; changer turns on the Voice changer (and Your voice)
-// with Woman, changer-man with Man (--voice NAME: that voice, an added one too), --strength sets its Strength slider,
-// changer-realistic/-loading/-fallback show the AI voice (the slider's default) working/getting ready/standing in
-// with Natural, changer-slider-* puts the "Faster ↔ More real" slider at Natural, the first AI step, the default, the
-// far right or NN percent, changer-intel the card as on an Intel Mac (the slider stays at Natural); resize drags the
-// window's corner through the three layouts).
+// --preview STATES [--size 800x400] [--cartoon-amount 0.5] [--tone-amount -0.4] [--eq-offsets 3,-2,0,1,-1]
+// [--strength 0.6]: show the window in a state for screenshots, without touching any sound or settings, and without
+// switching apps (states: hear-on, voice-on, waiting, typing, recording, playing, listening, hover, menu, roll, resize,
+// no-driver, advanced-alert, sounds, rename, volume, drop, light, tone, slow, eq, changer, changer-man,
+// changer-realistic, changer-loading, changer-fallback, changer-slider-natural|fast|default|max|NN, changer-intel;
+// --cartoon-amount sets the voice style slider; sounds opens the Soundboard with example names, rename shows the first
+// name being changed, volume the first sound's volume slider and drop files being dragged over it; "tone" shows
+// Advanced processing on, and --tone-amount sets the Bass ↔ Treble slider; slow turns on "Deeper when slow"; eq turns
+// on Auto EQ, and --eq-offsets sets its five sliders, which show only the offsets since no sound plays; without eq,
+// Auto EQ shows off; changer turns on the Voice changer (and Your voice) with Woman, changer-man with Man (--voice
+// NAME: that voice, an added one too), --strength sets its Strength slider, changer-realistic/-loading/-fallback show
+// the AI voice (the slider's default) working/getting ready/standing in with Natural, changer-slider-* puts the
+// "Faster ↔ More real" slider at Natural, the first AI step, the default, the far right or NN percent, changer-intel
+// the card as on an Intel Mac (the slider stays at Natural); resize drags the window's corner through the three
+// layouts).
 let preview = arg("--preview")
 
 var signalSources: [DispatchSourceSignal] = []
@@ -124,6 +130,13 @@ let toneChanges: [(Double, Float)] = (arg("--tone-at") ?? "").split(separator: "
     guard parts.count == 2, let t = Double(parts[0]), let value = parseTilt(parts[1]) else { return nil }
     return (t, value)
 }
+
+// --auto-eq: Advanced processing's Auto EQ on. --eq-offsets "a,b,c,d,e": its manual offsets in dB (Sub, Bass, Mids,
+// Highs, Air; −12 … 12; missing ones are 0).
+let autoEQArg: (on: Bool, offsets: [Double]) = {
+    let given = (arg("--eq-offsets") ?? "").split(separator: ",").compactMap { Double($0) }.filter(\.isFinite).map { max(-12, min(12, $0)) }
+    return (args.contains("--auto-eq"), Array((given + AdvancedProcessor.noOffsets).prefix(5)))
+}()
 
 func fourCC(_ value: UInt32) -> String {
     String(bytes: [24, 16, 8, 0].map { UInt8((value >> $0) & 0xFF) }, encoding: .ascii) ?? "\(value)"
@@ -339,6 +352,15 @@ if args.contains("--list") {
         let name = id.map { deviceName($0) } ?? "not connected"
         print(String(format: "  %@ (%@): %.2f", uid, name, tilt) + (id == out ? " [default output]" : ""))
     }
+    // Auto EQ (Advanced processing), as saved for each speakers or headphones (read only).
+    let eqs = AppDelegate.savedAutoEQs(UserDefaults.standard)
+    print("Auto EQ saved per output (offsets in dB: Sub, Bass, Mids, Highs, Air):\(eqs.isEmpty ? " none" : "")")
+    for (uid, eq) in eqs.sorted(by: { $0.key < $1.key }) {
+        let id = device(uid: uid)
+        let name = id.map { deviceName($0) } ?? "not connected"
+        print("  \(uid) (\(name)): \(eq.on ? "on" : "off"), " + eq.offsets.map { String(format: "%+.1f", $0) }.joined(separator: " ")
+            + (id == out ? " [default output]" : ""))
+    }
     if let mic = Mics.virtualMic, let feed = Mics.virtualFeed {
         print("Pitch Shift Mic: \(mic) (\(Int(nominalRate(mic))) Hz, in use: \(isRunningSomewhere(mic))), hidden feed: \(feed) (hidden: \(getValue(feed, kAudioDevicePropertyIsHidden, default: UInt32(0)) != 0))")
     } else {
@@ -391,7 +413,7 @@ if args.contains("--watch-output") {
 
 if let input = arg("--render-file") {
     let i = args.firstIndex(of: "--render-file")!
-    guard i + 2 < args.count else { print("usage: --render-file IN OUT [--steps N] [--advanced]"); exit(1) }
+    guard i + 2 < args.count else { print("usage: --render-file IN OUT [--steps N] [--advanced] [--auto-eq] [--eq-offsets a,b,c,d,e]"); exit(1) }
     // "4:8,8:-5" = at 4 s go to +8, at 8 s go to -5
     let changes: [(Double, Float)] = (arg("--steps-at") ?? "").split(separator: ",").compactMap { item in
         let parts = item.split(separator: ":")
@@ -402,7 +424,8 @@ if let input = arg("--render-file") {
     do {
         try renderFile(input: input, output: args[i + 2], halfSteps: arg("--steps").flatMap(Float.init) ?? 2,
                        advanced: args.contains("--advanced"), changes: changes,
-                       tone: toneDbArg ?? AdvancedProcessor.toneDb(tilt: toneArg ?? 0), toneChanges: toneChanges)
+                       tone: toneDbArg ?? AdvancedProcessor.toneDb(tilt: toneArg ?? 0), toneChanges: toneChanges,
+                       autoEQ: autoEQArg)
         print(String(format: "wrote %@ (%.1f s)", args[i + 2], Date().timeIntervalSince(started)))
         exit(0)
     } catch {
@@ -497,13 +520,17 @@ if let input = arg("--render-sounds") {
 
 if args.contains("--test") {
     let source: HearSource = args.contains("--all") ? .all : HearSource(saved: arg("--app") ?? "com.apple.Music")
-    // Uses the saved Bass ↔ Treble for the output, like the app (only read; --tone-amount changes it for this test).
+    // Uses the saved Bass ↔ Treble and Auto EQ for the output, like the app (only read; --tone-amount changes the tone
+    // for this test, --auto-eq / --eq-offsets replace the Auto EQ).
     let shifter = HearShifter(halfSteps: arg("--steps").flatMap(Float.init) ?? 2, source: source, advanced: args.contains("--advanced"),
-                              tones: AppDelegate.savedTones(UserDefaults.standard))
+                              tones: AppDelegate.savedTones(UserDefaults.standard), autoEQs: AppDelegate.savedAutoEQs(UserDefaults.standard))
     shifter.testPID = arg("--pid").flatMap { pid_t($0) }
     shifter.testOutputKey = arg("--as-device")
     shifter.fixedToneDb = toneDbArg
     if let toneArg { shifter.setTone(toneArg, for: shifter.outputKey) }
+    if args.contains("--auto-eq") || arg("--eq-offsets") != nil { shifter.fixedAutoEQ = autoEQArg }
+    let usedEQ = shifter.fixedAutoEQ ?? shifter.autoEQ(for: shifter.outputKey).engine
+    let showAutoEQ = usedEQ.on || usedEQ.offsets.contains { $0 != 0 }
     for (t, value) in toneChanges {
         DispatchQueue.main.asyncAfter(deadline: .now() + t) { shifter.setTone(value, for: shifter.outputKey) }
     }
@@ -527,7 +554,12 @@ if args.contains("--test") {
     if args.contains("--watch") {  // print the delay every half second
         let started = Date()
         Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
-            print(String(format: "%5.1fs  ", Date().timeIntervalSince(started)) + shifter.timing)
+            var line = String(format: "%5.1fs  ", Date().timeIntervalSince(started)) + shifter.timing
+            if showAutoEQ, let eq = shifter.autoEQReadout {
+                line += "  auto EQ dB" + eq.auto.map { String(format: " %+.1f", $0) }.joined() +
+                    "  levels" + eq.level.map { String(format: " %.0f", $0) }.joined()
+            }
+            print(line)
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { finish() }
         RunLoop.main.run()

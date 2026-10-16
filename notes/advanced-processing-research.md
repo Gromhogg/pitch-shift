@@ -332,6 +332,207 @@ Safety limiter (normal-level songs: share of time limiting, mean / worst song; l
 - Not heard yet. Samples: `~/Downloads/Pitch Shift tone samples/` (4 test songs plus a loud, streaming-like pop song;
   original / 2.0.0 / new at -5, -8, +5, +8; all at -18 LUFS).
 
+## Auto EQ (branch `paid-auto-eq`)
+
+For a future paid version; local branch only. Five sections, **Sub** (20-80 Hz), **Bass** (80-250), **Mids**
+(250-2k), **Highs** (2k-8k) and **Air** (8k and up), whose levels are moved automatically so each stays near the
+ORIGINAL song's share, whatever the amount. It only looks at loudness; the per-pitch tone fix (recipe 5) stays as it
+is. Off by default, and then the sound is byte-identical to `v2-next`.
+
+**Design (engine `AutoEQ5` in `AdvancedChain.cpp`):**
+- Where: in `render()`, after the keep signal is added back and **before** bass / treble and the limiter. Planned
+  after bass / treble, but then it measures the Bass ↔ Treble slider's own change and undoes it (within ±6 dB);
+  before it, the slider still tilts the sound on top of the matched balance. The delay does not change (IIR only).
+- Split: Linkwitz-Riley 4th-order crossovers at 80, 250, 2000, 8000 Hz in a tree. The high side of each crossover is
+  "all-pass minus low-pass" (an LR4 pair adds up to that all-pass exactly), one filter instead of two. The lower
+  sections go through the higher crossovers' all-passes, nested (`AP4(AP3(AP2(g1·Sub) + g2·Bass) + g3·Mids) +
+  g4·Highs + g5·Air`), so all five stay in phase: at 0 dB the stage is an all-pass, flat within 0.000 dB (checked
+  with an impulse). Both channels run side by side in double precision (`Biquad2`, the compiler pairs them).
+- Measuring, every 256 samples (512 above 64 kHz): each section's mean square over the last 1 s (a running sum
+  of block energies), of the sound coming in (mono mix of its sections) and of the original input at the same moment
+  (history + keep at `t - L`, mono). Sub is measured from 20 Hz up (2nd-order high-pass on the measuring only): pink
+  noise and some songs have energy below 20 Hz that the engine's 40 Hz high-pass going down removes on purpose, and
+  counting it made Auto EQ pump up the Sub.
+- Target per section: the original's share minus this sound's share (dB), with a common level so the **loudness**
+  stays: the totals are weighted with the K-weighting (BS.1770) at each section's middle, and the common level is
+  solved again after the ±8 dB limit (±6 before tuning). A section quieter than -60 dBFS in both goes to 0 dB.
+- Moves: cut with a 300 ms time constant, lift with 1.5 s (200 ms / 1 s before tuning; one-pole in dB, once per
+  block); the gain itself ramps
+  sample by sample across the next block. (The first plan, a 400 ms window with 80 / 600 ms, matched worse and
+  wobbled more; see the results.) Because cuts are faster than lifts, the gains on their own drift down (up
+  to 1.5 dB quieter on the test songs); the level change they make (same weighting) is taken back out, smoothed like a
+  cut, so only the balance moves.
+- Manual offsets (−12…+12 dB per section) glide 0.25 dB per 32 samples and are added on top; automatic + offset is
+  held within ±15 dB. Switching on or off fades over 50 ms between the untouched sound and the stage (the split turns
+  the phase, so a hard switch would click); off with all offsets 0, once faded, the stage is skipped.
+- Live values: `advanced_get_auto_eq` reads the automatic gains and each section's output level through a sequence
+  lock over atomics (written once per block; a reader never makes the sound thread wait).
+
+**API:** C `advanced_set_auto_eq(chain, on, offsetsDb[5])`, `advanced_get_auto_eq(chain, autoDb[5], levelDb[5])`;
+tune keys `aeqrange` 8, `aeqattack` 300, `aeqrelease` 1500, `aeqwindow` 1000, `aeqf1`..`aeqf4` 80/250/2000/8000,
+`aeqfloor` -60, plus `aeqlowhz` 20, `aeqweight` 1, `aeqkeep` 1. Swift `AdvancedProcessor.setAutoEQ(on:offsets:)`,
+`readAutoEQ()`, `AdvancedPlayer.setAutoEQ`/`autoEQReadout`/`init(..., autoEQ:)`, `HearShifter.setAutoEQ`/
+`autoEQReadout`. Command line: `--render-file … --advanced --auto-eq [--eq-offsets a,b,c,d,e]`, the same for `--test`
+(`--watch` also prints the gains).
+
+**Results of the first build** (before tuning: range 6, 200 ms / 1 s; offline; Apple Loops test songs A-F and pink
+noise; tools in `research/advanced/autoeq/`):
+- Auto EQ off (the default) = byte-identical to the `v2-next` build: 21 of 21 renders (pink noise and song B at
+  +5 -5 +8 -8 0, Bass ↔ Treble settings, +15, amounts changed while playing, normal mode; offsets all 0 without
+  `--auto-eq`; normal mode with `--auto-eq --eq-offsets 3,3,3,3,3`, which it ignores).
+- Delay: `advanced_latency_frames` 6619 within ±12 and 10797 past ±12, on or off, the same as `v2-next`.
+- At 0 dB the stage is flat: 20 Hz-20 kHz within 0.000000 dB.
+- Pink noise, each section's share minus the original's (dB, Sub … Air), off → on:
+  +5: +0.17 -0.03 +0.01 +0.11 -0.33 → -0.03 -0.06 +0.01 +0.09 -0.02;
+  -5: -1.58 +0.76 +0.17 +0.24 +0.47 → -0.50 +0.51 +0.03 +0.08 +0.07. Loudness on vs off: -0.01 / +0.04 LU.
+- 28 cases (6 songs + pink noise at +5 -5 +8 -8), from 2 s on: mean share error off 1.12 → on 0.40 dB; the worst
+  section per case 2.00 → 0.98 dB on average (largest 5.30 → 3.73, song A's Bass at +8); cases with every section
+  within 1 dB: 9 → 18. Per section off 1.26 1.19 0.98 0.89 1.30 → on 0.53 0.78 0.19 0.18 0.30 dB. Loudness on vs off:
+  mean +0.00, worst +0.43 LU (EDM at -8), all 28 within 0.5. The gains wobble (std over time) 0.74 dB on average,
+  1.89 at most. The first plan's timing (400 ms window, 80 / 600 ms) on the same cases: 1.12 → 0.58 dB, largest 6.18,
+  13 cases within 1 dB, loudness worst -0.56 LU, wobble 1.13 / 2.01 dB, steps up to 0.43 dB per 256 samples.
+- Gain speed: at most 0.10 dB per 256 samples on the 28 cases (0.12 when switched on mid-song; usually 0.01-0.04),
+  and each change is ramped sample by sample.
+- Clicks: switching on and off every 2 s, and jumping all offsets by 6 dB, on a 200 Hz tone and a 5-tone mix at +5
+  and -5: nothing above 16 kHz louder than -92.7 dBFS (-108 without the switching); the largest sample-to-sample step
+  does not change when switching.
+- CPU (`advanced_process`, song B, 512-sample calls, mean of 3 runs): +5: `v2-next` 1.18 ms, off 1.21, on 1.22;
+  -8: 0.56 / 0.57 / 0.585. The stage alone: 1.41 ms per second of stereo sound (0.14% of one core).
+- No memory is made inside `advanced_process` / `advanced_set_semis` with Auto EQ on, switched off and on, and the
+  offsets moving while the amount changes (±12 and full range).
+- Readout: 199 million `advanced_get_auto_eq` reads from a second thread while the engine ran, 0 torn values (the
+  thread sanitizer crashes on this Mac even on an empty program, so it was not used).
+- Builds: the engine with `-Wall -Wextra`, portable FFT (as on Windows) and vDSP: no warnings; the app: no new
+  warnings.
+
+### Auto EQ tuning and checks
+
+**Test set** (never the owner's music): the 6 Apple Loops songs A-F, their "loud" (hot) and "streaming" (lp16)
+copies, pink noise, and 2 songs never used for tuning (G R&B, H soul vocal); amounts -12 -8 -5 -3 +3 +5 +8 +12.
+Rendered like `--render-file --advanced` (1024-frame calls, delay taken out; harness `aeqrender.cpp`, which also logs
+the five automatic gains and levels every 100 ms). Compared with the original, from 2 s on:
+- *share error*: each section's share of the total (section dB minus total dB; the engine's own LR4 split, mono) in
+  400 ms windows, render minus original; the mean and the 95th percentile (p95) of |error| per section. A window
+  counts only where the original's section is above -60 dBFS and within 40 dB of the total. Shares don't depend on
+  the level, so no loudness matching is needed.
+- long-term: the same over the whole song; the 1/3-octave error `tonal_balance` (loudness matched);
+- loudness (LUFS) Auto EQ on minus off; *movement*: |change| of each automatic gain per second (dB/s) from the 100 ms
+  log; Highs onset crest (2-8 kHz peak around each drum hit over the level around it), on minus off; the limiter's
+  time over 0.1 dB.
+
+**Results, final setting (range 8, 300 ms / 1.5 s), 6 songs, Sub / Bass / Mids / Highs / Air (dB):**
+
+| N | p95 off | p95 on | p95 normal mode | mean off | mean on |
+|---|---|---|---|---|---|
+| -12 | 8.0 / 5.4 / 4.2 / 5.5 / 4.7 | 6.5 / 4.6 / 3.3 / 4.2 / 3.3 | 7.4 / 7.1 / 4.8 / 7.0 / 15.0 | 3.3 / 2.8 / 2.0 / 2.4 / 2.8 | 2.4 / 2.2 / 1.5 / 1.7 / 1.5 |
+| -8 | 6.8 / 4.2 / 3.7 / 4.0 / 3.7 | 5.3 / 4.0 / 2.9 / 3.1 / 2.9 | 5.6 / 5.2 / 3.4 / 4.8 / 9.2 | 2.8 / 2.2 / 1.9 / 2.0 / 2.2 | 1.9 / 1.8 / 1.1 / 1.2 / 1.2 |
+| -5 | 5.0 / 3.6 / 2.9 / 2.9 / 3.0 | 3.7 / 3.1 / 2.1 / 2.1 / 2.3 | 3.9 / 3.6 / 2.2 / 3.2 / 5.5 | 2.0 / 1.6 / 1.4 / 1.4 / 1.5 | 1.4 / 1.4 / 0.8 / 0.9 / 1.0 |
+| -3 | 3.3 / 2.8 / 2.1 / 2.0 / 2.2 | 2.6 / 2.3 / 1.5 / 1.5 / 1.8 | 2.6 / 2.3 / 1.4 / 2.1 / 3.2 | 1.3 / 1.2 / 0.9 / 0.9 / 1.1 | 0.9 / 1.0 / 0.6 / 0.6 / 0.8 |
+| +3 | 2.5 / 1.7 / 1.3 / 1.6 / 1.7 | 2.2 / 1.7 / 1.1 / 1.5 / 1.6 | 2.8 / 2.2 / 0.9 / 1.2 / 2.1 | 1.1 / 0.8 / 0.6 / 0.8 / 0.8 | 1.0 / 0.8 / 0.5 / 0.6 / 0.6 |
+| +5 | 3.1 / 2.8 / 2.3 / 2.8 / 2.8 | 3.1 / 2.6 / 1.5 / 2.2 / 2.2 | 5.0 / 3.6 / 1.6 / 2.1 / 3.4 | 1.1 / 1.3 / 1.1 / 1.3 / 1.5 | 1.1 / 1.1 / 0.7 / 0.9 / 0.9 |
+| +8 | 3.2 / 3.4 / 2.3 / 2.9 / 3.3 | 2.9 / 3.0 / 1.9 / 2.4 / 2.8 | 8.6 / 5.4 / 2.7 / 3.4 / 4.9 | 1.3 / 1.6 / 1.1 / 1.3 / 1.9 | 1.0 / 1.4 / 0.7 / 1.0 / 1.2 |
+| +12 | 0.8 / 0.8 / 1.8 / 3.2 / 4.4 | 1.1 / 1.0 / 1.8 / 2.9 / 4.3 | 14.5 / 7.5 / 4.0 / 5.1 / 6.7 | 0.3 / 0.3 / 0.9 / 1.3 / 2.6 | 0.4 / 0.4 / 0.7 / 1.3 / 1.6 |
+| all | 4.1 / 3.1 / 2.6 / 3.1 / 3.2 | 3.4 / 2.8 / 2.0 / 2.5 / 2.6 | 6.3 / 4.6 / 2.6 / 3.6 / 6.2 | 1.7 / 1.5 / 1.2 / 1.4 / 1.8 | 1.2 / 1.2 / 0.8 / 1.0 / 1.1 |
+
+- Long-term share error (mean |error|): 1.1 / 1.1 / 1.0 / 0.9 / 1.4 → 0.5 / 0.7 / 0.2 / 0.2 / 0.4 dB; 1/3-octave
+  error 3.59 → 3.52 dB (normal mode 7.73). Loudness on vs off: mean +0.00, worst +0.43 LU, 48 of 48 within 0.5.
+  Highs onset crest: -0.01 dB on average, worst case -0.14. Limiter time: 0.112 → 0.047 %. Movement: 0.68 dB/s
+  (RMS), 95th percentile 1.4 dB/s, the busiest song 2.6 dB/s; at most 0.083 dB per 256 samples.
+- Pink noise: p95 2.4 / 1.1 / 0.5 / 0.5 / 0.9 → 1.7 / 1.0 / 0.5 / 0.5 / 0.4, loudness within 0.12 LU.
+- Held-out songs G, H: p95 1.5 / 1.7 / 2.0 / 2.5 / 2.1 → 1.4 / 1.6 / 1.8 / 2.4 / 1.5, mean 0.7 / 0.8 / 0.8 / 0.9 / 1.2 →
+  0.5 / 0.7 / 0.8 / 0.9 / 0.7, long-term 0.5 / 0.4 / 0.4 / 0.4 / 1.0 → 0.2 / 0.3 / 0.1 / 0.1 / 0.2; loudness worst
+  +0.29 LU; limiter 2.0 → 1.7 %.
+- Loud copies: p95 3.7 / 3.2 / 2.6 / 3.1 / 3.5 → 3.1 / 2.9 / 1.9 / 2.5 / 2.7; limiter 25.1 → 24.9 %; loudness 47 of 48
+  within 0.5 (hip hop at -8: -0.71 LU). Streaming copies: like the normal songs (p95 → 3.4 / 2.8 / 2.0 / 2.5 / 2.7).
+
+**Goals** (Auto EQ on at the defaults, mean over the 6 songs): p95 ≤ 2 dB in every section: **not met** (3.4 / 2.8 /
+2.0 / 2.5 / 2.6; at ±3 only the Sub, and the Bass at -3, are above 2; the held-out songs meet it except Highs 2.4). Loudness within ±0.5 dB: met (one loud-copy
+case -0.71). Movement under ~6 dB/s: met (0.7 RMS, 2.6 worst). Onset crest not worse by > 0.5 dB: met (-0.01).
+Limiter not worse: met (better). Held-out songs improve: yes, in every section.
+
+**Why p95 ≤ 2 dB can't be reached with a slow leveler:** a perfect 1 s leveler (it knows the true share error over
+the last second and applies it exactly, no delay; `oracle.py` on the Auto EQ-off renders) gets p95 2.9 / 2.1 / 1.7 /
+2.2 / 2.1 (2.8 / 1.8 / 1.4 / 2.0 / 1.8 if it could also see the next half second). What is left is inside the beat:
+the shifted kick's and bass notes' low end lasts and decays differently from the original's, so the Sub's share in a
+400 ms window swings ±2 dB with the rhythm. Only a leveler that pumps with the beat could follow that.
+
+**Settings tried** (6 songs x 8 amounts; p95 Sub..Air, movement RMS, worst loudness change):
+
+| setting | p95 | dB/s | LU |
+|---|---|---|---|
+| first build: range 6, 200 ms / 1 s, window 1 s | 3.48 / 2.80 / 1.99 / 2.49 / 2.64 | 0.86 | +0.43 |
+| range 8 / 9 / 12 | 3.43 / 2.78 / 1.97 / 2.47 / 2.61; 3.42 / 2.78 / 1.97 / 2.46 / 2.60; 3.41 / 2.78 / 1.99 / 2.44 / 2.58 | 0.87-0.88 | +0.43 / +0.48 / +0.62 |
+| window 0.5 s / 1.5 s | 3.49 / 2.77 / 2.01 / 2.49 / 2.76; 3.50 / 2.80 / 2.03 / 2.54 / 2.70 | 1.65 / 0.62 | -0.52 / +0.42 |
+| 100 ms / 0.5 s, window 0.5 s | 3.51 / 2.75 / 1.99 / 2.53 / 2.77 | 2.57 | -0.53 |
+| 50 ms / 0.3 s, window 0.4 s | 3.43 / 2.74 / 1.99 / 2.62 / 2.80 | 4.30 | -0.54 |
+| 150 ms / 0.8 s; 300 ms / 1.5 s | 3.48 / 2.80 / 1.99 / 2.49 / 2.63; 3.48 / 2.80 / 2.02 / 2.50 / 2.67 | 0.99 / 0.67 | +0.43 / +0.42 |
+| **range 8, 300 ms / 1.5 s (kept)** | **3.43 / 2.79 / 2.00 / 2.48 / 2.64** | **0.68** | **+0.43** |
+| floor -50 dBFS | no change | | |
+| `aeqkeep` 0 / `aeqweight` 0 | the same errors | | -0.90 / -2.70 |
+
+Faster settings only add movement; the errors hardly change (see the floor above). Range 8 helps the Sub a little on
+sub-heavy songs; 9 and 12 start to move the loudness. 300 ms / 1.5 s move 20 % less for the same match and use the
+limiter a little less. After an amount change while playing (0 → +8 → -8, songs A, B, F) the first-build timing and
+the kept one settle the same (within 0.1 dB); 100 ms / 0.5 s settles a little faster in the first second only.
+Crossovers stay at the owner's sections (80 / 250 / 2000 / 8000 Hz).
+
+**Found and not changed: a section's gain only partly reaches its section.** The five sections overlap (LR4), so a
+gain on one section moves that section's measured level by only about 70-90 % (Bass about 68 % on pink noise, often
+50 % on bass-heavy songs, where the notes sit near 80 Hz), and less when a neighbour moves the other way (song A at
++8: Bass asked -3.3 dB, got -0.4 dB). That is why song A's Bass stays 3-4 dB too strong at ±8 and ±12. Tried in a
+scratch copy: applying `W⁻¹ x` the wanted changes (W = how much each section's gain reaches each section, for pink
+noise): Sub / Bass p95 3.37 / 2.65 (from 3.48 / 2.80), long-term Bass 0.73 → 0.53 dB (worst 5.8 → 4.0), but Mids-Air
+p95 a little worse and song A 1 dB quieter (the loudness model adds section powers, which overlap in phase). Measured
+loudness weights per section made the loudness worse. Not kept; a possible next step is to measure each section's
+level after the gains and correct slowly.
+
+**Lost-bass check (PR #3's measure, 16 bass clips, % of 100 ms moments with 20-100 Hz more than 6 dB under the
+original):** +5: off 3.54 → on 4.87 (**+1.33, over the 1-point limit**); +8: 1.73 → 2.25 (+0.52); -5: 24.2 → 15.4;
+-8: 43.3 → 36.4. The increase comes from the split's phase turn, not from the gains: with every gain held at 0
+(`aeqrange` 0) it is +1.50 / +0.61, and the gains themselves lower it a little (-0.17 / -0.09 points). The split is an
+all-pass at 0 dB: no level change, but the lowest notes come out about 7 ms later than the highs (80 Hz and 250 Hz
+corners), so some 100 ms moments next to a note's start or end fall under -6 dB. Measured against the original passed
+through the same all-pass, Auto EQ on scores 3.43 % at +5 (off: 3.54 %). No tune setting changes it (range 4, 2 s
+window, 500 ms / 2 s: +1.22 … +1.37). Avoiding it would need a different split (gains added to the untouched sound),
+a bigger change.
+
+**Fixed: slowdown in digital silence on Intel and AMD processors.** After a few seconds of exact zeros the stage's
+filter memories sank into "denormal" numbers; an Intel build (Rosetta) then took up to 102 ms for one 512-sample call
+at -8 (mean 0.87 ms, p99 5.6 ms; Auto EQ off: 0.55 ms). Now memories under 1e-20 are set to 0 once per block: mean
+0.48 ms, p99 0.96 ms, max 1.8 ms. Apple silicon was not affected; music renders with Auto EQ on are byte-identical.
+
+**Checks with the final engine:**
+- Auto EQ off = byte-identical to the `v2-next` build: 6 of 6 (pink +5, song B -8, +12, +15, +5 with the tone slider
+  at 0.6 and `--eq-offsets 0,0,0,0,0`, normal mode -5 with `--auto-eq --eq-offsets 3,3,3,3,3`).
+- New defaults = the tuned keys on the old defaults: byte-identical (songs A and B at +5 and -8); the app's
+  `--render-file --advanced --auto-eq` gives the same samples as the harness.
+- Delay: 6619 frames within ±12, 10797 past it, Auto EQ on and off, the same as `v2-next`.
+- Clicks: switching on/off every 2 s and 6 dB offset jumps (200 Hz tone, 5-tone mix, +5 and -5): nothing above 16 kHz
+  louder than -92.7 dBFS.
+- CPU (song B, 512-sample calls, mean of 3): +5: `v2-next` 1.243 ms, off 1.254, on 1.267; -8: 0.594 / 0.602 / 0.620.
+- Memory: 0 allocations inside `advanced_process` / `advanced_set_semis` (on, switching, offsets moving, ±12 and full
+  range). Readout: 201.8 million reads from another thread while playing, 0 broken values.
+- Engine with `-Wall -Wextra`, portable FFT and vDSP: no warnings; app: no new warnings. Windows DSP tests built on
+  the Mac with the portable FFT: 27 of 27 passed (peak -0.30 dBFS).
+- Not run: the one live check (`--test --advanced --auto-eq --watch` on a quiet tone). The owner's Pitch Shift app
+  was running for the whole 10 minutes it waited, so nothing was played or recorded.
+
+**Review notes** (engine and Swift glue): no memory or locks on the sound path; the readout is a sequence lock over
+atomics; the five sections add back up flat (derived: at 0 dB the output is AP4·AP3·AP2·AP1 of the input). Two small
+things left as they are: `HearShifter.autoEQReadout` uses `audioQueue.sync`, so a window timer can wait while a
+player is being rebuilt (never the sound); and a new offsets array replaces the old one on the Advanced worker thread
+when a slider moves (one small free there, not on the Core Audio thread). Switching Auto EQ on or off crossfades the
+untouched and the phase-turned sound for 50 ms: no click, at most a brief "swish".
+
+**Samples:** `~/Downloads/Pitch Shift auto EQ samples/` (hip hop, EDM, piano, held-out soul vocal; A original, B
+Advanced, C Advanced + Auto EQ at -8, +5, +8; 12 s at -18 LUFS). Measured on the samples, worst section vs the
+original, B → C: hip hop 5.4 → 2.5 (-8), 3.9 → 3.4 (+5), 5.3 → 3.9 (+8); EDM 3.5 → 2.5, 1.7 → 0.6, 2.6 → 1.2; piano
+4.6 → 2.1, 1.0 → 0.2, 1.5 → 0.7; soul vocal 0.6 → 0.2, 1.4 → 0.3, 1.2 → 0.3 dB.
+
+Tools and results: `research/advanced/autoeq/tune/` (`aeqrender.cpp`, `aeqmeasure.py`, `grid.py`, `report.py`,
+`tables.py`, `oracle.py`, the scripts, every measurement as JSON in `results/`; the scripts were run from a scratchpad
+folder, see `env.sh`). Agent 1's checks in `research/advanced/autoeq/` run with `AEQ_TREE` / `AEQ_WORK` set.
+
 ## Not verified yet
 
 - Listening (all choices were made by measurements).

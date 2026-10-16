@@ -54,6 +54,7 @@ const int RBOPTS = RubberBandStretcher::OptionProcessRealTime | RubberBandStretc
 struct Biquad {
     double b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0, z1 = 0, z2 = 0;
     inline float run(float x) { double y = b0 * x + z1; z1 = b1 * x - a1 * y + z2; z2 = b2 * x - a2 * y; return (float)y; }
+    inline double runD(double x) { double y = b0 * x + z1; z1 = b1 * x - a1 * y + z2; z2 = b2 * x - a2 * y; return y; }
     void clear() { z1 = z2 = 0; }
     void set(double B0, double B1, double B2, double A0, double A1, double A2) {
         b0 = B0 / A0; b1 = B1 / A0; b2 = B2 / A0; a1 = A1 / A0; a2 = A2 / A0;
@@ -117,6 +118,20 @@ struct LR4 {
     void clear() { s1.clear(); s2.clear(); }
     inline float run(float x) { return s2.run(s1.run(x)); }
 };
+// One second-order filter for two channels side by side (the same filter on both), written so the compiler can run
+// the two at once (SIMD). Double precision all the way.
+struct Biquad2 {
+    double b0 = 1, b1 = 0, b2 = 0, a1 = 0, a2 = 0, z1[2] = {0, 0}, z2[2] = {0, 0};
+    void from(const Biquad &q) { b0 = q.b0; b1 = q.b1; b2 = q.b2; a1 = q.a1; a2 = q.a2; clear(); }
+    void clear() { z1[0] = z1[1] = z2[0] = z2[1] = 0; }
+    inline void run(double *v) {
+        double y0 = b0 * v[0] + z1[0], y1 = b0 * v[1] + z1[1];
+        z1[0] = b1 * v[0] - a1 * y0 + z2[0]; z1[1] = b1 * v[1] - a1 * y1 + z2[1];
+        z2[0] = b2 * v[0] - a2 * y0; z2[1] = b2 * v[1] - a2 * y1;
+        v[0] = y0; v[1] = y1;
+    }
+};
+
 inline double lrLP(double f, double fc) { double x = f / fc; x *= x; x *= x; return 1.0 / (1.0 + x); }  // |LR4 low-pass|
 inline double lrHP(double f, double fc) { double x = f / fc; x *= x; x *= x; return x / (1.0 + x); }    // |LR4 high-pass|
 inline double bwLP8(double f, double fc) { double x = f / fc; x *= x; x *= x; x *= x; return 1.0 / sqrt(1.0 + x * x); }  // |Butterworth 8 low-pass|
@@ -570,6 +585,308 @@ struct ToneStage {
     }
 };
 
+// ------------------------------------------------------------------------------------------------- auto EQ
+
+// "Auto EQ" (advanced_set_auto_eq): five sections, Sub (20-80 Hz), Bass (80-250), Mids (250-2k), Highs (2k-8k) and
+// Air (8k and up), whose levels follow the ORIGINAL song's balance as the song plays, whatever the amount. It only
+// looks at loudness: a section that comes out too loud is pulled down, one that comes out too quiet is lifted.
+// - Split: Linkwitz-Riley 4th order crossovers in a tree. The lower sections go through the all-pass of each higher
+//   crossover, so all five stay in phase and add back up flat (only the phase turns, like one more filter). Done as
+//   y = AP4(AP3(AP2(g1 b1) + g2 b2) + g3 b3) + g4 b4 + g5 b5, so 3 all-passes instead of 6. IIR only: no delay.
+// - Measuring, every SB samples: each section's level over the last `window` (1 s) of the sound coming in
+//   (mono mix) and of the ORIGINAL input at the same moment (the history ring, read at the chain's delay L).
+// - Target per section: the original's share (section minus total, dB) applied to this sound's total. The totals are
+//   weighted like a loudness meter (K-weighting at each section's middle), so the loudness heard stays and only the
+//   balance moves; the common level is solved again after the +-range limit. A section quiet in both (below `floor`)
+//   goes to 0 dB.
+// - Moves: a cut follows within `attack` (300 ms), a lift within `release` (1.5 s), smoothed in dB once per SB block;
+//   the gain itself ramps sample by sample across the next block, so it never steps. The manual offsets (-12..+12 dB)
+//   glide 0.25 dB per 32 samples, are added on top, and the sum is held within +-15 dB.
+// - On / off: fades between the untouched sound and the stage's output over 50 ms (the split turns the phase, so a
+//   hard switch would click). Off with all offsets 0 (the default) and that fade done, it is skipped: the output is
+//   exactly as without it.
+// - Readout (advanced_get_auto_eq): written once per SB block through a sequence lock of atomics, so another thread
+//   can read it without the sound thread ever waiting.
+const int AEQB = 5;            // sections
+const double AEQ_NONE = -120;  // readout level while the stage is off, or for a silent section (dBFS)
+const double AEQ_MAX = 15;     // largest gain, automatic + offset (dB)
+
+struct AeqReadout {
+    std::atomic<uint32_t> seq{0};
+    std::atomic<double> autoDb[AEQB], levelDb[AEQB];
+    AeqReadout() { for (int k = 0; k < AEQB; k++) { autoDb[k].store(0.0); levelDb[k].store(AEQ_NONE); } }
+    // sound thread only
+    void write(const double *a, const double *l) {
+        uint32_t s = seq.load(std::memory_order_relaxed);
+        seq.store(s + 1, std::memory_order_relaxed);
+        std::atomic_thread_fence(std::memory_order_release);
+        for (int k = 0; k < AEQB; k++) {
+            autoDb[k].store(a[k], std::memory_order_relaxed);
+            levelDb[k].store(l[k], std::memory_order_relaxed);
+        }
+        seq.store(s + 2, std::memory_order_release);
+    }
+    // any thread; retries while a write is halfway (a write takes nanoseconds, so it gives up after a few tries)
+    void read(double *a, double *l) const {
+        double ra[AEQB], rl[AEQB];
+        for (int tries = 0; tries < 100; tries++) {
+            uint32_t s1 = seq.load(std::memory_order_acquire);
+            for (int k = 0; k < AEQB; k++) {
+                ra[k] = autoDb[k].load(std::memory_order_relaxed);
+                rl[k] = levelDb[k].load(std::memory_order_relaxed);
+            }
+            std::atomic_thread_fence(std::memory_order_acquire);
+            if (!(s1 & 1) && seq.load(std::memory_order_relaxed) == s1) break;
+        }
+        for (int k = 0; k < AEQB; k++) { if (a) a[k] = ra[k]; if (l) l[k] = rl[k]; }
+    }
+};
+
+struct AutoEQ5 {
+    double sr = 48000; int nch = 2, SB = 256;
+    // settings (advanced_set_auto_eq, advanced_tune)
+    bool on = false;
+    double want[AEQB] = {};                         // manual offsets asked for (dB)
+    double range = 8, attackMs = 300, releaseMs = 1500, windowMs = 1000, floorDb = -60;
+    double fc[AEQB - 1] = {80, 250, 2000, 8000};    // crossovers (Hz)
+    bool weighted = true;                           // totals weighted like a loudness meter (else plain power)
+    // the split: the sound (per channel) and the original (mono, measured only)
+    // Each crossover: low = LR4 low-pass (two Butterworth sections), high = all-pass - low (an LR4 pair adds up to
+    // that all-pass exactly, so this is the LR4 high-pass for one filter instead of two). Both channels side by side.
+    Biquad2 lo1[AEQB - 1], lo2[AEQB - 1], xap[AEQB - 1];
+    Biquad2 ap[AEQB - 1];                           // all-pass of crossovers 2..4 on the lower sections (0 unused)
+    Biquad refLo1[AEQB - 1], refLo2[AEQB - 1], refAp[AEQB - 1];  // the same split for the original (mono)
+    double lowHz = 20;                              // Sub is measured from here up (what is below can't be heard)
+    Biquad subIn, subOut;                           // that high-pass, on the measured Sub only (original, sound)
+    double weight[AEQB] = {1, 1, 1, 1, 1};          // loudness weight of each section (power)
+    double aAtt = 0, aRel = 0;                      // smoothing per block
+    // state
+    bool running = false;
+    double mix = 0, mixStep = 1;                    // 0 = the untouched sound, 1 = the stage's output
+    double autoDb[AEQB] = {}, offDb[AEQB] = {};     // automatic gain and manual offset now (dB)
+    double balDb[AEQB] = {};                        // the automatic gain before its level is taken back out (dB)
+    double keepDb = 0;                              // that level (dB, smoothed)
+    bool keep = true;                               // take that level back out (tune "aeqkeep")
+    double g[AEQB] = {}, gTo[AEQB] = {}, gInc[AEQB] = {};  // gain applied (linear), where it ramps to, step per sample
+    int rampLeft = 0;
+    double eIn[AEQB] = {}, eOut[AEQB] = {}; int eN = 0;    // this block: sums of squares, samples
+    std::vector<double> wIn[AEQB], wOut[AEQB];      // mean square of each of the last blocks (a ring)
+    double sIn[AEQB] = {}, sOut[AEQB] = {};         // their sums
+    int nWin = 75, head = 0, filled = 0;
+    double pIn[AEQB] = {}, pOut[AEQB] = {};         // window means at the last analysis
+    AeqReadout readout;
+
+    void init(double rate, int channels, int block) {
+        sr = rate; nch = channels; SB = block;
+        mixStep = 1.0 / (0.050 * sr);
+        size_t cap = (size_t)ceil(5.0 * sr / SB) + 1;  // room for a 5 s window
+        for (int k = 0; k < AEQB; k++) { wIn[k].assign(cap, 0.0); wOut[k].assign(cap, 0.0); }
+        setWindow(windowMs);
+        setTimes();
+        design();
+        stop();
+    }
+    bool engaged() const {
+        if (on) return true;
+        for (int k = 0; k < AEQB; k++) if (want[k] != 0) return true;
+        return false;
+    }
+    bool active() const { return running || engaged(); }
+
+    void setTimes() {
+        aAtt = exp(-SB / (std::max(1.0, attackMs) * 0.001 * sr));
+        aRel = exp(-SB / (std::max(1.0, releaseMs) * 0.001 * sr));
+    }
+    void setWindow(double ms) {
+        windowMs = std::max(1000.0 * SB / sr, std::min(5000.0, ms));
+        nWin = std::max(1, std::min((int)wIn[0].size(), (int)lround(windowMs * 0.001 * sr / SB)));
+        clearWindow();
+    }
+    void clearWindow() {
+        for (int k = 0; k < AEQB; k++) {
+            std::fill(wIn[k].begin(), wIn[k].end(), 0.0); std::fill(wOut[k].begin(), wOut[k].end(), 0.0);
+            sIn[k] = sOut[k] = pIn[k] = pOut[k] = 0;
+        }
+        head = filled = 0;
+    }
+    void design() {
+        // corners: under 0.45 x the sample rate, each at least a third of an octave above the one below
+        for (int k = 0; k < AEQB - 1; k++) fc[k] = std::max(10.0, std::min(0.45 * sr, fc[k]));
+        for (int k = AEQB - 2; k > 0; k--) fc[k - 1] = std::min(fc[k - 1], fc[k] / 1.26);
+        for (int k = 0; k < AEQB - 1; k++) {
+            Biquad l, a;
+            l.lowpass(fc[k], M_SQRT1_2, sr);
+            a.allpass(fc[k], M_SQRT1_2, sr);  // = LR4 low + LR4 high at this corner
+            lo1[k].from(l); lo2[k].from(l); xap[k].from(a); ap[k].from(a);
+            refLo1[k] = refLo2[k] = l; refAp[k] = a;
+        }
+        lowHz = std::max(0.0, std::min(lowHz, fc[0] / 2));
+        if (lowHz > 0) { subIn.highpass(lowHz, M_SQRT1_2, sr); subOut.highpass(lowHz, M_SQRT1_2, sr); }
+        else { subIn = Biquad(); subOut = Biquad(); }
+        subIn.clear(); subOut.clear();
+        // loudness weights: the K-weighting of BS.1770 (high shelf + high-pass) at each section's middle
+        Biquad k1, k2;
+        double K = tan(M_PI * 1681.974450955533 / sr), Q = 0.7071752369554196, Vh = pow(10, 3.999843853973347 / 20);
+        double Vb = pow(Vh, 0.4996667741545416);
+        k1.set(Vh + Vb * K / Q + K * K, 2 * (K * K - Vh), Vh - Vb * K / Q + K * K, 1 + K / Q + K * K, 2 * (K * K - 1), 1 - K / Q + K * K);
+        K = tan(M_PI * 38.13547087602444 / sr); Q = 0.5003270373238773;
+        k2.set(1, -2, 1, 1 + K / Q + K * K, 2 * (K * K - 1), 1 - K / Q + K * K);
+        double edge[AEQB + 1] = {lowHz > 0 ? lowHz : 20, fc[0], fc[1], fc[2], fc[3], std::max(fc[3] * 1.5, std::min(16000.0, 0.45 * sr))};
+        for (int k = 0; k < AEQB; k++) {
+            double f = sqrt(edge[k] * edge[k + 1]);
+            weight[k] = weighted ? pow(10.0, (k1.magDb(f, sr) + k2.magDb(f, sr)) / 10) : 1.0;
+        }
+    }
+    // Back to the start (off, untouched, 0 dB); the settings stay.
+    void stop() {
+        running = false; mix = 0; rampLeft = 0; eN = 0; keepDb = 0;
+        for (int k = 0; k < AEQB - 1; k++) {
+            lo1[k].clear(); lo2[k].clear(); xap[k].clear(); ap[k].clear();
+            refLo1[k].clear(); refLo2[k].clear(); refAp[k].clear();
+        }
+        subIn.clear(); subOut.clear();
+        double none[AEQB];
+        for (int k = 0; k < AEQB; k++) { autoDb[k] = balDb[k] = offDb[k] = 0; g[k] = gTo[k] = 1; gInc[k] = 0; eIn[k] = eOut[k] = 0; none[k] = AEQ_NONE; }
+        clearWindow();
+        readout.write(autoDb, none);
+    }
+
+    // x: the sound (per channel, m samples), changed in place. ref: the original at the same moment (mono).
+    // blockEnd: this call ends an SB block (time for an analysis).
+    void run(std::vector<float> *x, const float *ref, int m, bool blockEnd) {
+        bool eng = engaged();
+        if (!running) {
+            if (!eng) return;  // off: skipped, the sound stays exactly as it was
+            running = true;
+        }
+        bool two = nch > 1;
+        float *x0 = x[0].data(), *x1 = two ? x[1].data() : nullptr;
+        for (int i = 0; i < m; i++) {
+            // the original's sections (measured only)
+            double r[AEQB], h = ref[i];
+            for (int k = 0; k < AEQB - 1; k++) { r[k] = refLo2[k].runD(refLo1[k].runD(h)); h = refAp[k].runD(h) - r[k]; }
+            r[AEQB - 1] = h;
+            r[0] = subIn.runD(r[0]);
+            for (int k = 0; k < AEQB; k++) eIn[k] += r[k] * r[k];
+            if (rampLeft > 0) {
+                if (--rampLeft == 0) for (int k = 0; k < AEQB; k++) g[k] = gTo[k];
+                else for (int k = 0; k < AEQB; k++) g[k] += gInc[k];
+            }
+            mix = eng ? std::min(1.0, mix + mixStep) : std::max(0.0, mix - mixStep);
+            // the sound's sections, both channels at once
+            double v[2] = {x0[i], two ? x1[i] : 0.0}, b[AEQB][2], hh[2] = {v[0], v[1]};
+            for (int k = 0; k < AEQB - 1; k++) {
+                double l[2] = {hh[0], hh[1]}, a[2] = {hh[0], hh[1]};
+                lo1[k].run(l); lo2[k].run(l); xap[k].run(a);
+                b[k][0] = l[0]; b[k][1] = l[1];
+                hh[0] = a[0] - l[0]; hh[1] = a[1] - l[1];
+            }
+            b[AEQB - 1][0] = hh[0]; b[AEQB - 1][1] = hh[1];
+            double mono[AEQB];
+            for (int k = 0; k < AEQB; k++) mono[k] = two ? 0.5 * (b[k][0] + b[k][1]) : b[k][0];
+            mono[0] = subOut.runD(mono[0]);
+            for (int k = 0; k < AEQB; k++) eOut[k] += mono[k] * mono[k];
+            // gains, the lower sections through the higher crossovers' all-passes so all five stay in phase
+            double s[2] = {g[0] * b[0][0], g[0] * b[0][1]};
+            for (int k = 1; k < AEQB - 1; k++) { ap[k].run(s); s[0] += g[k] * b[k][0]; s[1] += g[k] * b[k][1]; }
+            s[0] += g[AEQB - 1] * b[AEQB - 1][0]; s[1] += g[AEQB - 1] * b[AEQB - 1][1];
+            if (mix < 1.0) { s[0] = v[0] + mix * (s[0] - v[0]); s[1] = v[1] + mix * (s[1] - v[1]); }
+            x0[i] = (float)s[0];
+            if (two) x1[i] = (float)s[1];
+        }
+        eN += m;
+        if (blockEnd) { analyze(eng); flushTiny(); }
+        if (!eng && mix <= 0.0) stop();  // faded out: from now on skipped
+    }
+
+    // Filter memories that have died away to almost nothing (under 1e-20, -400 dB) are set to exactly 0, once per
+    // block. In digital silence they would otherwise sink into "denormal" numbers, which Intel and AMD processors
+    // handle many times slower (measured: up to 100 ms for one 512-sample call on an Intel build). A block can't take
+    // them from 1e-20 down to that range, and the sound is not changed in any way that can be heard.
+    static void flush(double &z) { if (std::fabs(z) < 1e-20) z = 0; }
+    static void flush(Biquad &q) { flush(q.z1); flush(q.z2); }
+    static void flush(Biquad2 &q) { flush(q.z1[0]); flush(q.z1[1]); flush(q.z2[0]); flush(q.z2[1]); }
+    void flushTiny() {
+        for (int k = 0; k < AEQB - 1; k++) {
+            flush(lo1[k]); flush(lo2[k]); flush(xap[k]); flush(ap[k]);
+            flush(refLo1[k]); flush(refLo2[k]); flush(refAp[k]);
+        }
+        flush(subIn); flush(subOut);
+    }
+
+    // the change each section needs (dB) so its share of the total is the original's (all 0 while too quiet to tell)
+    void targets(double *tgt) const {
+        double inDb[AEQB], outDb[AEQB], tin = 0, tout = 0, win = 0, wout = 0;
+        bool act[AEQB];
+        for (int k = 0; k < AEQB; k++) {
+            inDb[k] = 10 * log10(pIn[k] + 1e-30) + 3.0103;  // dBFS: a full-scale sine is 0
+            outDb[k] = 10 * log10(pOut[k] + 1e-30) + 3.0103;
+            act[k] = inDb[k] >= floorDb || outDb[k] >= floorDb;
+            tin += pIn[k]; tout += pOut[k]; win += weight[k] * pIn[k]; wout += weight[k] * pOut[k];
+        }
+        if (10 * log10(tin + 1e-30) + 3.0103 < floorDb || 10 * log10(tout + 1e-30) + 3.0103 < floorDb) return;
+        // common level: keeps the weighted total; solved again after the limit (a few steps, never overshoots)
+        double off = 10 * log10(win / wout);
+        for (int it = 0; it < 4; it++) {
+            double now = 0;
+            for (int k = 0; k < AEQB; k++) {
+                double d = act[k] ? std::max(-range, std::min(range, inDb[k] - outDb[k] - off)) : 0.0;
+                now += weight[k] * pOut[k] * pow(10.0, d / 10);
+            }
+            off += 10 * log10(now / wout);
+        }
+        for (int k = 0; k < AEQB; k++) tgt[k] = act[k] ? std::max(-range, std::min(range, inDb[k] - outDb[k] - off)) : 0.0;
+    }
+
+    void analyze(bool eng) {
+        int n = std::max(1, eN);
+        for (int k = 0; k < AEQB; k++) {
+            double mi = eIn[k] / n, mo = eOut[k] / n;
+            sIn[k] += mi - wIn[k][head]; wIn[k][head] = mi;
+            sOut[k] += mo - wOut[k][head]; wOut[k][head] = mo;
+            eIn[k] = eOut[k] = 0;
+        }
+        eN = 0;
+        if (++head == nWin) {  // once per lap, add the window up again so rounding never builds up
+            head = 0;
+            for (int k = 0; k < AEQB; k++) {
+                sIn[k] = sOut[k] = 0;
+                for (int j = 0; j < nWin; j++) { sIn[k] += wIn[k][j]; sOut[k] += wOut[k][j]; }
+            }
+        }
+        if (filled < nWin) filled++;
+        for (int k = 0; k < AEQB; k++) { pIn[k] = std::max(0.0, sIn[k] / filled); pOut[k] = std::max(0.0, sOut[k] / filled); }
+        double tgt[AEQB] = {};
+        if (on && filled * 4 >= nWin) targets(tgt);  // a quarter of the window heard first; too quiet: all 0
+        for (int k = 0; k < AEQB; k++) {
+            balDb[k] = tgt[k] + (balDb[k] - tgt[k]) * (tgt[k] < balDb[k] ? aAtt : aRel);
+            if (fabs(balDb[k] - tgt[k]) < 1e-4) balDb[k] = tgt[k];
+        }
+        // the smoothing follows cuts faster than lifts, so on its own it would turn the whole sound down: take out
+        // the level change it makes (weighted like the targets, smoothed like a cut), so only the balance moves
+        double c = 0;
+        if (keep) {
+            double now = 0, before = 0;
+            for (int k = 0; k < AEQB; k++) { now += weight[k] * pOut[k] * pow(10.0, balDb[k] / 10); before += weight[k] * pOut[k]; }
+            if (before > 0 && now > 0) c = 10 * log10(now / before);
+        }
+        keepDb = c + (keepDb - c) * aAtt;
+        if (fabs(keepDb - c) < 1e-4) keepDb = c;
+        double step = 0.25 * SB / 32, lv[AEQB];
+        for (int k = 0; k < AEQB; k++) {
+            autoDb[k] = std::max(-range, std::min(range, balDb[k] - keepDb));
+            double w = eng ? want[k] : 0.0;
+            offDb[k] += std::max(-step, std::min(step, w - offDb[k]));
+            double db = std::max(-AEQ_MAX, std::min(AEQ_MAX, autoDb[k] + offDb[k]));
+            gTo[k] = pow(10.0, db / 20);
+            gInc[k] = (gTo[k] - g[k]) / SB;
+            lv[k] = pOut[k] > 0 ? std::max(AEQ_NONE, 10 * log10(pOut[k]) + 3.0103 + db) : AEQ_NONE;
+        }
+        rampLeft = SB;
+        readout.write(autoDb, lv);
+    }
+};
+
 // ------------------------------------------------------------------------------------------------- engine
 
 struct Engine {
@@ -603,12 +920,13 @@ struct Engine {
     TonalEQ eq;
     Limiter lim;                           // safety limiter at the very end (adds its 2 ms look-ahead to the delay)
     ToneStage tone;                        // bass / treble, just before the limiter
+    AutoEQ5 aeq;                           // Auto EQ, just before bass / treble (off by default: skipped)
     long long underruns = 0, switches = 0;
     float keepG = 0, keepStep = 1;          // keep fade-in: level now, step per sample
     int64_t keepIdle = 0, keepIdleLimit = 1; // samples since keep was last non-zero; after 0.25 s it counts as off
 
     // scratch (made once)
-    std::vector<float> xin[MAXCH], tmpT[MAXCH], pin[MAXCH], rbOut[MAXCH], acc[MAXCH], sum[MAXCH], pre[MAXCH], curMono, gain;
+    std::vector<float> xin[MAXCH], tmpT[MAXCH], pin[MAXCH], rbOut[MAXCH], acc[MAXCH], sum[MAXCH], pre[MAXCH], curMono, gain, aeqRef;
 
     Engine(double rate, int channels, int maxF, int fl) : sr(rate), nch(channels), maxFrames(maxF), flags(fl) {}
 
@@ -674,7 +992,8 @@ struct Engine {
             acc[c].assign(SB, 0.0f); sum[c].assign(SB, 0.0f); pre[c].assign(SB, 0.0f);
             for (auto &ch : chains) for (auto &p : ch.path) p.ring[c].init(L + maxFrames + 4096);
         }
-        curMono.assign(SB, 0.0f); gain.assign(SB, 0.0f);
+        curMono.assign(SB, 0.0f); gain.assign(SB, 0.0f); aeqRef.assign(SB, 0.0f);
+        aeq.init(sr, nch, SB);
         eq.init(sr);
         eq.period = 8 * SB;
         cur.init(eq.N + 2 * SB);
@@ -1182,6 +1501,17 @@ struct Engine {
         }
         for (int c = 0; c < nch; c++)
             for (int i = 0; i < m; i++) acc[c][i] += keepR[c][tau0 + i];
+        // Auto EQ: before bass / treble, so it measures (and keeps) the song's balance and the Bass <-> Treble setting
+        // still tilts the sound on top of it. Its reference is the original input at the same moment (mono).
+        if (aeq.active()) {
+            float *r = aeqRef.data();
+            for (int i = 0; i < m; i++) {
+                float s = 0;
+                for (int c = 0; c < nch; c++) s += hist[c][tau0 + i] + keepR[c][tau0 + i];
+                r[i] = s / nch;
+            }
+            aeq.run(acc, r, m, (t + m) % SB == 0);
+        }
         tone.run(acc, m);
         for (int i = 0; i < m; i++) {  // safety limiter, both channels together
             float v[MAXCH];
@@ -1204,6 +1534,7 @@ struct Engine {
         lim.reset();
         guardDb = 0; guardLast = lim.limited01;
         tone.clear();
+        aeq.stop();
         tStart = t;
         pending = wantN != 0;
         targetGen++;
@@ -1249,6 +1580,19 @@ void advanced_set_tone(AdvancedChain *chain, double bassDb, double trebleDb) {
     ToneStage &s = chain->e->tone;
     if (bassDb == bassDb) s.wantB = std::max(-12.0, std::min(12.0, bassDb));  // NaN: unchanged
     if (trebleDb == trebleDb) s.wantT = std::max(-12.0, std::min(12.0, trebleDb));
+}
+
+void advanced_set_auto_eq(AdvancedChain *chain, int on, const double offsetsDb[5]) {
+    AutoEQ5 &a = chain->e->aeq;
+    a.on = on != 0;
+    for (int k = 0; k < AEQB; k++) {
+        double v = offsetsDb ? offsetsDb[k] : 0.0;
+        a.want[k] = v == v ? std::max(-12.0, std::min(12.0, v)) : 0.0;  // NaN: 0
+    }
+}
+
+void advanced_get_auto_eq(const AdvancedChain *chain, double autoDb[5], double levelDb[5]) {
+    chain->e->aeq.readout.read(autoDb, levelDb);
 }
 
 void advanced_reset(AdvancedChain *chain) { chain->e->reset(); }
@@ -1339,6 +1683,15 @@ int advanced_tune(AdvancedChain *chain, const char *key, double v) {
     else if (k == "fastrel") e->lim.setFast(std::max(0.0, v));
     else if (k == "tonelohz") { e->tone.loHz = v; e->tone.setFilters(); }
     else if (k == "tonehihz") { e->tone.hiHz = std::min(v, 0.45 * e->sr); e->tone.setFilters(); }
+    else if (k == "aeqrange") e->aeq.range = std::max(0.0, std::min(AEQ_MAX, v));
+    else if (k == "aeqattack") { e->aeq.attackMs = v; e->aeq.setTimes(); }
+    else if (k == "aeqrelease") { e->aeq.releaseMs = v; e->aeq.setTimes(); }
+    else if (k == "aeqwindow") e->aeq.setWindow(v);
+    else if (k.size() == 5 && k.compare(0, 4, "aeqf") == 0 && k[4] >= '1' && k[4] <= '4') { e->aeq.fc[k[4] - '1'] = v; e->aeq.design(); }
+    else if (k == "aeqfloor") e->aeq.floorDb = v;
+    else if (k == "aeqlowhz") { e->aeq.lowHz = v; e->aeq.design(); }
+    else if (k == "aeqkeep") e->aeq.keep = v != 0;
+    else if (k == "aeqweight") { e->aeq.weighted = v != 0; e->aeq.design(); }
     else return 0;
     return 1;
 }
