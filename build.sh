@@ -15,6 +15,20 @@ ditto build/PitchShiftMic.driver "$app/Contents/PlugIns/PitchShiftMic.driver"
 # The app is built twice, for Apple silicon (arm64) and Intel (x86_64), both for macOS 14.4 or newer,
 # and joined into one file.
 rm -rf build/obj
+# Pitch Shift Pro's server address, public key and payment link are in Sources/ProConfig.swift. For a test build,
+# PRO_SERVER, PRO_PUBLIC_KEY and PRO_BUY_URL replace them (only the ones that are set).
+swift_sources=(Sources/*.swift)
+if [[ -n "${PRO_SERVER+x}${PRO_PUBLIC_KEY+x}${PRO_BUY_URL+x}" ]]; then
+  mkdir -p build/obj
+  config=(sed)
+  [[ -n "${PRO_SERVER+x}" ]] && config+=(-e "s|static let server = \"[^\"]*\"|static let server = \"$PRO_SERVER\"|")
+  [[ -n "${PRO_PUBLIC_KEY+x}" ]] && config+=(-e "s|static let publicKey = \"[^\"]*\"|static let publicKey = \"$PRO_PUBLIC_KEY\"|")
+  [[ -n "${PRO_BUY_URL+x}" ]] && config+=(-e "s|static let buyURL = \"[^\"]*\"|static let buyURL = \"$PRO_BUY_URL\"|")
+  $config Sources/ProConfig.swift > build/obj/ProConfig.swift
+  swift_sources=(${swift_sources:#Sources/ProConfig.swift} build/obj/ProConfig.swift)
+  echo "Pitch Shift Pro settings for this build:"
+  grep "static let" build/obj/ProConfig.swift
+fi
 for arch in arm64 x86_64; do
   obj=build/obj/$arch
   mkdir -p $obj
@@ -24,7 +38,7 @@ for arch in arm64 x86_64; do
     clang++ -arch $arch -mmacosx-version-min=14.4 -O2 -std=c++17 -Ibuild/libs/include -c "$f" -o "$obj/${f:t:r}.o"
   done
   # Rubber Band is built into the app, so the app works on its own.
-  swiftc -target $arch-apple-macos14.4 -O -swift-version 5 Sources/*.swift $obj/*.o -o $obj/PitchShift \
+  swiftc -target $arch-apple-macos14.4 -O -swift-version 5 $swift_sources $obj/*.o -o $obj/PitchShift \
     -import-objc-header Sources/Bridging.h -Ibuild/libs/include \
     -Xlinker build/libs/lib/librubberband.a -Xlinker build/libs/lib/libsamplerate.a -lc++ -framework Accelerate
 done
