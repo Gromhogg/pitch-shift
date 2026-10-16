@@ -59,6 +59,12 @@ More help: [windows/README.md](windows/README.md).
 
 Both can be on at the same time. Closing the window keeps Pitch Shift running. Quit it with ⌘Q.
 
+**Pitch Shift Pro ($5, Mac)**
+
+- Free: **What you hear** with Advanced processing, and **Your voice** in the Cartoon style, with Test.
+- Pro adds the **Natural ↔ Cartoon** and **Bass ↔ Treble** sliders, **Deeper when slow** and the **Soundboard**. They show a small lock until you unlock them.
+- Click **Unlock Pro** at the top right, then **Buy for $5**. Paste the key you get (on the page after paying, and by email) and click **Unlock**. One key works on all your Macs, for good. It needs the internet only once.
+
 ## If something goes wrong
 
 - **The app you picked goes silent:** quit Pitch Shift and it plays normally again. Then turn Pitch Shift on in **System Settings → Privacy & Security → Screen & System Audio Recording** and open it again.
@@ -80,6 +86,8 @@ brew install rubberband
 ```
 
 `build.sh` builds `Pitch Shift.app` for Apple silicon and Intel (with Pitch Shift Mic inside), puts it in Applications and puts a shortcut on your Desktop. The first time, it downloads the source of Rubber Band and libsamplerate to build the Intel part (`libs/build.sh`). `packaging/make-pkg.sh` makes the installer, and `./release.sh 1.2.3` posts a new version.
+
+The Pitch Shift Pro unlock server is in [server/](server/README.md); the app's side is `Sources/Pro.swift` and `Sources/ProConfig.swift`. A build without the server's public key in `ProConfig.swift` has nothing locked.
 
 ## How it works
 
