@@ -6,7 +6,7 @@
     "targetHz": 200,
     "assumedInputHz": 120,
     "intonation": 1.2,
-    "formant": 1.18,
+    "formant": 1.21,
     "breathDb": -30,
     "presenceDb": 2.5,
     "sibilanceKeep": 0,

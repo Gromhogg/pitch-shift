@@ -25,7 +25,7 @@ typedef struct VoiceChangerVoice {
     float targetHz;        // the voice's median pitch (Woman 200, Man 112)
     float assumedInputHz;  // the usual pitch of someone who picks this voice (Woman 120, Man 205); seeds the median
     float intonation;      // how far the pitch moves around its median: 1 = as spoken, 1.2 = livelier, 0.85 = flatter
-    float formant;         // voice shape (formant) scale at full strength (Woman 1.18, Man 0.85)
+    float formant;         // voice shape (formant) scale at full strength (Woman 1.21, Man 0.85)
     float breathDb;        // breath noise next to the voice, dB (-30 = a little; -90 or lower = off)
     float presenceDb;      // the "smile" lift at 3 kHz, dB
     float sibilanceKeep;   // 0..1: how much of the original "s" sounds (above 4.5 kHz) is kept between voiced sounds

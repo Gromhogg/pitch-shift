@@ -5,11 +5,11 @@
   "natural": {
     "targetHz": 112,
     "assumedInputHz": 205,
-    "intonation": 0.85,
+    "intonation": 0.75,
     "formant": 0.85,
     "breathDb": -120,
     "presenceDb": 0,
-    "sibilanceKeep": 0.7,
+    "sibilanceKeep": 0,
     "eqAmount": 0.5,
     "ltas": [3.34, 2.63, 3.37, 4.46, 4.29, 5.59, 6.76, 4.51, 0.53, -1.43, -1.74, -3.05, -5.58, -7.22, -8.4, -10.64, -15, -18.27, -20.78, -23.45, -26.41]
   },
