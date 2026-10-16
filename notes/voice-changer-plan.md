@@ -93,3 +93,101 @@ Rules for all: device tests only with the delay branch's guards (refuse while an
 
 ## Effort and risks
 ~8–10 agent sessions plus 5–10 hours of training running. Natural mode will fool the classifier but people may still hear "a man with a high voice" (Rubber Band keeps the speaker's own pulses); only Realistic replaces them — if Natural misses the 80 % listener mark, say so. Training needs GPU time (Kaggle sign-in or ≥ 15 GB free disk here); blended voices may sound "averaged" and need a second round; 8-bit Neural Engine models may lose quality (audio.cpp is plan B). The installer grows to ~160 MB. Neural Engine stutter on 8 GB/fanless Macs → brief switches to Natural (default to CPU if it fits, shorter-hop option, miss counter). ~250–275 ms Realistic delay feels laggy; the user chooses it, Natural stays the default. Our voices are blends, not real people; no cloning of named people.
+
+## What was built (2026-10-15)
+
+**For the user:** a third card "Voice changer" with a switch, a voice picker (Woman, Man, then any voices added to
+`~/Library/Application Support/Pitch Shift/Voices/`), a Light…Full Strength slider and a "Realistic" switch (hidden on
+Intel Macs). Turning it on also turns "Your voice" on; the voice card's amount and Natural…Cartoon slider are then
+dimmed; "Deeper when slow" still works on top; the Soundboard mixes in after it. Smallest windows: three cards in a
+row 870×369, two columns 588×548, one column 306×817 (the card is 163 pt tall, not the planned 190).
+
+- **Natural mode** (every Mac, the default): `Sources/Voice/VoiceChanger.{h,cpp}`, as designed above. No added delay
+  (offline: Woman 45.0 ms vs 44.6 ms for a plain shift at the same pitch, Man 71.4 vs 70.7), 0.024–0.030 ms of work
+  per 10 ms of sound (worst 0.074; 0.27 under Rosetta), no memory taken and no locks while the sound runs.
+- **Realistic mode** (Apple silicon): `Sources/Voice/VoiceModel.{h,mm}` + `Sources/VoiceModelStore.swift`. **No
+  training was needed:** the RVC v2 48 kHz base model (MIT) already holds all 109 VCTK speakers; Woman and Man are
+  blends of the same 8 + 8 speakers the plan picked for training. Core ML, 8-bit (zero-point mode), 160 ms pieces
+  with 1 s of past sound. Fixed delay 275.5 ms (285.5 ms on the CPU only; 214 ms in offline renders). Default:
+  speech reader on the Neural Engine, voice model on the GPU. If a piece is late, Natural fills in with 10 ms
+  crossfades (never silence, never the raw mic). First load on a Mac 13–30 s (macOS prepares the models), then
+  0.4–2.3 s; 4–6 % of one core; 270–330 MB while on.
+- **Model files** (133 MB zipped, 145 MB unpacked) are not in git. `build.sh` takes them from `build/voices/` or
+  `research/voicechanger/models/` (this or the main checkout), or downloads them from the addresses in
+  `voices/models.txt`, checks their SHA-256 sums and unpacks them into `Contents/Resources/Voices/`. The release tag
+  in `voices/models.txt` is still `PLACEHOLDER` (filled in when the files are uploaded at release time). Without the
+  files the app builds and only Natural works.
+
+### Final voice values (`voices/*.json`, Natural block)
+
+| | target pitch | assumed input | intonation | formant | breath | presence | sibilance kept | tone EQ |
+|---|---|---|---|---|---|---|---|---|
+| Woman | 200 Hz | 120 Hz | 1.2 | **1.21** (start 1.18) | −30 dB | +2.5 dB | 0 | 0.5 |
+| Man | 112 Hz | 205 Hz | **0.75** (start 0.85) | 0.85 | off | 0 | **0** (start 0.7) | 0.5 |
+
+### How the values were picked (three rounds with `--changer-tune`, offline, warmed up with 8 s of the same speaker)
+
+Two sets: held-out VCTK speakers (4 men, 4 women, 10 sentences each; never used for the tone tables) and the Mac's
+`say` voices (7 + 7, 10 sentences each). "Voice print" = how often the ECAPA voice print moves further toward the new
+sex than the plain shift does (mark 80 %). Word errors are Whisper's (mark: original + 2 points).
+
+| men → Woman | VCTK: judged woman / voice print / word errors / creak | `say`: judged woman / voice print / word errors / creak |
+|---|---|---|
+| start values | 92 % / 90 % / 6.1 % / 0.056 | 67 % / 89 % / 22.9 % / 0.034 |
+| **formant 1.21 (chosen)** | **95 % / 92 % / 5.7 % / 0.055** | **71 % / 87 % / 23.5 % / 0.034** |
+| intonation 1.1 | 92 % / 85 % / 5.7 % / 0.048 | 67 % / 89 % / 21.9 % / 0.030 |
+| plain shift +10 | 35 % / — / 6.1 % / 0.042 | 27 % / — / 18.7 % / 0.032 |
+| original men | 0 % / — / 3.3 % / 0.060 | 0 % / — / 12.7 % / 0.054 |
+
+| women → Man | VCTK: judged man / voice print / word errors / creak | `say`: judged man / voice print / word errors / creak |
+|---|---|---|
+| start values | 100 % / 78 % / 9.2 % / 0.074 | 96 % / 84 % / 22.2 % / 0.025 |
+| sibilance kept 0 | 100 % / 90 % / 8.1 % / 0.073 | 96 % / 84 % / 18.2 % / 0.025 |
+| **sibilance kept 0 + intonation 0.75 (chosen)** | **100 % / 90 % / 8.1 % / 0.069** | **94 % / 83 % / 19.4 % / 0.023** |
+| plain shift −8 | 2 % / — / 8.1 % / 0.069 | 46 % / — / 16.8 % / 0.030 |
+| original women | 0 % / — / 4.6 % / 0.072 | 1 % / — / 9.2 % / 0.018 |
+
+Why: Woman formant 1.21 is best on the VCTK set and does not lower the `say` set's "judged woman" below the start
+values. Man intonation 0.75 brings the creak share under the original's on VCTK (0.069 vs 0.072, the only VCTK mark
+it missed) and keeps more clips inside ±10 % of the target pitch (95 % vs 88 %); on the `say` set it is one clip lower
+on "judged man" and on the voice print and +1.2 points on word errors, which was not counted as clearly worse. Quality
+(Distill-MOS) stays within 0.15 of the plain shift in every version above, and the median pitch lands at 189–191 Hz / 110–111 Hz.
+
+### Realistic mode numbers (each clip rendered from a cold start; `research/voicechanger/results/realistic.md`)
+
+| direction, set | judged target | voice print | quality vs plain | word errors (mark) | pitch | creak (mark) |
+|---|---|---|---|---|---|---|
+| women → Man, VCTK | 100 % | 100 % | +0.25 | 3.6 % (≤ 3.8) | 113 Hz | 0.015 (≤ 0.041): **all marks met** |
+| men → Woman, VCTK | 100 % | 98 % | +0.18 | **10.2 %** (≤ 5.4) | 199 Hz | **0.029** (≤ 0.024) |
+| men → Woman, `say` | 100 % | 90 % | +0.88 | **23.8 %** (≤ 14.7) | **174 Hz** (cold start) | 0.018 |
+| women → Man, `say` | 100 % | 97 % | +1.20 | **21.5 %** (≤ 11.2) | 105 Hz | **0.014** (≤ 0.009) |
+
+### End-to-end checks
+
+| check | result |
+|---|---|
+| 1. Changer off changes nothing | 14/14 offline renders byte-identical to main (3 speech files × 4 voice settings + music normal and Advanced), re-run after the final values |
+| Natural unchanged by the AI merge | 21/21 renders byte-identical |
+| 2–4. Delay, CPU, 60 s runs (offline) | Natural adds ≤ 1 ms; Realistic fixed 275.5 ms live estimate / 214 ms offline, 0 late pieces in 75 s with the app's own code (A2's real-time test program) |
+| 5. Blind listening set | made: `~/Downloads/Pitch Shift voice changer samples/` (28 clips + `rate.txt`), answers in `… - answers/` |
+| 6. Intel | both halves in the app; under Rosetta `--quality realistic` says "Realistic mode: needs Apple silicon; Natural mode is used"; its Natural output matches Apple silicon's (largest difference 0.00009) |
+| 7. Windows untouched | no change under `windows/`, `Sources/Advanced/`, `.github/` |
+| 8. No leak of the real voice | forced late pieces: Natural filled in with 0 frames at the speaker's own pitch (A2's real-time test program) |
+| Build | clean, the same compiler warnings as main |
+| Live device tests | **not run yet**: the guard refused every time because the Pitch Shift app was open (the scripts are ready, see below) |
+
+### Shortfalls, in plain words
+- **Natural** fools the man/woman classifier, but a voice print still hears the same person: "a man with a
+  convincing high voice". Two of the Mac's `say` men almost never pass (Ralph 0 of 10 clips, Rocko 1 of 10), which
+  keeps the `say` set's Woman at 71 %; the other five `say` men pass on 48 of 50 clips.
+- **Word errors** miss the mark in every version, the plain shift too: changing the pitch this far makes some words
+  harder to make out.
+- **Realistic Woman** slurs some words (10 % word errors vs 3.4 % for the original voices). The cause is converting
+  live without hearing ahead; only more delay would fix it (1 s of past sound was the best setting measured).
+- **A game using the GPU** can make Realistic fall behind; Natural then fills in and the card shows it.
+- **Nobody has listened yet**, and the live microphone tests still have to run with the Pitch Shift app quit.
+
+### Tools (git-ignored, in `research/voicechanger/`)
+`a1/harness/` (render, measure, pass-mark tables), `a4/` (`tune.sh`, `check1.sh`, `blind.py`, `devtests.sh`,
+`live_fallback.py`; tuning tables in `a4/results/r1…r3*/set_*.md`), `pretrained/` (voice blends), `convert/` (Core ML),
+`bench/` (real-time test program), `results/` (A2's reports).
