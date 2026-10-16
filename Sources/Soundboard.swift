@@ -8,7 +8,8 @@ import Accelerate
 import CoreAudio
 import UniformTypeIdentifiers
 
-// One sound, ready to play: one channel at the voice chain's rate, its loudest point at -6 dBFS.
+// One sound, ready to play: one channel at the voice chain's rate, its loudest point at -6 dBFS, and no louder on
+// average than a usual sound (see `averageCap`).
 final class SoundClip {
     let buffer: AVAudioPCMBuffer
     let rate: Double
@@ -17,8 +18,15 @@ final class SoundClip {
     var samples: UnsafePointer<Float> { UnsafePointer(buffer.floatChannelData![0]) }
     static let longest: Double = 300  // only the first 5 minutes of a longer file are used
     static let peak: Float = 0.501187  // -6 dBFS
+    // The most a sound's loudest 0.4 s may average (rms): -16 dBFS. A usual sound effect, with its loudest point at
+    // -6 dBFS, averages -16 to -20 dBFS and isn't changed. A squashed, clipped "loud" one (many meme sounds) averages
+    // -7 to -10 dBFS at the same loudest point: 10 dB louder than the others, 20-40 dB louder than a voice from the
+    // Mac's mic, which makes call apps (Discord) turn it and the voice down or cut them as noise.
+    static let averageCap: Float = 0.158489
+    static let averageWindow: Double = 0.4
 
-    init(url: URL, rate: Double) throws {
+    // `levelFix: false`: as in 2.0.2 (the sample peak at -6 dBFS, nothing else), for --render-sounds --sound-preset old.
+    init(url: URL, rate: Double, levelFix: Bool = true) throws {
         let problem = Problem(message: "Can't read \(url.lastPathComponent).")
         let file = try AVAudioFile(forReading: url)
         let format = file.processingFormat
@@ -60,16 +68,67 @@ final class SoundClip {
             result = converted
         }
 
-        // Loudest point at -6 dBFS, so every sound is about as loud and there's room for the voice.
+        // Loudest point at -6 dBFS, so every sound is about as loud and there's room for the voice. The loudest point
+        // counts the points between samples: a hard-edged (clipped) sound swings up to ~5 dB past its samples there,
+        // and the clock matching into Pitch Shift Mic (and the call app) turn those points into samples.
         let data = result.floatChannelData![0]
+        let total = Int(result.frameLength)
         var loudest: Float = 0
-        vDSP_maxmgv(data, 1, &loudest, vDSP_Length(result.frameLength))
+        vDSP_maxmgv(data, 1, &loudest, vDSP_Length(total))
+        if levelFix { loudest = max(loudest, Self.peakBetweenSamples(data, total)) }
         if loudest > 0 {
             var gain = Self.peak / loudest
-            vDSP_vsmul(data, 1, &gain, data, 1, vDSP_Length(result.frameLength))
+            // ... and its loudest 0.4 s no louder on average than `averageCap`.
+            if levelFix {
+                let average = Self.loudestAverage(data, total, window: Int(rate * Self.averageWindow)) * gain
+                if average > Self.averageCap { gain *= Self.averageCap / average }
+            }
+            vDSP_vsmul(data, 1, &gain, data, 1, vDSP_Length(total))
         }
         buffer = result
         self.rate = rate
+    }
+
+    // The loudest point between samples, from the sound made 4 times finer (a 16-sample windowed sinc for each of the
+    // three points between two samples, as in loudness meters' "true peak").
+    static func peakBetweenSamples(_ data: UnsafePointer<Float>, _ count: Int) -> Float {
+        let taps = 16, half = taps / 2
+        guard count > taps else { return 0 }
+        let outCount = count - taps + 1
+        var result = [Float](repeating: 0, count: outCount)
+        var loudest: Float = 0
+        for k in 1...3 {
+            let at = Double(k) / 4  // the point at sample + 1/4, 1/2, 3/4
+            var filter = (0..<taps).map { p -> Float in
+                let t = Double(p - half + 1) - at  // distance from that point to sample p
+                let sinc = t == 0 ? 1 : sin(.pi * t) / (.pi * t)
+                let w = 0.42 + 0.5 * cos(.pi * t / Double(half)) + 0.08 * cos(2 * .pi * t / Double(half))  // Blackman
+                return Float(sinc * w)
+            }
+            let sum = filter.reduce(0, +)
+            for p in filter.indices { filter[p] /= sum }  // a steady level stays the same
+            vDSP_conv(data, 1, filter, 1, &result, 1, vDSP_Length(outCount), vDSP_Length(taps))
+            var most: Float = 0
+            vDSP_maxmgv(result, 1, &most, vDSP_Length(outCount))
+            loudest = max(loudest, most)
+        }
+        return loudest
+    }
+
+    // The loudest average (rms) over `window` samples, looked at every quarter window; the whole sound if it's shorter.
+    static func loudestAverage(_ data: UnsafePointer<Float>, _ count: Int, window: Int) -> Float {
+        guard count > 0 else { return 0 }
+        let size = min(max(1, window), count)
+        var loudest: Float = 0
+        var at = 0
+        while true {
+            var squares: Float = 0
+            vDSP_svesq(data + at, 1, &squares, vDSP_Length(size))
+            loudest = max(loudest, (squares / Float(size)).squareRoot())
+            if at + size >= count { break }
+            at = min(count - size, at + max(1, size / 4))
+        }
+        return loudest
     }
 }
 
@@ -902,7 +961,60 @@ final class SoundboardPanel: NSObject, NSWindowDelegate, NSPopoverDelegate {
     @objc private func stopClicked() { board.stop() }
 }
 
-// MARK: Checks (--test-sounds)
+// MARK: Checks (--test-sounds, --render-sounds)
+
+// Offline check (--render-sounds): what Pitch Shift Mic would send while the Soundboard plays over a voice, made with
+// the voice chain's own mixing (CallMix) in callbacks of `buffer` samples, with no devices. `voice` is one channel at
+// `rate` (already shifted if wanted; `shifted`: it went through the pitch change, which the chain eases at its
+// loudest). Each start is a click on the sound; like the app, the sound is cleared 0.1 s after its end, unless the
+// next click comes first. The sound thread sees a click at the start of its next callback. Also times the mixing
+// part of each callback (nanoseconds; worst and average, with a sound playing and without). `old`: the mixing as in
+// 2.0.2 (no limiter, no fades at a sound's own ends; the clip should then be made with `levelFix: false` too).
+func renderSounds(voice: [Float], rate: Double, shifted: Bool, clip: SoundClip, starts: [Double], volume: Float,
+                  speakers: Bool, buffer: Int, old: Bool = false) -> (out: [Float], timing: String) {
+    var events: [(at: Int, play: SoundPlay)] = []
+    let sorted = starts.sorted()
+    for (n, start) in sorted.enumerated() {
+        let at = Int(start * rate)
+        events.append((at, SoundPlay(samples: clip.samples, count: clip.count, rate: clip.rate, take: 0, muteMic: speakers, volume: volume)))
+        let end = at + Int((clip.seconds + 0.1) * rate)
+        if n + 1 == sorted.count || Int(sorted[n + 1] * rate) > end { events.append((end, SoundPlay())) }
+    }
+    var state = SoundPlay()
+    var callMix = CallMix(rate: rate, take: state.take, limits: !old, ends: !old)
+    var out = [Float](repeating: 0, count: voice.count)
+    var block = [Float](repeating: 0, count: buffer)
+    var next = 0
+    var worst = [UInt64](repeating: 0, count: 2), total = [UInt64](repeating: 0, count: 2), calls = [Int](repeating: 0, count: 2)
+    var position = 0
+    while position < voice.count {
+        let frames = min(buffer, voice.count - position)
+        while next < events.count && events[next].at <= position {
+            var play = events[next].play
+            play.take = state.take + 1
+            state = play
+            next += 1
+        }
+        for i in 0..<frames { block[i] = voice[position + i] }
+        let started = DispatchTime.now().uptimeNanoseconds
+        let playing = callMix.mix.active ? 1 : 0
+        block.withUnsafeMutableBufferPointer { b in
+            callMix.follow(state)
+            callMix.muteIfNeeded(b.baseAddress!, frames)
+            for i in 0..<frames { b[i] = callMix.out(b[i], shifting: shifted) }
+        }
+        let took = DispatchTime.now().uptimeNanoseconds - started
+        worst[playing] = max(worst[playing], took)
+        total[playing] += took
+        calls[playing] += 1
+        for i in 0..<frames { out[position + i] = block[i] }
+        position += frames
+    }
+    func line(_ k: Int) -> String {
+        calls[k] == 0 ? "-" : String(format: "worst %d ns, average %.0f ns over %d callbacks", worst[k], Double(total[k]) / Double(calls[k]), calls[k])
+    }
+    return (out, "mixing time per callback of \(buffer): with a sound \(line(1)); without \(line(0))")
+}
 
 // r[lag] = Σ a[lag + i]·b[i], for every lag where b fits inside a (with Accelerate's FFT).
 func correlate(_ a: [Float], _ b: [Float]) -> [Float] {
