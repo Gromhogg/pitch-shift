@@ -1,5 +1,11 @@
 # Pitch Shift Pro: the unlock server
 
+**Not used yet.** Since 2026-10-16 the app doesn't talk to any server: people email the owner for a key, the owner
+makes it with `tools/pro-keys.sh` and emails it back, and the app checks it on its own (see
+[../notes/paid-unlock-plan.md](../notes/paid-unlock-plan.md), "What changed 2026-10-16"). This folder is kept for a
+later version that sells keys through Stripe. Its keys and the app's are made differently, and the app no longer has
+the `/activate` and `/check` calls, so both would need changing before it's used.
+
 A small Cloudflare Worker that sells and checks Pitch Shift Pro keys ($5, once, all your Macs). It runs on
 Cloudflare's free plan. The plan behind it: [../notes/paid-unlock-plan.md](../notes/paid-unlock-plan.md).
 

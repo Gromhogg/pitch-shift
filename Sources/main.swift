@@ -88,7 +88,10 @@
 //   --pro-key KEY                              unlocks with a key, like the unlock window (checks it on this Mac, no
 //                                              internet, and keeps it)
 //   --pro-reset                                locks Pro again (forgets the key)
-//                [--pro-file F]                checks only: keep the key in F
+//                [--pro-file F] [--pro-secret S]   checks only: keep the key in F; check keys with S, not this build's
+//                                              secret
+//   --pro-check F [--pro-secret S]             checks only: each key in F (one per line): unlocks, typo or wrong
+//   --pro-test tools/pro-keys-test.txt         checks only: the app makes the same fixed test keys as tools/pro-keys.sh
 import AppKit
 import AVFoundation
 import CoreAudio
@@ -118,9 +121,16 @@ func arg(_ name: String) -> String? {
 let preview = arg("--preview")
 let previewStates = Set((preview ?? "").split(separator: ",").map(String.init))
 
-// Pitch Shift Pro. Checks only: --pro-file F keeps the key and token in F, --pro-server URL asks that server.
+// Pitch Shift Pro. Checks only: --pro-file F keeps the key in F; --pro-secret S checks keys with S instead of this
+// build's secret (only with --pro-file or --pro-check, so the real Pro.json is never touched).
 if let path = arg("--pro-file") { Pro.shared.file = URL(fileURLWithPath: path) }
-if let server = arg("--pro-server") { Pro.shared.server = server }
+if let secret = arg("--pro-secret") {
+    guard arg("--pro-file") != nil || arg("--pro-check") != nil else { print("--pro-secret: only with --pro-file F or --pro-check F"); exit(1) }
+    Pro.shared.secret = secret
+}
+// There is no unlock server any more (keys are checked on the Mac); an old test script stops here instead of opening
+// the window.
+if args.contains("--pro-server") { print("--pro-server: there is no server any more (keys are checked on this Mac)"); exit(1) }
 // --as-free: --render-file and --render-voice play as the free version does.
 let asFree = args.contains("--as-free")
 
@@ -420,18 +430,47 @@ if args.contains("--pro-reset") {
 
 if let typed = arg("--pro-key") {
     Pro.shared.load()
-    Pro.shared.activate(typed) { outcome in
-        switch outcome {
-        case .unlocked:
-            print("Unlocked. \(Pro.shared.status)")
-            exit(0)
-        case .problem(let text):
-            print("Not unlocked: \(text)")
-            exit(1)
-        }
+    switch Pro.shared.activate(typed) {
+    case .unlocked:
+        print("Unlocked. \(Pro.shared.status)")
+        exit(0)
+    case .problem(let text):
+        print("Not unlocked: \(text)")
+        exit(1)
     }
-    DispatchQueue.main.asyncAfter(deadline: .now() + 30) { print("Not unlocked: no answer in 30 s"); exit(1) }
-    dispatchMain()
+}
+
+// Checks only: one key per line in F; prints each with "unlocks", "typo" or "wrong" (with this build's secret, or
+// --pro-secret S). Nothing is saved.
+if let path = arg("--pro-check") {
+    guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { print("--pro-check: can't read \(path)"); exit(1) }
+    var counts: [String: Int] = [:]
+    for line in text.split(whereSeparator: \.isNewline) where !line.trimmingCharacters(in: .whitespaces).isEmpty {
+        let typed = String(line)
+        let verdict: String
+        if case .failure = ProKey.read(typed) { verdict = "typo" } else { verdict = ProKey.isGenuine(typed, secret: Pro.shared.secret) ? "unlocks" : "wrong" }
+        counts[verdict, default: 0] += 1
+        print("\(typed)\t\(verdict)")
+    }
+    print("total: " + ["unlocks", "typo", "wrong"].map { "\(counts[$0] ?? 0) \($0)" }.joined(separator: ", "))
+    exit(0)
+}
+
+// Checks only: the fixed test keys in tools/pro-keys-test.txt ("secret S" line, then "SERIAL KEY" lines), the same
+// ones tools/pro-keys.sh checks, so the app and the key tool make the same keys.
+if let path = arg("--pro-test") {
+    guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { print("--pro-test: can't read \(path)"); exit(1) }
+    var secret = "", good = 0, bad = 0
+    for line in text.split(whereSeparator: \.isNewline) where !line.hasPrefix("#") {
+        let parts = line.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
+        if parts.count == 2 && parts[0] == "secret" { secret = parts[1]; continue }
+        guard parts.count == 2, !secret.isEmpty else { continue }
+        let made = ProKey.make(serial: parts[0], secret: secret)
+        let ok = made == parts[1] && ProKey.isGenuine(parts[1], secret: secret) && !ProKey.isGenuine(parts[1], secret: secret + "x")
+        if ok { good += 1 } else { bad += 1; print("different: \(parts[0]) made \(made ?? "nothing"), the file says \(parts[1])") }
+    }
+    print("pro-test: \(good) of \(good + bad) keys match")
+    exit(bad == 0 && good > 0 ? 0 : 1)
 }
 
 // Read only: once a second, the sound output's sample rate and streams, its own mic (Bluetooth headphones), and
@@ -987,12 +1026,12 @@ if let path = arg("--test-sounds") {
 }
 
 // Pitch Shift Pro: pictures show the state asked for (unlocked unless pro-locked or the unlock window is asked for)
-// and touch no file; the app reads its saved token.
+// and touch no file; the app reads and checks its saved key.
 if preview != nil {
     let locked = previewStates.contains("pro-locked") || (previewStates.contains("pro-unlock") && !previewStates.contains("pro-unlocked"))
     Pro.shared.pretend(unlocked: !locked)
 } else {
-    Pro.shared.load(retry: true)
+    Pro.shared.load()
 }
 
 let app = NSApplication.shared

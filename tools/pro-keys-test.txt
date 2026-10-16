@@ -1,0 +1,13 @@
+# Pitch Shift Pro: fixed test keys, made with the test secret below (they unlock nothing in a real build).
+# The key tool and the app must both make exactly these:
+#   tools/pro-keys.sh test
+#   "build/Pitch Shift.app/Contents/MacOS/PitchShift" --pro-test tools/pro-keys-test.txt
+# Each line: serial, then the key.
+secret pitch-shift-pro-test-secret
+TEST2 TEST2-3X6Y8-PV3CN-222EU-P8M7Z
+22222 22222-CDKVD-J5M8P-BH3J7-9P769
+ZZZZZ ZZZZZ-3H5FY-WZ7QW-EJZPM-DRW5K
+ABCDE ABCDE-BNT5N-KZCQ9-RDTGR-FQWTE
+23456 23456-ZE9YJ-QM6Q4-BNP9D-P2958
+K7M9Q K7M9Q-ZXN5F-NENVT-XTEZV-HNSFV
+XY3W8 XY3W8-2CJUB-WMDSQ-4DAVJ-8X5FX
