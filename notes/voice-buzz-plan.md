@@ -368,3 +368,84 @@ Made-up voices, Natural, +5/+10/−4 (difference from the perfect shifted voice)
 (true line-up), `same.py` (byte-identical checks), `rates.swift` (each device's supported rates and "running somewhere"),
 `tables.py`, `clip.py` (clipping at mic levels), `lvl.py`/`lvl.sh` (formant-only vs pitch-only level), `check_fix.py`
 (old preset = old code, new = old × gain), `glide_check.py` (gain glide when the style moves).
+
+## Third check: "the non-AI voice changer sounds super buzzy" (2026-10-15 evening, branch `v2-voice-buzz2`)
+
+Owner, after trying the test build: "the non ai voice changer sounds super buzzy, it just sounds like a pitch shift
+up and on the natural voice." In the blind set they marked exactly the plain shift (+10 / -8) and Natural clips as
+buzzy; none of the AI clips, originals or real recordings. Levels were fine (2.0.2's level fix holds).
+
+### What the buzz is
+- **Rubber Band smears the voice's pulses.** A voice is a train of vocal-fold pulses; at each one the upper
+  harmonics line up for a moment (a crisp tick, 100-200 times a second). A phase vocoder (Rubber Band, every mode)
+  loses that line-up at big moves and turns the ticks into a steady, reedy tone: the buzz.
+- **The buzz number:** pulse clarity, % = how strongly the 1-5 kHz loudness jumps once per pulse (depth of the
+  1-5 kHz envelope at the pitch and twice the pitch, voiced frames, median). On the owner's blind set it splits
+  Rubber Band from everything else with no overlap: the 12 Rubber Band clips (plain and Natural) 32-50, all 8 the
+  owner marked among them; originals, real recordings and AI clips 63-100.
+- **Not the cause** (buzz number on the same 6 clips; Rubber Band now 41-43): standard window 39-43, high-quality
+  pitch 41-43, high-speed 38, Rubber Band's offline mode (whole file) 37, R2 engine 39, R2 short + phase
+  independent 43, callbacks of 128 or 4096 40, two shifters in a row 38-44, formants not kept 36, formant scale 1 41,
+  pitch held still per 0.5 s 40, no changer post-filters 42. It is how a phase vocoder works, not an option.
+- **What fixes it:** moving whole pulses (pitch-synchronous overlap-add, "PSOLA"). Praat's offline version on the
+  same clips: buzz 111, quality (Distill-MOS) 4.16 / 3.95 plain and 3.94 / 4.06 Natural, vs Rubber Band's
+  3.47 / 3.35 and 3.44 / 3.42.
+
+### The fix: our own pulse shifter (`Sources/Voice/PulseShifter.{h,cpp}`)
+- A pitch tracker (2 kHz low-pass, ~12 kHz, YIN-style, 25 ms window, every 5 ms), one mark per pulse (the first on
+  the strongest pulse, the next ones by matching one period on), and two-period pieces laid down at the new pitch,
+  squeezed or stretched to move the voice shape. Unvoiced sound is only reshaped, never repeated; creak or unclear
+  frames right after voicing keep the last good period. Fixed delay 40 ms (`pulseLatencyMs`: at 35 ms 0.2 % of
+  pieces have to guess the next pulse, at 30 ms 2 %, at 40 ms 0.03 %); 60 ms scored exactly the same.
+- Used by the voice changer's Natural mode (the shape move made 1.4x bigger in log terms, `pulseShapePow`: whole
+  pulses keep more of the speaker's own voice, so 1.21 alone was judged a woman on 88 % of VCTK men vs Rubber
+  Band's 95 %) and by the plain shift from a set amount of 6 half-steps up or down. Below 6 with the changer off
+  nothing changed (45 of 45 renders from -5 to +5, all styles and "Deeper when slow", byte-identical).
+  `--changer-tune naturalEngine=0` gives the old Rubber Band output exactly.
+- Cost: 0.025 ms per 10 ms of sound (Rubber Band 0.14-0.24), worst 128-sample callback 0.17 ms (Rubber Band
+  0.9-1.6 ms); Intel half under Rosetta 0.035 ms (worst 0.55). Intel output matches Apple silicon (-96 dB).
+
+### Numbers (offline; nobody has listened yet)
+Natural, held-out VCTK and `say` sets, after 8 s of the same speaker (r3 = the values on `v2-voice-changer`):
+
+| | judged target | voice print beats plain (old / new plain) | quality | word errors | pitch | creak | buzz |
+|---|---|---|---|---|---|---|---|
+| VCTK men -> Woman, r3 | 95 % | 92 % | 3.48 | 5.7 % | 189 Hz | 0.055 | 42 |
+| VCTK men -> Woman, pulse | 100 % | 92 % / 100 % | 3.56 | 5.3 % | 193 Hz | 0.035 | 79 |
+| VCTK women -> Man, r3 | 100 % | 90 % | 3.11 | 8.1 % | 111 Hz | 0.069 | 42 |
+| VCTK women -> Man, pulse | 100 % | 80 % / 98 % | 3.72 | 6.3 % | 113 Hz | 0.026 | 99 |
+| `say` men -> Woman, r3 | 71 % | 87 % | 1.92 | 23.5 % | 189 Hz | 0.034 | 55 |
+| `say` men -> Woman, pulse | 100 % | 67 % / 91 % | 1.94 | 17.8 % | 191 Hz | 0.032 | 109 |
+| `say` women -> Man, r3 | 94 % | 83 % | 2.21 | 19.4 % | 111 Hz | 0.023 | 51 |
+| `say` women -> Man, pulse | 100 % | 87 % / 96 % | 2.86 | 7.6 % | 111 Hz | 0.007 | 127 |
+
+- "old / new plain": compared with the plain shift as it was (Rubber Band, comparable to r3) and as it is now
+  (pulse shifter at +10 / -8). Women -> Man now passes every pass mark on both sets (a first for Natural); men ->
+  Woman passes all but word errors (as before).
+- One `say` voice scores lower for Woman: Daniel 3.31 -> 3.06 (any shape boost, 3.15 at none; his pitch is tracked
+  right on every frame); Reed and Rocko go up (1.81 -> 1.97, 1.66 -> 1.91). On the small "testing testing" set
+  (Daniel, Reed) Woman 2.74 -> 2.50, Man 2.43 -> 2.66, plain +10 2.52 -> 2.77, plain -8 2.37 -> 2.81.
+- The plain shift with the pulse shifter, vs Rubber Band: VCTK men +10 quality 3.44 -> 3.82, word errors 6.1 ->
+  4.5 %; women -8 3.24 -> 3.72, 8.1 -> 7.7 %; `say` men +10 1.93 -> 2.07, 18.7 -> 13.2 %; women -8 2.33 -> 2.90,
+  16.8 -> 11.1 %. It keeps more of the speaker (similarity to the source 0.50 -> 0.77 and 0.37 -> 0.66): with the
+  shape kept it now sounds like the same person, higher or lower; Rubber Band's smearing had blurred that.
+- The one step back: the voice print (ECAPA) compared with the old Rubber Band plain shift, VCTK Man 80 % (90) and
+  `say` Woman 67 % (87). Rubber Band's smearing hides the speaker a little; whole pulses keep more of them (similarity
+  to the source speaker, Woman 0.19 / 0.32 = Rubber Band's 0.20 / 0.32; Man 0.24 / 0.35 vs 0.17 / 0.29). A bigger
+  shape move doesn't change the `say` number (71 % at 1.6, 69 % at 1.8); shorter pieces (`pulseWindow` 0.6) do
+  (73 %, VCTK 100 %) but lower quality (VCTK 3.42), so they're not used. Real voices' buzz numbers are 63-100; the
+  women -> Man pulses come out a bit crisper than real men on VCTK (99 vs 84).
+- Delay, mic to Pitch Shift Mic minus the devices (128-sample callbacks, sound lined up): Natural Woman 51 -> 45 ms,
+  Man 80 -> 45 ms; plain +3 52 ms (unchanged), +10 50 -> 45, -8 73 -> 45, -12 84 -> 44. The app's offline live
+  chain (`--live-sim`, 60 s): 0 dry-outs in every case. Switching shifters (changer on/off, amount crossing 6)
+  starts fresh: 60-75 ms quiet, like leaving 0.
+- Rubber Band options with more delay were not better (VCTK, Natural): standard window 75 / 129 ms (Woman / Man)
+  quality 3.50 / 3.33, more creak for Woman; two shifters in a row 99 / 124 ms, 3.28 / 3.02; high quality (Man only differs)
+  45 ms, 3.06, word errors 12 %.
+- No higher-delay setting helps the pulse shifter; a future speed-vs-realism control belongs to Realistic (AI) mode.
+
+### Tools (`research/voicechanger/buzz2/`, git-ignored; results tables and per-clip buzz numbers there too)
+`tools/bz.py` (buzz number), `t3/rbx3.cpp` (bench: the chain's logic with Rubber Band options or the pulse shifter,
+with the app's changer), `t3/quick.py` (judged / voice print / quality / creak / word errors with the harness's
+models), `t3/tune3.sh` (full measuring round with any build), `t3/sw/main.swift` (switching test with the app's own
+`VoiceStretcher` and `VoiceRing`), `t3/timing.cpp`, `t3/praat_psola.py`.

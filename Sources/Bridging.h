@@ -4,6 +4,7 @@
 #include "AudioRing.h"
 #include "Advanced/AdvancedChain.h"
 #include "Voice/VoiceChanger.h"
+#include "Voice/PulseShifter.h"
 #include "Voice/VoiceModel.h"
 #include <libproc.h>
 #include <sys/proc_info.h>

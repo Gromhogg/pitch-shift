@@ -144,7 +144,7 @@ let changerArg: ChangerOptions? = {
     guard let natural = entry.natural else { print("--voice: \(entry.name) has no Natural mode settings"); exit(1) }
     if !changerTuneArg.isEmpty, let probe = voicechanger_new(48000, 512) {  // check the keys before starting
         let aiKeys = ["aiSlowMs", "aiSlowEvery", "aiGainMaxDb"]  // Realistic mode's test keys (voicestream_tune)
-        let unknown = changerTuneArg.filter { voicechanger_tune(probe, $0.0, $0.1) == 0 && !aiKeys.contains($0.0) }.map(\.0)
+        let unknown = changerTuneArg.filter { voicechanger_tune(probe, $0.0, $0.1) == 0 && !aiKeys.contains($0.0) && !isVoiceShifterTuneKey($0.0) }.map(\.0)
         voicechanger_delete(probe)
         if !unknown.isEmpty { print("--changer-tune: unknown keys \(unknown.joined(separator: ", "))"); exit(1) }
     }
