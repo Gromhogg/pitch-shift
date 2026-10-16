@@ -32,7 +32,7 @@
 //   - the pitch the AI voice follows (Realistic mode, frameHz): the tracked pitch x the mapping; through creak it
 //     moves with a gradual fall or rise (not below 0.62 x median, mapped) and holds through a sudden drop or rough
 //     frames; an aperiodic moment up to 80 ms after voice holds it (never starts it); then it is eased into 9 (at
-//     most 12) half-steps above and 6 (at most 9) below the voice's own median, and moves at most 2 half-steps per
+//     most 11) half-steps above and 6 (at most 9) below the voice's own median, and moves at most 2 half-steps per
 //     10 ms while it sings (gaps up to 30 ms count as singing); the AI voice maps from its own median (aiMedianMode
 //     1): the same frames teach it (held notes left out), and once it knows the speaker (300 frames) it moves at
 //     most 0.01 half-steps per frame, so a long note is not pulled back toward the voice's pitch while it is held,
@@ -153,7 +153,8 @@ struct Tuning {
     float medianGlideSt = 0.3f;      // the median in use moves at most this per frame
     // the pitch handed to the AI voice
     float aiBandSt = 9;              // up to this above the voice's median it is left alone ...
-    float aiMaxSt = 12;              // ... beyond it eased so it never goes further than this
+    float aiMaxSt = 11;              // ... beyond it eased so it never goes further than this (12 before 3.1.1: on a
+                                     // note held that high, Woman's voice dropped an octave; 11 keeps it whole)
     float aiBandLowSt = 6;           // the same below the voice's median (a voice model sounds strained low)
     float aiMinSt = 9;
     float aiHoldFrames = 8;          // an aperiodic moment this soon after voice keeps the AI voice singing
