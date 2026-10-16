@@ -1068,6 +1068,29 @@ final class CardRow: NSStackView {
     var onScale: (CGFloat) -> Void = { _ in }
 }
 
+// A card's picker. While Pitch Shift Pro is locked (the Voice changer's voices) it's greyed out, and a click only calls
+// onLockedClick (which opens the unlock window).
+final class CardPicker: NSPopUpButton {
+    var locked = false {
+        didSet {
+            guard oldValue != locked else { return }
+            toolTip = locked ? "Pitch Shift Pro" : nil
+            setAccessibilityHelp(locked ? "Pitch Shift Pro" : nil)
+        }
+    }
+    var onLockedClick: () -> Void = {}
+
+    override func mouseDown(with event: NSEvent) {
+        if locked { onLockedClick(); return }
+        super.mouseDown(with: event)
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        if locked { onLockedClick(); return true }
+        return super.accessibilityPerformPress()
+    }
+}
+
 // One card: title + switch, big number, − 0 +, a picker, and any extra rows below (see addRow). A card made with
 // `showsAmount: false` (the Voice changer) has no big number and no − 0 +.
 final class ShiftCard: NSView {
@@ -1077,8 +1100,18 @@ final class ShiftCard: NSView {
     let minus = NSButton()
     let zero = NSButton(title: "0", target: nil, action: nil)
     let plus = NSButton()
-    let picker = NSPopUpButton(frame: .zero, pullsDown: false)
+    let picker = CardPicker(frame: .zero, pullsDown: false)
     let showsAmount: Bool
+    // Pitch Shift Pro is locked (the Voice changer card): the switch and the picker are locked (see GradientSwitch and
+    // CardPicker), and a small lock shows after the title.
+    var locked = false {
+        didSet {
+            guard oldValue != locked else { return }
+            toggle.locked = locked
+            picker.locked = locked
+            showTitle()
+        }
+    }
     var onToggle: (Bool) -> Void = { _ in }
     var onAmount: (Float) -> Void = { _ in }
     var keyViews: [NSView] { showsAmount ? [toggle, amount, minus, zero, plus, picker] : [toggle, picker] }
@@ -1106,7 +1139,25 @@ final class ShiftCard: NSView {
     private var numberActive: Bool?
     private var accessoryScale: ((CGFloat) -> Void)?  // sizes the views next to the picker (addPickerAccessory)
 
+    // The title, with a small lock after it while Pitch Shift Pro is locked.
+    private func showTitle() {
+        guard locked, let font = title.font, let lock = GradientSlider.lockImage(size: font.pointSize - 2) else {
+            title.stringValue = titleText
+            title.toolTip = nil
+            return
+        }
+        let words = NSMutableAttributedString(string: titleText + " ", attributes: [.font: font, .foregroundColor: NSColor.labelColor])
+        let attachment = NSTextAttachment()
+        attachment.image = lock
+        attachment.bounds = NSRect(x: 0, y: ((font.capHeight - lock.size.height) / 2).rounded(), width: lock.size.width, height: lock.size.height)
+        words.append(NSAttributedString(attachment: attachment))
+        title.attributedStringValue = words
+        title.toolTip = "Pitch Shift Pro"
+    }
+    private let titleText: String
+
     init(title text: String, extraRows: [NSView] = [], showsAmount: Bool = true) {
+        titleText = text
         title = NSTextField(labelWithString: text)
         header = NSStackView(views: [title, toggle])
         buttons = NSStackView(views: [minus, zero, plus])
@@ -1241,6 +1292,7 @@ final class ShiftCard: NSView {
             scale = s
             let size = Theme.controlSize(s)
             title.font = .systemFont(ofSize: 13 + (s - 1) * 2.5, weight: .semibold)
+            if locked { showTitle() }
             toggle.size = size == .large ? NSSize(width: 44, height: 26) : NSSize(width: 38, height: 22)
             for button in [minus, zero, plus] { button.useSize(size) }
             buttonWidths.forEach { $0.constant = (48 * s).rounded() }
@@ -1458,7 +1510,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     // changer-slider-natural / -fast / -default / -max / -NN (NN percent), and save nothing.
     func restoreChanger() {
         if let preview {
-            voice.changer.on = preview.contains("changer")
+            voice.changer.on = preview.contains("changer") && Pro.shared.unlocked  // off while Pitch Shift Pro is locked
             voice.changer.voiceID = arg("--voice").flatMap { VoiceLibrary.shared.voice($0)?.id }
                 ?? (preview.contains("changer-man") ? "man" : "woman")  // --voice NAME: that voice (an added one too)
             voice.changer.strength = arg("--strength").flatMap(Float.init).map { max(0, min(1, $0)) } ?? 1
@@ -1478,7 +1530,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             if voice.changer.on { voice.halfSteps = 0; voice.slowDeeper = false }  // as it would be (nothing saved)
             return
         }
-        voice.changer.on = defaults.bool(forKey: Keys.changerOn)
+        // The Voice changer is part of Pitch Shift Pro: off while it's locked (what was saved is kept for later).
+        voice.changer.on = defaults.bool(forKey: Keys.changerOn) && Pro.shared.unlocked
         // A voice that was removed: Woman is used, and the saved choice is kept.
         let saved = defaults.string(forKey: Keys.changerVoice) ?? "woman"
         voice.changer.voiceID = VoiceLibrary.shared.voice(saved)?.id ?? "woman"
@@ -1702,8 +1755,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         tone.mark = 0.5
         tone.onChange = { [weak self] value in self?.tonePicked(value) }
         // Locked controls (Pitch Shift Pro) only open the unlock window.
-        for slider in [tone, style] { slider.onLockedClick = { [weak self] in self?.showUnlock() } }
-        slowSwitch.onLockedClick = { [weak self] in self?.showUnlock() }
+        for slider in [tone, style, strength, realism] { slider.onLockedClick = { [weak self] in self?.showUnlock() } }
+        for toggle in [slowSwitch, autoEQSwitch] { toggle.onLockedClick = { [weak self] in self?.showUnlock() } }
         let toneRow = CardRow(views: [tone])
         toneRow.onScale = { [unowned self] scale in
             tone.scale = scale
@@ -1821,6 +1874,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         changerCard.picker.setAccessibilityLabel("Voice")
         changerCard.onToggle = { [weak self] on in self?.setChanger(on) }
         changerCard.addPickerAccessory(voiceTools.views) { [unowned self] scale in voiceTools.size(for: scale) }
+        // Locked (Pitch Shift Pro): its switch and voice picker only open the unlock window.
+        changerCard.toggle.onLockedClick = { [weak self] in self?.showUnlock() }
+        changerCard.picker.onLockedClick = { [weak self] in self?.showUnlock() }
 
         let background = BackgroundView()
         background.wantsLayer = true
@@ -1930,10 +1986,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             voice.cartoon = AppDelegate.savedCartoon(defaults)
             voice.slowDeeper = defaults.bool(forKey: Keys.voiceSlowDeeper)
             for (uid, tilt) in AppDelegate.savedTones(defaults) { hear.setTone(tilt, for: uid) }
+            for (uid, eq) in AppDelegate.savedAutoEQs(defaults) { hear.setAutoEQ(on: eq.on, offsets: eq.offsets, for: uid) }
+            restoreChanger()  // the Voice changer as saved (and if it's on, it sets the pitch: only one at a time)
         } else {
             voice.cartoon = Free.cartoon
             voice.slowDeeper = Free.slowDeeper
             for uid in hear.tones.keys { hear.setTone(Free.tone, for: uid) }
+            for uid in hear.autoEQs.keys { hear.setAutoEQ(on: false, offsets: [], for: uid) }
+            voice.changer.on = false
             if soundboard.isOpen { soundboard.close() }
         }
         buildMenu()
@@ -2701,14 +2761,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         if hasMic { showCurrentMic() }
         style.value = voice.cartoon
         style.isEnabled = voiceOn && installed && !changerActive
-        style.toolTip = changerTip
+        style.toolTip = locked ? "Pitch Shift Pro" : changerTip
         slowSwitch.isOn = voice.slowDeeper
         slowSwitch.isEnabled = voiceOn && installed
         slowSwitch.dimmed = changerActive
-        slowSwitch.toolTip = changerActive ? "Turning this on turns the voice changer off" : nil
+        slowSwitch.toolTip = locked ? "Pitch Shift Pro" : changerActive ? "Turning this on turns the voice changer off" : nil
         soundsButton.isEnabled = installed && hasMic  // the Soundboard works with the voice off too
         if case .problem(let message) = voice.state { voiceCard.amount.toolTip = message } else { voiceCard.amount.toolTip = amountTip }
-        showChanger(active: changerActive, usable: installed && hasMic)
+        showChanger(active: changerActive, usable: installed && hasMic, locked: locked)
 
         let listening = preview.map { $0.contains("listening") } ?? voice.listening
         dot.isLive = (voiceOn || voice.runsForSounds) && installed && listening
@@ -2743,11 +2803,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     // The Voice changer card: on while its switch and Your voice are on (`active`); the switch and picker work while
     // Pitch Shift Mic and a mic are there (`usable`). Under "Faster ↔ More real": the delay, a spinner while the
-    // realistic voice gets ready, a small warning sign when Natural is standing in (the tooltip says why).
-    private func showChanger(active: Bool, usable: Bool) {
+    // realistic voice gets ready, a small warning sign when Natural is standing in (the tooltip says why). While
+    // Pitch Shift Pro is locked (`locked`), it's off and everything in it shows a lock and opens the unlock window.
+    private func showChanger(active: Bool, usable: Bool, locked: Bool) {
+        changerCard.locked = locked
+        strength.locked = locked
+        realism.locked = locked
+        voiceTools.locked = locked
         changerCard.show(on: voice.changer.on, active: active)
         changerCard.toggle.isEnabled = usable
-        changerCard.picker.isEnabled = usable
+        changerCard.picker.isEnabled = usable && !locked
         showCurrentVoice()
         strength.value = voice.changer.strength
         strength.isEnabled = active
@@ -2810,6 +2875,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             if loading { realisticLoading.startAnimation(nil) } else { realisticLoading.stopAnimation(nil) }
         }
         realisticWarning.isHidden = !warning
+        if locked { note = "Pitch Shift Pro" }
         realism.toolTip = note
         delayRow.toolTip = note
         realism.setAccessibilityHelp(note)
