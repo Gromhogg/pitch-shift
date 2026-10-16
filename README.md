@@ -71,6 +71,12 @@ More help: [windows/README.md](windows/README.md).
 
 All of them can be on at the same time. Closing the window keeps Pitch Shift running. Quit it with ⌘Q.
 
+**Pitch Shift Pro ($5, Mac)**
+
+- Free: **What you hear** with Advanced processing, and **Your voice** in the Cartoon style, with **Test**.
+- Pro adds the **Voice changer** (with your own voices), the **Natural ↔ Cartoon** and **Bass ↔ Treble** sliders, **Auto EQ**, **Deeper when slow** and the **Soundboard**. They show a small lock until you unlock them.
+- To get a key, click **Unlock Pro** at the top right, then **Email for a key** (or email cbsweetland@gmail.com). Paste the key you get back and click **Unlock**. It works on all your Macs, for good, with no internet needed.
+
 ## Your own voices (Mac)
 
 The voice changer can also use voices you download. They sound best as an AI voice (Macs with Apple silicon): put the **Faster ↔ More real** slider anywhere right of **Faster**.
@@ -86,12 +92,6 @@ curl -fsSL https://raw.githubusercontent.com/Gromhogg/pitch-shift/main/tools/con
 - The new voice shows up in the Voice changer's voice menu. Pick it and move **Faster ↔ More real** right of **Faster**. A voice converted before Pitch Shift 3.1 still plays, but without hearing ahead (it can stutter a little more); convert its `.pth` again to fix that.
 - **The Voices folder:** click the **⋯** button next to the voice menu, then **Open Voices Folder**. Each voice is a folder in there. In the same menu, **Add Voice…** adds a voice folder (or a `.zip` of one) that someone shared with you, and **Rename…** and **Remove** change the voice you picked. Built-in voices can't be removed.
 - Voices copied from a real person, and fan-made voices of characters, are your own responsibility: only use voices you're allowed to use, and don't pretend to be someone you're not.
-
-**Pitch Shift Pro ($5, Mac)**
-
-- Free: **What you hear** with Advanced processing, and **Your voice** in the Cartoon style, with Test.
-- Pro adds the **Natural ↔ Cartoon** and **Bass ↔ Treble** sliders, **Deeper when slow** and the **Soundboard**. They show a small lock until you unlock them.
-- Click **Unlock Pro** at the top right, then **Buy for $5**. Paste the key you get (on the page after paying, and by email) and click **Unlock**. One key works on all your Macs, for good. It needs the internet only once.
 
 ## If something goes wrong
 
@@ -116,7 +116,7 @@ brew install rubberband
 
 `build.sh` builds `Pitch Shift.app` for Apple silicon and Intel (with Pitch Shift Mic inside), puts it in Applications and puts a shortcut on your Desktop. The first time, it downloads the source of Rubber Band and libsamplerate to build the Intel part (`libs/build.sh`), and the Realistic voice changer's AI model files (about 130 MB, listed in `voices/models.txt`; without them the app still builds and only the Natural voice changer works). `packaging/make-pkg.sh` makes the installer, and `./release.sh 1.2.3` posts a new version.
 
-The Pitch Shift Pro unlock server is in [server/](server/README.md); the app's side is `Sources/Pro.swift` and `Sources/ProConfig.swift`. A build without the server's public key in `ProConfig.swift` has nothing locked.
+Pitch Shift Pro: the app's side is `Sources/Pro.swift` and `Sources/ProConfig.swift`, and keys are made with `tools/pro-keys.sh`. `build.sh` builds in the key secret from `~/Library/Application Support/Pitch Shift Keys/secret.txt` (or `PRO_KEY_SECRET`) when it's there; a build without it has nothing locked. The [server/](server/README.md) folder isn't used yet.
 
 ## How it works
 

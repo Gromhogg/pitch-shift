@@ -9,6 +9,44 @@ gated by the key.
 Mac only. The Windows (beta) app is not part of this: it stays as it is (everything free) until a Windows unlock is
 built.
 
+## What changed 2026-10-16: emailed keys, no server
+
+The owner: "For now, let's hold off on the stripe keys for this new version: Have it where a person mails my email (at
+cbsweetland@gmail.com) and I send them a key over email directly. This also makes it so I can send out keys for
+free." So there is no Stripe and no server for now. Sections 2, 4, 5, 6 and 9 below describe the Stripe version; they
+are kept for later and are not what the app does today. Section 10 is done (branch `v3-pro`).
+
+- **How someone gets Pro:** in the app, **Unlock Pro** (title bar, the Pitch Shift menu, or a click on anything
+  locked) opens a small window: "Pitch Shift Pro: $5", what it adds, "Email cbsweetland@gmail.com for a key", an
+  **Email for a key** button (a new email in Mail, subject "Pitch Shift Pro key"), the key box and **Unlock**. The
+  owner makes a key and emails it back; the person pastes it and clicks Unlock. No internet is needed for that.
+- **The key:** still 25 characters in 5 groups from `23456789ABCDEFGHJKMNPQRSTUVWXYZ`. The first 5 are a random
+  serial number, the next 16 come from HMAC-SHA-256 of `"PSPRO2:" + serial` with the owner's secret (each from two
+  bytes of it, modulo 31; about 79 bits), the last 4 are the same typo check as before (SHA-256 of `"PSPRO1:"` + the
+  first 21). Typing is forgiving as before. `Sources/Pro.swift` (`ProKey`) and `tools/pro-keys.sh` make keys the same
+  way; `tools/pro-keys-test.txt` holds fixed test keys both check (`tools/pro-keys.sh test`, app `--pro-test`).
+- **The secret:** 32 random bytes as 64 hex characters in `~/Library/Application Support/Pitch Shift Keys/secret.txt`
+  (folder 700, file 600), made by the key tool the first time. Never in git. `build.sh` builds it into the app from
+  there (or from `PRO_KEY_SECRET`); a build without it has nothing locked, so builds from the public code just work.
+  `release.sh` stops if there's no secret (`PRO_KEY_SECRET= ./release.sh X` releases with everything free). **Keep a
+  copy of the Pitch Shift Keys folder somewhere safe:** without the same secret, a new build would refuse every key
+  already sent out.
+- **What the app keeps:** `~/Library/Application Support/Pitch Shift/Pro.json` = the key and the date it was entered
+  (no token, no Mac id). Checked again at every launch, with no internet.
+- **The owner's tool:** `tools/pro-keys.sh new "their email"` (prints the key, adds `date  name  key` to `issued.txt`
+  next to the secret), `list`, `check KEY`. Plain Bash with the Mac's own `openssl` and `shasum`.
+- **Free and Pro** as in section 1, now with the Voice changer and Auto EQ locked too: free = What you hear with
+  Advanced processing on/off, Your voice with the style at Cartoon, Test; Pro = the Voice changer (and adding voices),
+  Natural ↔ Cartoon, Bass ↔ Treble, Auto EQ, Deeper when slow, the Soundboard.
+- **Honest limits (new):** an emailed key can't be turned off once sent (no server to ask), and the secret is inside
+  the app, so someone who digs it out of the app file could make keys (the same "pay for the ready-made build" limit
+  as the public code in section 8). A key works on any number of Macs. If keys get passed around, the fix is a new
+  secret in a later version (old keys then stop working, so the owner would re-send keys to people in `issued.txt`),
+  or the Stripe server below.
+- **Later, with Stripe:** sections 5, 6 and 9 still apply, but the server would have to make keys the new way (or
+  the app learn both kinds) and the app would need its `/activate` call back. `server/README.md` says the folder is
+  not used yet.
+
 ## 1. Free and Pro
 
 | | Free | Pro ($5 once) |
@@ -195,7 +233,7 @@ unsigned, like now).
   click Allow for `wrangler login`, the main session can run all of those commands for you; you only paste the
   Stripe and Resend secrets when it asks (they must not pass through the chat).
 
-## 10. Adding the other paid features (when their branches are merged)
+## 10. Adding the other paid features (done 2026-10-16 on `v3-pro`)
 
 - **Auto EQ** (`paid-auto-eq`): in `refresh()`: `autoEQSwitch.locked = locked`; in `buildWindow()`:
   `autoEQSwitch.onLockedClick = { self.showUnlock() }`; give `HearShifter` the saved Auto EQ settings only when
