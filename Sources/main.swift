@@ -30,7 +30,8 @@
 //                                              --cartoon-at "1:1,2:0" moves the style to 1 at 1 s and back to 0 at 2 s;
 //                                              --voice-preset old: as before the Natural level fix, for comparing)
 //                [--voice Woman [--strength 1] [--quality natural] [--changer-tune "k=v,..."] [--changer-stats]]
-//                                              with the voice changer (the amount and style are then ignored;
+//                                              with the voice changer (the amount, style and --slow-deeper are then
+//                                              ignored: only one at a time;
 //                                              --changer-stats prints what it does once per second of sound)
 //                [--live-sim [--buffer 128]]   instead: the live chain's steps in callback-sized pieces (with the
 //                                              waiting sound), printing the delay they add (no devices)
@@ -114,8 +115,8 @@ func fourCC(_ value: UInt32) -> String {
 // Voice style from the command line: --cartoon = 1 (Cartoon), --cartoon-amount X (0 = Natural ... 1 = Cartoon).
 // In --preview it sets where the slider is.
 let cartoonArg: Float? = args.contains("--cartoon") ? 1 : arg("--cartoon-amount").flatMap(Float.init).map { max(0, min(1, $0)) }
-// "Deeper when slow" on, for --test-voice and --render-voice.
-let slowDeeperArg = args.contains("--slow-deeper")
+// "Deeper when slow" asked for (--test-voice, --render-voice; left out with --voice, see slowDeeperArg).
+let slowDeeperAsked = args.contains("--slow-deeper")
 
 // The voice changer, for --render-voice and --test-voice: --voice NAME (Woman, Man or another voice's id),
 // --strength S (0 ... 1, default 1), --quality natural|realistic, --changer-tune "key=value,..." (VoiceChanger.h),
@@ -145,6 +146,15 @@ let changerArg: ChangerOptions? = {
     let strength = arg("--strength").flatMap(Float.init).map { max(0, min(1, $0)) } ?? 1
     return ChangerOptions(voice: natural, strength: strength, tune: changerTuneArg, stats: args.contains("--changer-stats"))
 }()
+// Only one at a time (the owner's rule, as in the window): with --voice the voice changer sets the pitch, so --steps
+// and --slow-deeper are left out.
+if changerArg != nil && (arg("--steps") != nil || slowDeeperAsked) {
+    print("Note: with --voice the voice changer sets the pitch, so --steps and --slow-deeper are ignored (only one at a time).")
+}
+let slowDeeperArg = slowDeeperAsked && changerArg == nil
+// The amount for the voice: --steps (or `fallback`), except with --voice, where it is not used (the changer sets the
+// pitch; the fallback keeps the renders as they were).
+func voiceStepsArg(_ fallback: Float) -> Float { changerArg != nil ? fallback : arg("--steps").flatMap(Float.init) ?? fallback }
 // Why Realistic (AI) mode can't run here (nil = it can).
 #if arch(arm64)
 let realisticUnavailable: String? = nil
@@ -326,7 +336,7 @@ if let input = arg("--render-voice") {
     if changerArg != nil && realisticArg, let why = realisticUnavailable { print("Realistic mode: \(why); Natural mode is used.") }
     if args.contains("--live-sim") {  // the live chain's timing, offline (see simulateVoiceChain; Natural mode only)
         do {
-            try simulateVoiceChain(input: input, output: args[i + 2], halfSteps: arg("--steps").flatMap(Float.init) ?? 3,
+            try simulateVoiceChain(input: input, output: args[i + 2], halfSteps: voiceStepsArg(3),
                                    cartoon: cartoonArg ?? 0, slowDeeper: slowDeeperArg, changer: changerArg,
                                    blockFrames: arg("--buffer").flatMap(Int.init) ?? 128)
             print("wrote \(args[i + 2])")
@@ -337,7 +347,7 @@ if let input = arg("--render-voice") {
         }
     }
     do {
-        try renderVoiceFile(input: input, output: args[i + 2], halfSteps: arg("--steps").flatMap(Float.init) ?? 3,
+        try renderVoiceFile(input: input, output: args[i + 2], halfSteps: voiceStepsArg(3),
                             cartoon: cartoonArg ?? 0, changes: changes, slowDeeper: slowDeeperArg, levelFix: preset != "old",
                             changer: changerArg)
         // Realistic: the AI voice over the same file, inline (it never comes late), with the Natural render as its
@@ -396,7 +406,7 @@ if args.contains("--test") {
 }
 
 if args.contains("--test-voice") {
-    let steps = arg("--steps").flatMap(Float.init) ?? 3
+    let steps = voiceStepsArg(3)
     let micUID = arg("--mic").flatMap { name in Mics.list().first { $0.name == name }?.uid }
     let voice = VoiceShifter(halfSteps: steps, cartoon: cartoonArg ?? 0, slowDeeper: slowDeeperArg, micUID: micUID)
     if let changerArg, let entry = arg("--voice").flatMap({ VoiceLibrary.shared.voice($0) }) {  // --voice: the voice changer on

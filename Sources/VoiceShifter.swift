@@ -1180,8 +1180,11 @@ final class VoiceShifter {
     // With the voice off (only the Soundboard running) the voice goes through unchanged, and the voice changer only
     // runs while "Your voice" is on.
     private func pushParams() {
-        let steps = voiceSwitch ? halfSteps : 0, cartoon = cartoon, slowDeeper = voiceSwitch && slowDeeper
         let voice = voiceSwitch && changer.on ? VoiceLibrary.shared.voice(changer.voiceID)?.natural : nil
+        // Only one at a time (the owner's rule): with a changer voice on, the changer alone sets the pitch, so the
+        // amount and "Deeper when slow" are not sent (the window also sets them to 0 / off).
+        let steps = voiceSwitch && voice == nil ? halfSteps : 0, cartoon = cartoon
+        let slowDeeper = voiceSwitch && voice == nil && slowDeeper
         let new = VoiceParams(halfSteps: steps, cartoon: cartoon, slowDeeper: slowDeeper, silent: false, changer: voice,
                               strength: max(0, min(1, changer.strength)))
         params.withLock {

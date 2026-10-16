@@ -57,13 +57,23 @@ extension NSControl {
 // a little while pressed, like the standard switch.
 final class GradientSwitch: NSView {
     var onChange: (Bool) -> Void = { _ in }
-    var onEnabled: (Bool) -> Void = { _ in }  // when it's turned on or off as a control (for its label)
+    var onEnabled: (Bool) -> Void = { _ in }  // when it starts or stops looking usable (for its label)
     var isEnabled = true {
         didSet {
             needsDisplay = true
-            if oldValue != isEnabled { onEnabled(isEnabled) }
+            if oldValue != isEnabled { onEnabled(looksEnabled) }
         }
     }
+    // Looks greyed out but still works (for example "Deeper when slow" while the Voice changer is on: turning it on
+    // turns the changer off).
+    var dimmed = false {
+        didSet {
+            guard oldValue != dimmed else { return }
+            needsDisplay = true
+            onEnabled(looksEnabled)
+        }
+    }
+    var looksEnabled: Bool { isEnabled && !dimmed }
     var isOn = false {
         didSet {
             guard oldValue != isOn else { return }
@@ -109,7 +119,7 @@ final class GradientSwitch: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let alpha: CGFloat = isEnabled ? 1 : 0.4
+        let alpha: CGFloat = looksEnabled ? 1 : 0.4
         let track = self.track
         let shape = NSBezierPath(roundedRect: track, xRadius: track.height / 2, yRadius: track.height / 2)
         NSColor.quaternaryLabelColor.withAlphaComponent(0.25 * alpha + 0.1).setFill()
@@ -179,8 +189,10 @@ final class GradientSlider: NSView {
     var mark: Float? { didSet { needsDisplay = true } }
     var steps: Float = 100     // values it can take between 0 and 1
     var clickThrough = false   // a click works even while another app is in front (the Soundboard's volume)
-    private let left: String, right: String
-    private let describe: (Float) -> String  // what VoiceOver says for a value
+    // The labels under the ends, and what VoiceOver says for a value (both may change, e.g. Strength in Realistic).
+    var left: String { didSet { if oldValue != left { needsDisplay = true } } }
+    var right: String { didSet { if oldValue != right { needsDisplay = true } } }
+    var describe: (Float) -> String { didSet { setAccessibilityValueDescription(describe(value)) } }
     var isEnabled = true {
         didSet {
             guard oldValue != isEnabled else { return }
@@ -814,7 +826,7 @@ final class ShiftCard: NSView {
     // The label dims while the switch can't be used. `notes`: small views right after the label (shown when needed).
     static func switchRow(_ text: String, _ toggle: GradientSwitch, notes: [NSView] = []) -> CardRow {
         let label = NSTextField(labelWithString: text)
-        label.textColor = toggle.isEnabled ? .secondaryLabelColor : .tertiaryLabelColor
+        label.textColor = toggle.looksEnabled ? .secondaryLabelColor : .tertiaryLabelColor
         toggle.onEnabled = { label.textColor = $0 ? .secondaryLabelColor : .tertiaryLabelColor }
         toggle.setAccessibilityLabel(text)
         let left = NSStackView(views: [label] + notes)
@@ -1054,6 +1066,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             voice.changer.strength = arg("--strength").flatMap(Float.init).map { max(0, min(1, $0)) } ?? 1
             voice.changer.realistic = realisticOffered
                 && ["changer-realistic", "changer-loading", "changer-fallback"].contains { preview.contains($0) }
+            if voice.changer.on { voice.halfSteps = 0; voice.slowDeeper = false }  // as it would be (nothing saved)
             return
         }
         voice.changer.on = defaults.bool(forKey: Keys.changerOn)
@@ -1063,6 +1076,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let strength = (defaults.object(forKey: Keys.changerStrength) as? NSNumber)?.floatValue ?? 1
         voice.changer.strength = strength.isFinite ? max(0, min(1, strength)) : 1
         voice.changer.realistic = realisticOffered && defaults.string(forKey: Keys.changerQuality) == "realistic"
+        // Only one at a time: saved with a pitch change too (an older version allowed both), the changer wins.
+        if voice.changer.on && (voice.halfSteps != 0 || voice.slowDeeper) { clearPitchChange() }
+    }
+
+    // The voice changer replaces the pitch change: the amount goes to 0 and "Deeper when slow" off (both saved; they
+    // stay so when the changer goes off).
+    func clearPitchChange() {
+        voice.halfSteps = 0
+        voice.slowDeeper = false
+        guard preview == nil else { return }  // pictures change nothing
+        defaults.set(Float(0), forKey: Keys.voiceSteps)
+        defaults.set(false, forKey: Keys.voiceSlowDeeper)
     }
 
     // Realistic voices need Apple silicon (the Intel half of the app has no AI). Pictures: changer-intel hides it.
@@ -1290,9 +1315,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         voiceCard.picker.setAccessibilityLabel("Microphone")
         voiceCard.onToggle = { [weak self] on in self?.setVoice(on) }
         voiceCard.onAmount = { [weak self] value in
-            self?.voice.halfSteps = value
-            self?.defaults.set(value, forKey: Keys.voiceSteps)
-            self?.refresh()
+            guard let self else { return }
+            voice.halfSteps = value
+            if preview == nil { defaults.set(value, forKey: Keys.voiceSteps) }
+            if value != 0 && voice.changer.on { setChanger(false) }  // only one at a time
+            refresh()
         }
 
         // The Voice changer: a voice (Woman, Man, then added voices), how strong, and Natural or Realistic.
@@ -1715,8 +1742,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     func slowPicked(_ on: Bool) {
         voice.slowDeeper = on
-        guard preview == nil else { return }  // pictures change nothing
-        defaults.set(on, forKey: Keys.voiceSlowDeeper)
+        if preview == nil { defaults.set(on, forKey: Keys.voiceSlowDeeper) }  // pictures change nothing
+        if on && voice.changer.on { setChanger(false) }  // only one at a time
+        refresh()
     }
 
     @objc func testClicked() { test.click() }
@@ -1799,9 +1827,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     private var changerAlert: NSAlert?
 
-    // Turning the Voice changer on also turns Your voice on.
+    // Turning the Voice changer on also turns Your voice on, and sets the amount to 0 and "Deeper when slow" off
+    // (only one at a time: the changer sets the pitch).
     func setChanger(_ on: Bool) {
         voice.changer.on = on
+        if on { clearPitchChange() }
         guard preview == nil else { refresh(); return }  // pictures change nothing
         defaults.set(on, forKey: Keys.changerOn)
         if on && !voice.isOn { setVoice(true) }
@@ -2032,12 +2062,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let installed = driverInstalled
         let hasMic = !Mics.list().isEmpty
         let voiceActive = voiceOn && installed && hasMic
-        // With a voice from the Voice changer on, it sets the pitch and style: the number, − 0 + and the
-        // Natural ... Cartoon slider are dimmed ("Deeper when slow" still works on top).
+        // With a voice from the Voice changer on, it sets the pitch and style (only one at a time): the number and
+        // − 0 + still work, and a pitch change turns the changer off (the tooltip says so); "Deeper when slow" is
+        // greyed out but works the same way; the Natural ... Cartoon slider is dimmed.
         let changerActive = voice.changer.on && voiceActive
         let changerTip = changerActive ? "Voice changer is on" : nil
-        voiceCard.show(on: voiceOn, value: voice.halfSteps, active: voiceActive, amountActive: voiceActive && !changerActive)
-        voiceCard.buttonsTip = changerTip
+        let amountTip = changerActive ? "Changing the pitch turns the voice changer off" : nil
+        voiceCard.show(on: voiceOn, value: voice.halfSteps, active: voiceActive)
+        voiceCard.buttonsTip = amountTip
         voiceCard.toggle.isEnabled = installed && hasMic
         voiceCard.picker.isEnabled = installed && hasMic
         if hasMic { showCurrentMic() }
@@ -2046,8 +2078,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         style.toolTip = changerTip
         slowSwitch.isOn = voice.slowDeeper
         slowSwitch.isEnabled = voiceOn && installed
+        slowSwitch.dimmed = changerActive
+        slowSwitch.toolTip = changerActive ? "Turning this on turns the voice changer off" : nil
         soundsButton.isEnabled = installed && hasMic  // the Soundboard works with the voice off too
-        if case .problem(let message) = voice.state { voiceCard.amount.toolTip = message } else { voiceCard.amount.toolTip = changerTip }
+        if case .problem(let message) = voice.state { voiceCard.amount.toolTip = message } else { voiceCard.amount.toolTip = amountTip }
         showChanger(active: changerActive, usable: installed && hasMic)
 
         let listening = preview.map { $0.contains("listening") } ?? voice.listening
@@ -2093,6 +2127,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         strength.isEnabled = active
         let chosen = VoiceLibrary.shared.voice(voice.changer.voiceID)
         let hasRealistic = chosen?.manifest.realistic != nil
+        // In Realistic mode the AI voice always sounds like the voice; the slider only moves the pitch, from yours
+        // (left) to the voice's (right), so it says so.
+        if voice.changer.realistic && hasRealistic && realisticOffered {
+            let name = chosen?.name ?? "Voice"
+            strength.left = "Your pitch"
+            strength.right = "\(name)'s pitch"
+            strength.describe = { $0 <= 0 ? "Your pitch" : $0 >= 1 ? "\(name)'s pitch" : "\(Int(($0 * 100).rounded())) percent of the way to \(name)'s pitch" }
+            strength.setAccessibilityLabel("Pitch")
+        } else {
+            strength.left = "Light"
+            strength.right = "Full"
+            strength.describe = { $0 <= 0 ? "Light" : $0 >= 1 ? "Full" : "\(Int(($0 * 100).rounded())) percent" }
+            strength.setAccessibilityLabel("Strength")
+        }
         if changerAlert == nil { realisticSwitch.isOn = voice.changer.realistic }  // stays on while the alert asks
         realisticSwitch.isEnabled = active && hasRealistic
 

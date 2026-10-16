@@ -61,8 +61,8 @@ More help: [windows/README.md](windows/README.md).
 
 - Turn it on and pick **Woman** (for a man's voice) or **Man** (for a woman's voice). It turns on **Your voice** too.
 - Slide from **Light** to **Full** to choose how strong the change is.
-- Turn on **Realistic** for an AI voice that sounds more like a real person (Macs with Apple silicon). It adds about a quarter of a second of delay. The first time, it takes up to half a minute to get ready; the plain voice changer plays meanwhile.
-- While a voice is on, it sets your pitch: the amount and the **Natural**…**Cartoon** slider are not used. **Deeper when slow**, **Test** and the Soundboard still work.
+- Turn on **Realistic** for an AI voice that sounds more like a real person (Macs with Apple silicon). It adds about a quarter of a second of delay. The first time, it takes up to half a minute to get ready; the plain voice changer plays meanwhile. With Realistic on, the slider moves only the pitch, from **Your pitch** to the voice's.
+- Only one at a time: a voice sets your pitch, so turning one on puts the amount at 0 and turns **Deeper when slow** off. Changing the amount or turning **Deeper when slow** on turns the voice changer off. The **Natural**…**Cartoon** slider is not used while a voice is on. **Test** and the Soundboard still work.
 
 All of them can be on at the same time. Closing the window keeps Pitch Shift running. Quit it with ⌘Q.
 
