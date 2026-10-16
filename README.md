@@ -12,6 +12,8 @@ Change the pitch of **what you hear** (any app, like Spotify, Apple Music or You
 4. Click **Continue**, then **Install**. Pitch Shift opens when it's done.
 5. Click **Allow** when your Mac asks about recording audio and using the microphone.
 
+If you think this is a virus, you can check the source code and throw it into an AI model– I make this purely for fun.
+
 **Or with Terminal** (skips steps 2 and 3): open Terminal, paste this line, and press Return.
 
 ```
@@ -33,7 +35,8 @@ irm https://raw.githubusercontent.com/Gromhogg/pitch-shift/main/install.ps1 | ie
 - Click **Yes** when Windows asks to allow changes.
 - If a **VB-Audio** window opens, click **Install Driver**. This adds **Pitch Shift Mic**.
 
-Or download **[PitchShift-Setup.exe](https://github.com/Gromhogg/pitch-shift/releases/latest/download/PitchShift-Setup.exe)** and open it. If Windows says **"Windows protected your PC"**, click **More info**, then **Run anyway**.
+Or download **[PitchShift-Setup.exe](https://github.com/Gromhogg/pitch-shift/releases/latest/download/PitchShift-Setup.exe)** and open it. If Windows says **"Windows protected your PC"**, click **More info**, then **Run anyway**. 
+If you think this is a virus, you can check the source code and throw it into an AI model– I make this purely for fun.
 
 More help: [windows/README.md](windows/README.md).
 
