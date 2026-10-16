@@ -64,6 +64,7 @@ Both can be on at the same time. Closing the window keeps Pitch Shift running. Q
 - **The app you picked goes silent:** quit Pitch Shift and it plays normally again. Then turn Pitch Shift on in **System Settings → Privacy & Security → Screen & System Audio Recording** and open it again.
 - **No "Pitch Shift Mic" in your call app:** restart your Mac.
 - **Your voice is silent:** turn Pitch Shift on in **System Settings → Privacy & Security → Microphone**.
+- **Soundboard sounds cut out in Discord:** Discord's noise filter (Krisp) treats sounds as noise. Use headphones, then in **User Settings → Voice & Video** set **Input Profile** to **Studio**. Or pick **Custom** and turn off **Noise Suppression**, **Echo Cancellation** and **Automatic Gain Control**.
 
 ## Uninstall (Mac)
 
@@ -86,7 +87,7 @@ brew install rubberband
 - **What you hear:** a macOS audio tap grabs the app's sound and mutes the original. [Rubber Band](https://breakfastquay.com/rubberband/) changes the pitch, and the result plays on your current speakers or headphones. It never changes your Mac's sound settings.
 - **Advanced processing:** going up, the bass is shifted an octave less so it stays bass; going down, the song's very top is kept; and a slow tone control keeps the song's overall balance like the original's. Details: [notes/advanced-processing-research.md](notes/advanced-processing-research.md).
 - **Your voice:** your mic goes through Rubber Band's low-delay live shifter into "Pitch Shift Mic", a virtual mic built from [BlackHole](https://github.com/ExistentialAudio/BlackHole) that comes with Pitch Shift (you don't need to install BlackHole). It only runs while an app is listening to Pitch Shift Mic.
-- **Soundboard:** sounds are added to Pitch Shift Mic after your voice, at their normal pitch and an even loudness; each sound also has its own volume (0–150%). On your Mac's own speakers, your mic is muted while a sound plays, so the call never hears it twice.
+- **Soundboard:** sounds are added to Pitch Shift Mic after your voice, at their normal pitch and an even loudness (very loud, squashed sounds are turned down to match the others); each sound also has its own volume (0–150%). While a sound plays, voice and sound are kept under −3 dBFS, so call apps don't get them clipped. On your Mac's own speakers, your mic is muted while a sound plays, so the call never hears it twice.
 
 ## Credits and license
 
