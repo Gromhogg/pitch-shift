@@ -22,15 +22,20 @@
 //     speaker is gone after ~0.1 s of voice) and learns from voiced frames and from smooth low ones (>= 0.5 x median,
 //     not rough), so a deep voice finds its real median; for the first 0.5 s of voice every smooth frame counts and
 //     only < 70 Hz is creak (the guess may be far off);
-//     the median in use moves at most 0.3 half-steps per 10 ms, so learning it never makes the pitch jump,
+//     the median is read between the histogram's quarter-step bins (so it moves smoothly, not in steps), and the
+//     median in use moves at most 0.3 half-steps per 10 ms while it is finding the speaker, 0.05 once it knows them,
+//   - held notes (3.1.1): a voiced stretch (gaps up to 80 ms) whose slow pitch line (the mean of its last 16 voiced
+//     frames, so vibrato averages out) stays within 1 half-step for 0.4 s is a held note: neither median learns from
+//     it, and neither moves while it lasts. A stretch's frames are learned once it is over (1.5 s late at most), so
+//     the start of a note is not learned either (before 3.1.1 the median slid toward a held note, and the mapping
+//     turned that into a slide of the note: up to 17 half-steps when a man sang high after talking),
 //   - the pitch the AI voice follows (Realistic mode, frameHz): the tracked pitch x the mapping; through creak it
 //     moves with a gradual fall or rise (not below 0.62 x median, mapped) and holds through a sudden drop or rough
 //     frames; an aperiodic moment up to 80 ms after voice holds it (never starts it); then it is eased into 9 (at
 //     most 12) half-steps above and 6 (at most 9) below the voice's own median, and moves at most 2 half-steps per
 //     10 ms while it sings (gaps up to 30 ms count as singing); the AI voice maps from its own median (aiMedianMode
-//     1): the same frames teach it, except inside a held note (30 frames within 0.8 half-steps of their mean), and
-//     once it knows the speaker (300 frames) it moves at most 0.01 half-steps per frame, so a long note is not pulled
-//     back toward the voice's pitch while it is held (Natural keeps its own median, unchanged),
+//     1): the same frames teach it (held notes left out), and once it knows the speaker (300 frames) it moves at
+//     most 0.01 half-steps per frame, so a long note is not pulled back toward the voice's pitch while it is held,
 //   - voice shape (formants): formant ^ (strength * |off| / |12 log2(target / assumedInputHz)|, limited to 1),
 //     gliding over 150 ms; Rubber Band gets shape / pitch.
 // post (after Rubber Band), per output sample, all plain filters (no added delay):
@@ -49,7 +54,8 @@
 // maxSemitones, medianSeconds, seedFrames, seedFarSt, seedFarFade, eqMaxDb, eqStepDb, eqSeconds, eqStartSeconds, presenceHz, presenceQ,
 // sibilanceHz, breathAttackMs, breathReleaseMs, octUpCost, octDownCost, jumpCost, rangeSt, rangeCost, contFrames,
 // gapFrames, warmFrames, medianGlideSt, aiBandSt, aiMaxSt, aiBandLowSt, aiMinSt, aiHoldFrames, aiSlewSt, aiMedianMode,
-// aiSteadyFrames, aiSteadySt, aiMedianGlideSt, aiMedianWarmFrames.
+// aiSteadyFrames, aiSteadySt, aiMedianGlideSt, aiMedianWarmFrames, heldMode, heldFrames, heldSt, heldLineFrames,
+// heldGapFrames, learnDelayFrames, medianSlowSt.
 #include "VoiceChanger.h"
 
 #include <algorithm>
@@ -155,10 +161,19 @@ struct Tuning {
     // the AI voice's own idea of the speaker's median (Natural keeps the one above): a held note doesn't teach it,
     // and once it knows the speaker it moves slowly, so a long note stays where it was sung
     float aiMedianMode = 1;          // 0 = the same median as Natural (before 3.1), 1 = the AI's own
-    float aiSteadyFrames = 30;       // a voiced stretch this long within aiSteadySt of its own mean is a held note
-    float aiSteadySt = 0.8f;
+    float aiSteadyFrames = 30;       // heldMode 0 only (3.1.0's rule for the AI): a voiced stretch this long within
+    float aiSteadySt = 0.8f;         // aiSteadySt of its own mean is a held note
     float aiMedianGlideSt = 0.01f;   // once it knows the speaker: the most it moves per frame
     float aiMedianWarmFrames = 300;  // ... after this many learned frames (before: as fast as Natural's)
+    // held notes (3.1.1, see the top of this file): both medians leave them out and stand still while one is held
+    float heldMode = 1;              // 0 = as 3.1.0 (frames learned at once, the AI's steady rule, whole-bin medians)
+    float heldFrames = 40;           // the slow line stays within heldSt for this many voiced frames: a held note
+    float heldSt = 1.0f;
+    float heldLineFrames = 16;       // the slow line: the mean of this many voiced frames (one vibrato cycle)
+    float heldGapFrames = 8;         // a voiced stretch goes on over unvoiced gaps up to this long
+    float learnDelayFrames = 150;    // a stretch's frames are learned when it is over, or this late at most (so the
+                                     // start of a held note, even a slow scoop into it, isn't learned)
+    float medianSlowSt = 0.05f;      // Natural's median in use, once it knows the speaker: the most it moves per frame
 };
 
 struct TuneKey {
@@ -184,7 +199,10 @@ const TuneKey kTuneKeys[] = {
     {"aiBandLowSt", &Tuning::aiBandLowSt}, {"aiMinSt", &Tuning::aiMinSt}, {"aiHoldFrames", &Tuning::aiHoldFrames},
     {"aiSlewSt", &Tuning::aiSlewSt}, {"aiMedianMode", &Tuning::aiMedianMode}, {"aiSteadyFrames", &Tuning::aiSteadyFrames},
     {"aiSteadySt", &Tuning::aiSteadySt}, {"aiMedianGlideSt", &Tuning::aiMedianGlideSt},
-    {"aiMedianWarmFrames", &Tuning::aiMedianWarmFrames},
+    {"aiMedianWarmFrames", &Tuning::aiMedianWarmFrames}, {"heldMode", &Tuning::heldMode},
+    {"heldFrames", &Tuning::heldFrames}, {"heldSt", &Tuning::heldSt}, {"heldLineFrames", &Tuning::heldLineFrames},
+    {"heldGapFrames", &Tuning::heldGapFrames}, {"learnDelayFrames", &Tuning::learnDelayFrames},
+    {"medianSlowSt", &Tuning::medianSlowSt},
 };
 
 struct VoiceKey {
@@ -220,6 +238,22 @@ inline int medianBin(const float *bins, int seedBin, float seedWeight) {
         if (run >= half) return b;
     }
     return kPitchBins - 1;
+}
+
+// The same median read between bins (Hz): where inside the bin the running count passes half (a bin's frames are
+// taken as spread evenly over it), so the median moves a little with each frame instead of a quarter step at once.
+inline double medianHzBetween(const float *bins, int seedBin, float seedWeight) {
+    float total = seedWeight;
+    for (int b = 0; b < kPitchBins; ++b) total += bins[b];
+    if (total <= 0) return binHz(seedBin);
+    const float half = total / 2;
+    float run = 0;
+    for (int b = 0; b < kPitchBins; ++b) {
+        const float here = bins[b] + (b == seedBin ? seedWeight : 0);
+        if (here > 0 && run + here >= half) return kBinLowHz * std::pow(2.0, (b - 0.5 + (half - run) / here) / 48.0);
+        run += here;
+    }
+    return binHz(kPitchBins - 1);
 }
 
 // xorshift32: the breath noise (the same every time after a reset, so offline renders repeat exactly).
@@ -319,9 +353,25 @@ struct VoiceChanger {
     int aiCount = 0, aiAt = 0;
     int64_t aiLearned = 0;
     float aiMedianUse = 0;
-    int steadyRun = 0;          // voiced frames in a row near their own mean (a held note)
+    int steadyRun = 0;          // heldMode 0: voiced frames in a row near their own mean (a held note)
     float steadyMean = 0;
     float aiLastDev = 0;
+    // Held notes (heldMode 1): frames waiting to be learned (learnDelayFrames late), the voiced stretch going on now
+    // and whether it is a held note, its last voiced pitches and its slow line.
+    struct Pending { float f0; int32_t stretch; int64_t frame; };
+    static constexpr int kPending = 256;
+    Pending pending[kPending] = {};
+    int pendAt = 0, pendCount = 0;  // oldest entry, count
+    int64_t mapFrames = 0;
+    int32_t stretch = 0;
+    int stretchGap = 1000;          // unvoiced frames since the stretch's last voiced one
+    bool held = false;              // the stretch going on is a held note
+    static constexpr int kLine = 64;
+    float stRing[kLine] = {};       // its voiced frames' pitches (half-steps), newest at stAt - 1
+    int stAt = 0, stCount = 0;
+    float lineRing[kLine] = {};     // its slow line, one value per voiced frame
+    int lineAt = 0, lineCount = 0;
+    int lineRejects = 0;            // frames in a row too far from the line
     // Decisions for post.
     uint8_t flagRing[kFlagFrames] = {};
     int64_t flagCentre[kFlagFrames] = {};
@@ -373,12 +423,99 @@ struct VoiceChanger {
     }
 
     bool warm() const { return learned >= (int64_t)tuning.warmFrames || speakerHz > 0; }
+    bool heldRules() const { return tuning.heldMode >= 0.5f; }
 
-    // Once a frame: the median in use moves toward the measured one, at most medianGlideSt.
+    // Once a frame: the median in use moves toward the measured one, at most medianGlideSt (heldMode 1: once the
+    // speaker is known at most medianSlowSt, and not at all while a note is held).
     void glideMedian(float measured) {
         if (!(medianUse > 0)) { medianUse = measured; return; }
-        const float d = std::clamp(semitones(measured / medianUse), -tuning.medianGlideSt, tuning.medianGlideSt);
+        if (heldRules() && held) return;
+        const float most = heldRules() && warm() ? std::min(tuning.medianGlideSt, tuning.medianSlowSt) : tuning.medianGlideSt;
+        const float d = std::clamp(semitones(measured / medianUse), -most, most);
         medianUse = (float)(medianUse * std::exp2(d / 12));
+    }
+
+    // heldMode 1, once a frame (before the mapping): follows the voiced stretch going on (f0 > 0 = voiced) and
+    // decides whether it is a held note; then learns the frames that waited long enough and weren't in one.
+    void followStretch(float f0) {
+        const int gapMax = std::clamp((int)tuning.heldGapFrames, 0, 100);
+        mapFrames++;
+        if (f0 > 0) {
+            if (stretchGap > gapMax) {  // a new stretch
+                stretch++;
+                held = false;
+                stCount = lineCount = lineRejects = 0;
+            }
+            stretchGap = 0;
+            const int L = std::clamp((int)tuning.heldLineFrames, 1, kLine);
+            const int need = std::clamp((int)tuning.heldFrames, 2, kLine);
+            const float s = semitones(f0 / 100.0);
+            float line = 0;
+            const int have = std::min(stCount, L);
+            for (int k = 1; k <= have; ++k) line += stRing[(stAt - k + kLine) % kLine];
+            if (have > 0) line /= (float)have;
+            // an octave slip or a creak frame doesn't move the line; more than 3 in a row: the line starts again there
+            const bool off = have > 0 && std::fabs(s - line) >= 3;
+            lineRejects = off ? lineRejects + 1 : 0;
+            if (lineRejects > 3) {
+                stCount = lineCount = 0;
+                lineRejects = 0;
+            }
+            if (stCount == 0 || !off) {
+                stRing[stAt] = s;
+                stAt = (stAt + 1) % kLine;
+                stCount = std::min(stCount + 1, kLine);
+                const int n = std::min(stCount, L);
+                line = 0;
+                for (int k = 1; k <= n; ++k) line += stRing[(stAt - k + kLine) % kLine];
+                line /= (float)n;
+                lineRing[lineAt] = line;
+                lineAt = (lineAt + 1) % kLine;
+                lineCount = std::min(lineCount + 1, kLine);
+            }
+            if (!held && lineCount >= need) {
+                float lo = 1e9f, hi = -1e9f;
+                for (int k = 1; k <= need; ++k) {
+                    const float v = lineRing[(lineAt - k + kLine) % kLine];
+                    lo = std::min(lo, v);
+                    hi = std::max(hi, v);
+                }
+                if (hi - lo <= tuning.heldSt) {  // a held note: none of this stretch is learned
+                    held = true;
+                    for (int k = 0; k < pendCount; ++k) {
+                        Pending &p = pending[(pendAt + k) % kPending];
+                        if (p.stretch == stretch) p.f0 = 0;
+                    }
+                }
+            }
+        } else if (stretchGap < 1000) {
+            stretchGap++;
+            if (stretchGap > gapMax) held = false;  // the note is over
+        }
+        // a stretch's frames are learned once it is over (and wasn't a held note), or learnDelayFrames late at most
+        const int64_t delay = std::clamp((int64_t)tuning.learnDelayFrames, (int64_t)0, (int64_t)kPending - 8);
+        while (pendCount > 0 && (pending[pendAt].stretch != stretch || stretchGap > gapMax ||
+                                 pending[pendAt].frame <= mapFrames - delay)) {
+            const float f = pending[pendAt].f0;
+            pendAt = (pendAt + 1) % kPending;
+            pendCount--;
+            if (f > 0) learnMedian(f);
+        }
+    }
+
+    // A frame the speaker's median may learn from: at once (heldMode 0), or learnDelayFrames later unless it turns
+    // out to be part of a held note.
+    void learn(float f0) {
+        if (!heldRules()) { learnMedian(f0); return; }
+        if (held) return;
+        if (pendCount == kPending) {  // (can't happen with the delay limited above) learn the oldest now
+            const float f = pending[pendAt].f0;
+            pendAt = (pendAt + 1) % kPending;
+            pendCount--;
+            if (f > 0) learnMedian(f);
+        }
+        pending[(pendAt + pendCount) % kPending] = {f0, stretch, mapFrames};
+        pendCount++;
     }
 
     // The pitch handed to the AI voice: eased into a band around the voice's own median (what this target pitch
@@ -427,17 +564,20 @@ struct VoiceChanger {
         learnAiMedian(f0);
     }
 
-    // The AI's median learns the same frames, except inside a held note (so holding a note doesn't pull it there).
+    // The AI's median learns the same frames, except inside a held note (so holding a note doesn't pull it there;
+    // heldMode 1 leaves held notes out before this, for both medians).
     void learnAiMedian(float f0) {
-        const float s = semitones(f0 / 100.0);
-        if (steadyRun > 0 && std::fabs(s - steadyMean) < tuning.aiSteadySt) {
-            steadyRun = std::min(steadyRun + 1, 100000);
-            steadyMean += (s - steadyMean) / (float)std::min(steadyRun, 50);
-        } else {
-            steadyRun = 1;
-            steadyMean = s;
+        if (!heldRules()) {
+            const float s = semitones(f0 / 100.0);
+            if (steadyRun > 0 && std::fabs(s - steadyMean) < tuning.aiSteadySt) {
+                steadyRun = std::min(steadyRun + 1, 100000);
+                steadyMean += (s - steadyMean) / (float)std::min(steadyRun, 50);
+            } else {
+                steadyRun = 1;
+                steadyMean = s;
+            }
+            if (steadyRun > (int)tuning.aiSteadyFrames) return;
         }
-        if (steadyRun > (int)tuning.aiSteadyFrames) return;
         const int bin = pitchBin(f0);
         while (aiCount >= mapCap) {
             const int oldest = (aiAt - aiCount + 1024) % 1024;
@@ -454,8 +594,10 @@ struct VoiceChanger {
     // Once a frame: the AI's median in use (aiMedianMode 1) moves toward its measured one; fast while it is still
     // finding the speaker (like Natural's), then at most aiMedianGlideSt per frame.
     float aiMedianNow() {
-        const float measured = (float)binHz(medianBin(aiBins, seedBin, seedWeight));
+        const float measured = heldRules() ? (float)medianHzBetween(aiBins, seedBin, seedWeight)
+                                           : (float)binHz(medianBin(aiBins, seedBin, seedWeight));
         if (!(aiMedianUse > 0)) { aiMedianUse = measured; return aiMedianUse; }
+        if (heldRules() && held) return aiMedianUse;  // stands still while a note is held
         const bool finding = aiLearned < (int64_t)tuning.aiMedianWarmFrames && !(speakerHz > 0);
         const float most = finding ? tuning.medianGlideSt : tuning.aiMedianGlideSt;
         const float d = std::clamp(semitones(measured / aiMedianUse), -most, most);
@@ -591,8 +733,9 @@ struct VoiceChanger {
     }
 
     void mapFrame(float f0, float ap, bool levelOk, int64_t centre, float extra, VoiceChangerPitch *out) {
-        const int mb = medianBin(mapBins, seedBin, seedWeight);
-        const float measured = (float)binHz(mb);
+        if (heldRules()) followStretch(f0);
+        const float measured = heldRules() ? (float)medianHzBetween(mapBins, seedBin, seedWeight)
+                                           : (float)binHz(medianBin(mapBins, seedBin, seedWeight));
         glideMedian(measured);
         const float median = medianUse;  // moves smoothly, so learning the median never makes the pitch jump
         medianHz = median;
@@ -621,7 +764,7 @@ struct VoiceChanger {
             creak = f0 < tuning.creakHz || (known && f0 < tuning.creakRatio * measured) || rough;
             // The speaker's median also learns from smooth low frames (a deep voice talks below 70 Hz; without them
             // its median would stay at the first guess). Rough frames and octave-low ones (fry) stay out.
-            if (creak && !rough && (f0 >= 0.5f * measured || !known)) learnMedian(f0);
+            if (creak && !rough && (f0 >= 0.5f * measured || !known)) learn(f0);
         } else {
             prevCount = 0;
             creak = levelOk && ap >= tuning.creakApLow && ap <= tuning.creakApHigh && lastGoodAge <= 15;
@@ -629,7 +772,7 @@ struct VoiceChanger {
         frames++;
         float target = 0, aiWant = 0;  // aiWant: the pitch the AI voice should sing now (0 = unvoiced)
         if (voiced && !creak) {
-            learnMedian(f0);
+            learn(f0);
             const float off = semitones(voice.targetHz / median);
             const float dev = std::clamp(semitones(f0 / median), -12.0f, 12.0f);
             lastDev = dev;
@@ -783,6 +926,7 @@ struct VoiceChanger {
         for (int k = 0; k < 3; ++k) { octHz[k] = 0; octPath[k] = 0; }
         octAge = 999;
         aiHz = 0; aiAge = 999; voicedAge = 999; steadyRun = 0;
+        pendAt = pendCount = 0; mapFrames = 0; stretchGap = 1000; held = false; stCount = stAt = lineCount = lineAt = lineRejects = 0;
         flagLatest = -1;
         frames = voicedFrames = creakFrames = 0;
         sibTop.clear(); sibOrigTop.clear();
