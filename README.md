@@ -87,6 +87,12 @@ curl -fsSL https://raw.githubusercontent.com/Gromhogg/pitch-shift/main/tools/con
 - **The Voices folder:** click the **⋯** button next to the voice menu, then **Open Voices Folder**. Each voice is a folder in there. In the same menu, **Add Voice…** adds a voice folder (or a `.zip` of one) that someone shared with you, and **Rename…** and **Remove** change the voice you picked. Built-in voices can't be removed.
 - Voices copied from a real person, and fan-made voices of characters, are your own responsibility: only use voices you're allowed to use, and don't pretend to be someone you're not.
 
+**Pitch Shift Pro ($5, Mac)**
+
+- Free: **What you hear** with Advanced processing, and **Your voice** in the Cartoon style, with Test.
+- Pro adds the **Natural ↔ Cartoon** and **Bass ↔ Treble** sliders, **Deeper when slow** and the **Soundboard**. They show a small lock until you unlock them.
+- Click **Unlock Pro** at the top right, then **Buy for $5**. Paste the key you get (on the page after paying, and by email) and click **Unlock**. One key works on all your Macs, for good. It needs the internet only once.
+
 ## If something goes wrong
 
 - **The app you picked goes silent:** quit Pitch Shift and it plays normally again. Then turn Pitch Shift on in **System Settings → Privacy & Security → Screen & System Audio Recording** and open it again.
@@ -109,6 +115,8 @@ brew install rubberband
 ```
 
 `build.sh` builds `Pitch Shift.app` for Apple silicon and Intel (with Pitch Shift Mic inside), puts it in Applications and puts a shortcut on your Desktop. The first time, it downloads the source of Rubber Band and libsamplerate to build the Intel part (`libs/build.sh`), and the Realistic voice changer's AI model files (about 130 MB, listed in `voices/models.txt`; without them the app still builds and only the Natural voice changer works). `packaging/make-pkg.sh` makes the installer, and `./release.sh 1.2.3` posts a new version.
+
+The Pitch Shift Pro unlock server is in [server/](server/README.md); the app's side is `Sources/Pro.swift` and `Sources/ProConfig.swift`. A build without the server's public key in `ProConfig.swift` has nothing locked.
 
 ## How it works
 

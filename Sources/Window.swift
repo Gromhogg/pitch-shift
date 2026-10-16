@@ -74,6 +74,17 @@ final class GradientSwitch: NSView {
         }
     }
     var looksEnabled: Bool { isEnabled && !dimmed }
+    // Pitch Shift Pro is locked: dimmed, and a click only calls onLockedClick (which opens the unlock window).
+    var locked = false {
+        didSet {
+            guard oldValue != locked else { return }
+            needsDisplay = true
+            toolTip = locked ? "Pitch Shift Pro" : nil
+            onLocked(locked)
+        }
+    }
+    var onLocked: (Bool) -> Void = { _ in }  // for its label
+    var onLockedClick: () -> Void = {}
     var isOn = false {
         didSet {
             guard oldValue != isOn else { return }
@@ -119,7 +130,7 @@ final class GradientSwitch: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        let alpha: CGFloat = looksEnabled ? 1 : 0.4
+        let alpha: CGFloat = looksEnabled && !locked ? 1 : 0.4
         let track = self.track
         let shape = NSBezierPath(roundedRect: track, xRadius: track.height / 2, yRadius: track.height / 2)
         NSColor.quaternaryLabelColor.withAlphaComponent(0.25 * alpha + 0.1).setFill()
@@ -138,13 +149,13 @@ final class GradientSwitch: NSView {
         shadow.shadowBlurRadius = 2
         shadow.shadowOffset = NSSize(width: 0, height: -1)
         shadow.set()
-        NSColor.white.withAlphaComponent(isEnabled ? 1 : 0.7).setFill()
+        NSColor.white.withAlphaComponent(isEnabled && !locked ? 1 : 0.7).setFill()
         NSBezierPath(roundedRect: circle, xRadius: height / 2, yRadius: height / 2).fill()
         NSGraphicsContext.restoreGraphicsState()
     }
 
     // Reachable with Tab when "Keyboard navigation" is on in the Mac's settings; Space switches it.
-    override var acceptsFirstResponder: Bool { isEnabled && NSApp.isFullKeyboardAccessEnabled }
+    override var acceptsFirstResponder: Bool { isEnabled && !locked && NSApp.isFullKeyboardAccessEnabled }
     override var focusRingMaskBounds: NSRect { track }
     override func drawFocusRingMask() {
         NSBezierPath(roundedRect: track, xRadius: track.height / 2, yRadius: track.height / 2).fill()
@@ -155,6 +166,7 @@ final class GradientSwitch: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        if locked { onLockedClick(); return }
         guard isEnabled else { return }
         if !acceptsFirstResponder { window?.makeFirstResponder(nil) }  // stops typing in a number
         pressed = true
@@ -167,13 +179,14 @@ final class GradientSwitch: NSView {
     }
 
     override func accessibilityPerformPress() -> Bool {
+        if locked { onLockedClick(); return true }
         guard isEnabled else { return false }
         flip()
         return true
     }
 
     private func flip() {
-        guard isEnabled else { return }
+        guard isEnabled, !locked else { return }
         isOn.toggle()
         onChange(isOn)
     }
@@ -200,6 +213,19 @@ final class GradientSlider: NSView {
             needsDisplay = true
         }
     }
+    // Pitch Shift Pro is locked: dimmed with a small lock under the middle, and a click only calls onLockedClick
+    // (which opens the unlock window).
+    var locked = false {
+        didSet {
+            guard oldValue != locked else { return }
+            if locked && window?.firstResponder === self { window?.makeFirstResponder(nil) }
+            toolTip = locked ? "Pitch Shift Pro" : nil
+            setAccessibilityHelp(locked ? "Pitch Shift Pro" : nil)
+            needsDisplay = true
+        }
+    }
+    var onLockedClick: () -> Void = {}
+    private var usable: Bool { isEnabled && !locked }
     var value: Float = 0 {
         didSet {
             guard oldValue != value else { return }
@@ -266,23 +292,29 @@ final class GradientSlider: NSView {
         NSColor.quaternaryLabelColor.withAlphaComponent(0.35).setFill()
         shape.fill()
         NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current?.cgContext.setAlpha(isEnabled ? 1 : 0.35)
+        NSGraphicsContext.current?.cgContext.setAlpha(usable ? 1 : 0.35)
         Theme.gradient.draw(in: shape, angle: 0)
         NSGraphicsContext.restoreGraphicsState()
 
         // The labels: one under the left end ("Natural"), one under the right end ("Cartoon").
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: labelFont, .foregroundColor: isEnabled ? NSColor.secondaryLabelColor : NSColor.tertiaryLabelColor]
+            .font: labelFont, .foregroundColor: usable ? NSColor.secondaryLabelColor : NSColor.tertiaryLabelColor]
         let top = middle - knobSize / 2 - 1  // just under the knob
         for (text, left) in [(left, true), (right, false)] {
             let width = (text as NSString).size(withAttributes: attributes).width
             (text as NSString).draw(at: NSPoint(x: left ? bounds.minX : bounds.maxX - width, y: top - labelHeight), withAttributes: attributes)
         }
+        // Locked: a small lock between the labels, under the middle of the track.
+        if locked, let lock = Self.lockImage(size: labelFont.pointSize - 1) {
+            let size = lock.size
+            lock.draw(in: NSRect(x: (bounds.midX - size.width / 2).rounded(), y: top - labelHeight + (labelHeight - size.height) / 2,
+                                 width: size.width, height: size.height))
+        }
 
         // The middle mark: a short line across the track's middle, just inside the knob's height (so the knob covers
         // it when it's there).
         if let mark {
-            (isEnabled ? NSColor.secondaryLabelColor : NSColor.tertiaryLabelColor).setFill()
+            (usable ? NSColor.secondaryLabelColor : NSColor.tertiaryLabelColor).setFill()
             let reach = knobSize / 2 - 1
             let x = (bounds.minX + knobSize / 2 + CGFloat(mark) * (bounds.width - knobSize) - 1).rounded()
             NSBezierPath(rect: NSRect(x: x, y: middle - reach, width: 2, height: reach - trackHeight / 2)).fill()
@@ -293,22 +325,39 @@ final class GradientSlider: NSView {
         let k = knob
         NSGraphicsContext.saveGraphicsState()
         let shadow = NSShadow()
-        shadow.shadowColor = NSColor.black.withAlphaComponent(isEnabled ? 0.3 : 0.15)
+        shadow.shadowColor = NSColor.black.withAlphaComponent(usable ? 0.3 : 0.15)
         shadow.shadowBlurRadius = 2
         shadow.shadowOffset = NSSize(width: 0, height: -1)
         shadow.set()
-        NSColor.white.withAlphaComponent(isEnabled ? 1 : 0.7).setFill()
+        NSColor.white.withAlphaComponent(usable ? 1 : 0.7).setFill()
         NSBezierPath(ovalIn: k).fill()
         NSGraphicsContext.restoreGraphicsState()
         let dark = effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-        (dark ? NSColor.white : NSColor.black).withAlphaComponent((dark ? 0.25 : 0.14) * (isEnabled ? 1 : 0.6)).setStroke()
+        (dark ? NSColor.white : NSColor.black).withAlphaComponent((dark ? 0.25 : 0.14) * (usable ? 1 : 0.6)).setStroke()
         let edge = NSBezierPath(ovalIn: k.insetBy(dx: 0.5, dy: 0.5))
         edge.lineWidth = 1
         edge.stroke()
     }
 
+    // The small lock shown on locked controls (a little brighter than their dimmed labels, so it's seen). Its color is
+    // picked each time it's drawn, so it follows light and dark mode; `color` fixes it instead (for a button's title).
+    static func lockImage(size: CGFloat, color: NSColor? = nil) -> NSImage? {
+        let config = NSImage.SymbolConfiguration(pointSize: size, weight: .semibold)
+        guard let symbol = NSImage(systemSymbolName: "lock.fill", accessibilityDescription: "Pitch Shift Pro")?
+            .withSymbolConfiguration(config) else { return nil }
+        let image = NSImage(size: symbol.size, flipped: false) { rect in
+            symbol.draw(in: rect)
+            (color ?? NSColor.secondaryLabelColor).set()
+            rect.fill(using: .sourceIn)
+            return true
+        }
+        image.cacheMode = .never
+        image.accessibilityDescription = "Pitch Shift Pro"
+        return image
+    }
+
     // Reachable with Tab when "Keyboard navigation" is on in the Mac's settings (like the switches).
-    override var acceptsFirstResponder: Bool { isEnabled && NSApp.isFullKeyboardAccessEnabled }
+    override var acceptsFirstResponder: Bool { usable && NSApp.isFullKeyboardAccessEnabled }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { clickThrough }
     override var focusRingMaskBounds: NSRect { track.insetBy(dx: 0, dy: -(knobSize - trackHeight) / 2) }
     override func drawFocusRingMask() {
@@ -317,7 +366,7 @@ final class GradientSlider: NSView {
     }
 
     override func keyDown(with event: NSEvent) {
-        guard isEnabled else { super.keyDown(with: event); return }
+        guard usable else { super.keyDown(with: event); return }
         switch event.specialKey {
         case .leftArrow?, .downArrow?: set(value - 0.1)
         case .rightArrow?, .upArrow?: set(value + 0.1)
@@ -326,6 +375,7 @@ final class GradientSlider: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        if locked { onLockedClick(); return }
         guard isEnabled else { return }
         window?.makeFirstResponder(acceptsFirstResponder ? self : nil)  // also stops typing in a number
         let point = convert(event.locationInWindow, from: nil)
@@ -347,14 +397,20 @@ final class GradientSlider: NSView {
     }
 
     override func accessibilityPerformIncrement() -> Bool {
-        guard isEnabled else { return false }
+        guard usable else { return false }
         set(value + 0.1)
         return true
     }
 
     override func accessibilityPerformDecrement() -> Bool {
-        guard isEnabled else { return false }
+        guard usable else { return false }
         set(value - 0.1)
+        return true
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        guard locked else { return false }
+        onLockedClick()
         return true
     }
 
@@ -1140,10 +1196,26 @@ final class ShiftCard: NSView {
 
     // A row with a label on the left and a small switch on the right, for settings like "Advanced processing".
     // The label dims while the switch can't be used. `notes`: small views right after the label (shown when needed).
+    // While Pitch Shift Pro is locked, the label dims and gets a small lock after it.
     static func switchRow(_ text: String, _ toggle: GradientSwitch, notes: [NSView] = []) -> CardRow {
         let label = NSTextField(labelWithString: text)
+        func show() {
+            label.toolTip = toggle.locked ? "Pitch Shift Pro" : nil
+            guard toggle.locked, let font = label.font, let lock = GradientSlider.lockImage(size: font.pointSize - 2) else {
+                if label.stringValue != text { label.stringValue = text }
+                label.textColor = toggle.looksEnabled && !toggle.locked ? .secondaryLabelColor : .tertiaryLabelColor
+                return
+            }
+            let words = NSMutableAttributedString(string: text + " ", attributes: [.font: font, .foregroundColor: NSColor.tertiaryLabelColor])
+            let attachment = NSTextAttachment()
+            attachment.image = lock
+            attachment.bounds = NSRect(x: 0, y: ((font.capHeight - lock.size.height) / 2).rounded(), width: lock.size.width, height: lock.size.height)
+            words.append(NSAttributedString(attachment: attachment))
+            label.attributedStringValue = words
+        }
         label.textColor = toggle.looksEnabled ? .secondaryLabelColor : .tertiaryLabelColor
-        toggle.onEnabled = { label.textColor = $0 ? .secondaryLabelColor : .tertiaryLabelColor }
+        toggle.onEnabled = { _ in show() }
+        toggle.onLocked = { _ in show() }
         toggle.setAccessibilityLabel(text)
         let left = NSStackView(views: [label] + notes)
         left.spacing = 5
@@ -1152,6 +1224,7 @@ final class ShiftCard: NSView {
         row.onScale = { scale in
             label.font = .systemFont(ofSize: 12 + (scale - 1) * 2.5)
             toggle.size = Theme.controlSize(scale) == .large ? NSSize(width: 38, height: 22) : NSSize(width: 32, height: 19)
+            if toggle.locked { show() }
         }
         return row
     }
@@ -1337,16 +1410,17 @@ enum Keys {
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
     let defaults = UserDefaults.standard
+    // While Pitch Shift Pro is locked, the paid settings use the free version's values (Free); what's saved is kept.
     lazy var hear = HearShifter(
         halfSteps: defaults.object(forKey: Keys.halfSteps) as? Float ?? 2,
         source: HearSource(saved: defaults.string(forKey: Keys.hearSource) ?? defaults.string(forKey: "source")),
         advanced: defaults.bool(forKey: Keys.hearAdvanced),
-        tones: AppDelegate.savedTones(defaults),
-        autoEQs: AppDelegate.savedAutoEQs(defaults))
+        tones: Pro.shared.unlocked ? AppDelegate.savedTones(defaults) : [:],
+        autoEQs: Pro.shared.unlocked ? AppDelegate.savedAutoEQs(defaults) : [:])
     lazy var voice = VoiceShifter(
         halfSteps: defaults.object(forKey: Keys.voiceSteps) as? Float ?? 3,
-        cartoon: AppDelegate.savedCartoon(defaults),
-        slowDeeper: defaults.bool(forKey: Keys.voiceSlowDeeper),
+        cartoon: Pro.shared.unlocked ? AppDelegate.savedCartoon(defaults) : Free.cartoon,
+        slowDeeper: Pro.shared.unlocked ? defaults.bool(forKey: Keys.voiceSlowDeeper) : Free.slowDeeper,
         micUID: defaults.string(forKey: Keys.voiceMic))
     lazy var test = VoiceTest(voice: voice)
     // Sound effects into Pitch Shift Mic. Pictures show example names and change nothing.
@@ -1494,6 +1568,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     let micName = NSTextField(labelWithString: "Pitch Shift Mic")
     let installButton = NSButton(title: "Install Pitch Shift Mic", target: nil, action: nil)
     var footer: CardRow!
+    // "Unlock Pro" in the title bar while Pitch Shift Pro is locked.
+    let unlockButton = NSButton(title: "Unlock Pro", target: nil, action: nil)
+    let unlockAccessory = NSTitlebarAccessoryViewController()
+    private var soundsSize: NSControl.ControlSize = .regular
     private var installed: Bool?
     private var lastPhase: VoiceTest.Phase = .idle
     private var deviceListeners: [Listener] = []  // keep the mic picker right when devices change
@@ -1510,6 +1588,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         // The tone slider shows the setting of the speakers or headphones playing now, and follows a change.
         outputListener = Listener(system, kAudioHardwarePropertyDefaultOutputDevice) { [weak self] in self?.outputMoved() }
         outputMoved()
+        Pro.shared.onChange = { [weak self] in self?.proChanged() }
         hear.onChange = { [weak self] in self?.refresh() }
         voice.onChange = { [weak self] in self?.refresh() }
         test.onChange = { [weak self] in self?.refresh() }
@@ -1576,7 +1655,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             item.submenu = menu
             main.addItem(item)
         }
-        submenu("Pitch Shift", [
+        // "Unlock Pitch Shift Pro…" (or "Pitch Shift Pro…" once unlocked) only in builds with the server set up.
+        let pro: [(String, Selector, String, NSEvent.ModifierFlags)] = Pro.shared.enabled
+            ? [(Pro.shared.unlocked ? "Pitch Shift Pro…" : "Unlock Pitch Shift Pro…", #selector(showUnlock), "", []),
+               ("-", #selector(showUnlock), "", [])]
+            : []
+        submenu("Pitch Shift", pro + [
             ("Hide Pitch Shift", #selector(NSApplication.hide(_:)), "h", .command),
             ("-", #selector(NSApplication.hide(_:)), "", []),
             ("Quit Pitch Shift", #selector(NSApplication.terminate(_:)), "q", .command),
@@ -1617,6 +1701,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         // Its tone, Bass ... Treble, kept for each speakers or headphones.
         tone.mark = 0.5
         tone.onChange = { [weak self] value in self?.tonePicked(value) }
+        // Locked controls (Pitch Shift Pro) only open the unlock window.
+        for slider in [tone, style] { slider.onLockedClick = { [weak self] in self?.showUnlock() } }
+        slowSwitch.onLockedClick = { [weak self] in self?.showUnlock() }
         let toneRow = CardRow(views: [tone])
         toneRow.onScale = { [unowned self] scale in
             tone.scale = scale
@@ -1671,8 +1758,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             micName.font = .systemFont(ofSize: 11 + (scale - 1) * 2.5)
             installButton.useSize(size)
             soundsButton.useSize(size)
-            soundsButton.attributedTitle = NSAttributedString(string: "Sounds", attributes: [
-                .foregroundColor: Theme.mid, .font: NSFont.systemFont(ofSize: Theme.fontSize(size), weight: .medium)])
+            soundsSize = size
+            styleSounds()
             soundsWidth.constant = (72 * scale).rounded()
             footer.spacing = (6 * scale).rounded()
         }
@@ -1772,6 +1859,87 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         rebuildHearMenu()
         rebuildMicMenu()
         rebuildChangerMenu()
+        buildUnlockButton()
+    }
+
+    // "Unlock Pro" at the right end of the title bar, shown only while Pitch Shift Pro is locked.
+    private func buildUnlockButton() {
+        unlockButton.bezelStyle = .rounded
+        unlockButton.controlSize = .small
+        unlockButton.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        unlockButton.attributedTitle = NSAttributedString(string: "Unlock Pro", attributes: [
+            .foregroundColor: Theme.mid, .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)])
+        unlockButton.target = self
+        unlockButton.action = #selector(showUnlock)
+        unlockButton.toolTip = "Pitch Shift Pro"
+        unlockButton.sizeToFit()
+        let holder = NSView(frame: NSRect(x: 0, y: 0, width: unlockButton.frame.width + 10, height: unlockButton.frame.height))
+        unlockButton.frame.origin = .zero
+        holder.addSubview(unlockButton)
+        unlockAccessory.view = holder
+        unlockAccessory.layoutAttribute = .trailing
+        showUnlockButton()
+        // Light or dark mode changed: the locked Sounds button's lock gets the new color.
+        appearanceWatch = window.observe(\.effectiveAppearance) { [weak self] _, _ in
+            DispatchQueue.main.async { if Pro.shared.unlocked == false { self?.styleSounds() } }
+        }
+    }
+    private var appearanceWatch: NSKeyValueObservation?
+
+    private func showUnlockButton() {
+        let wanted = !Pro.shared.unlocked
+        if wanted && unlockAccessory.parent == nil {
+            window.addTitlebarAccessoryViewController(unlockAccessory)
+        } else if !wanted, let index = window.titlebarAccessoryViewControllers.firstIndex(of: unlockAccessory) {
+            window.removeTitlebarAccessoryViewController(at: index)
+        }
+    }
+
+    // The Sounds button: in the middle color, or dimmed with a small lock while Pitch Shift Pro is locked.
+    private func styleSounds() {
+        let locked = !Pro.shared.unlocked
+        let font = NSFont.systemFont(ofSize: Theme.fontSize(soundsSize), weight: .medium)
+        let title = NSMutableAttributedString(string: "Sounds", attributes: [
+            .foregroundColor: locked ? NSColor.tertiaryLabelColor : Theme.mid, .font: font])
+        // The button draws its title in its own way, so the lock gets the color for the window's light or dark look.
+        var color = NSColor.secondaryLabelColor
+        soundsButton.effectiveAppearance.performAsCurrentDrawingAppearance {
+            color = NSColor.secondaryLabelColor.usingColorSpace(.sRGB) ?? .gray
+        }
+        if locked, let lock = GradientSlider.lockImage(size: font.pointSize - 3, color: color) {
+            let attachment = NSTextAttachment()
+            attachment.image = lock
+            attachment.bounds = NSRect(x: 0, y: ((font.capHeight - lock.size.height) / 2).rounded(), width: lock.size.width, height: lock.size.height)
+            title.insert(NSAttributedString(string: " ", attributes: [.font: font]), at: 0)
+            title.insert(NSAttributedString(attachment: attachment), at: 0)
+        }
+        soundsButton.attributedTitle = title
+        soundsButton.toolTip = locked ? "Pitch Shift Pro" : nil
+    }
+
+    // MARK: Pitch Shift Pro
+
+    @objc func showUnlock() {
+        guard Pro.shared.enabled else { return }
+        ProSheet.shared.show(on: window)
+    }
+
+    // Unlocked: the saved paid settings come back. Locked: the free version's values are used (nothing saved changes).
+    func proChanged() {
+        if Pro.shared.unlocked {
+            voice.cartoon = AppDelegate.savedCartoon(defaults)
+            voice.slowDeeper = defaults.bool(forKey: Keys.voiceSlowDeeper)
+            for (uid, tilt) in AppDelegate.savedTones(defaults) { hear.setTone(tilt, for: uid) }
+        } else {
+            voice.cartoon = Free.cartoon
+            voice.slowDeeper = Free.slowDeeper
+            for uid in hear.tones.keys { hear.setTone(Free.tone, for: uid) }
+            if soundboard.isOpen { soundboard.close() }
+        }
+        buildMenu()
+        showUnlockButton()
+        styleSounds()
+        refresh()
     }
 
     // MARK: Layout
@@ -2187,6 +2355,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     // Opens the Soundboard next to the window, or closes it.
     @objc func soundsClicked() {
+        guard Pro.shared.unlocked else { showUnlock(); return }  // the Soundboard is part of Pitch Shift Pro
         if soundboard.isOpen {
             soundboard.close()
             return
@@ -2375,16 +2544,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     // For screenshots (--preview hear-on,voice-on,waiting,typing,recording,playing,listening,hover,menu,roll,
     // resize,no-driver,advanced-alert,sounds,rename,volume,drop,light,tone,slow,eq,changer,changer-man,
-    // changer-realistic,changer-loading,changer-fallback,changer-slider-natural|fast|default|max|NN,changer-intel
-    // [--size 800x400]): shows a
-    // state, no sound. Any changer state also shows Your voice on.
+    // changer-realistic,changer-loading,changer-fallback,changer-slider-natural|fast|default|max|NN,changer-intel,
+    // pro-locked,pro-unlock,pro-typo,pro-done,pro-alone,pro-unlocked [--size 800x400]): shows a state, no sound. Any
+    // changer state also shows Your voice on.
     func showPreview() {
         guard let preview else { return }
+        // With Pitch Shift Pro locked (pro-locked, pro-unlock), the paid controls keep the free version's values.
+        let pro = Pro.shared.unlocked
         if preview.contains("light") {
             window.appearance = NSAppearance(named: .aqua)
             soundboard.panel.appearance = NSAppearance(named: .aqua)
         }
-        if preview.contains("sounds") {  // the Soundboard with example names, the second one playing
+        if preview.contains("sounds"), pro {  // the Soundboard with example names, the second one playing
             board.showAsPlaying(Soundboard.examples[1].file)
             soundboard.open(beside: window)
             if preview.contains("hover") { soundboard.showHover() }
@@ -2392,14 +2563,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             if preview.contains("volume") { soundboard.showVolume() }  // the first sound's volume slider
             if preview.contains("drop") { soundboard.showDropping() }  // sound files dragged over it
         }
-        if let cartoonArg { voice.cartoon = cartoonArg }  // where the style slider is (--cartoon-amount 0.5)
+        if let cartoonArg, pro { voice.cartoon = cartoonArg }  // where the style slider is (--cartoon-amount 0.5)
         if preview.contains("tone") { hear.advanced = true }  // Advanced processing on (nothing runs in pictures)
-        if let toneArg, !outputUID.isEmpty { hear.setTone(toneArg, for: outputUID) }  // the tone slider (--tone-amount -0.4)
-        if preview.contains("slow") { voice.slowDeeper = true }  // "Deeper when slow" on
+        if let toneArg, !outputUID.isEmpty, pro { hear.setTone(toneArg, for: outputUID) }  // the tone slider (--tone-amount -0.4)
+        if preview.contains("slow"), pro { voice.slowDeeper = true }  // "Deeper when slow" on
         if !outputUID.isEmpty {  // Auto EQ on with "eq" (--eq-offsets 3,-2,0,1,-1 sets its sliders), off without
-            hear.setAutoEQ(on: preview.contains("eq"), offsets: autoEQArg.offsets.map(Float.init), for: outputUID)
+            hear.setAutoEQ(on: preview.contains("eq") && pro, offsets: pro ? autoEQArg.offsets.map(Float.init) : [], for: outputUID)
         }
         refresh()
+        // The unlock window (with pro-typo: a key with a typo; pro-done: unlocked; pro-alone: as its own window).
+        if previewStates.contains("pro-unlock") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                ProSheet.shared.show(on: self.window, alone: previewStates.contains("pro-alone"))
+                if previewStates.contains("pro-typo") { ProSheet.shared.showTypo() }
+                if previewStates.contains("pro-done") { ProSheet.shared.showUnlockedMessage() }
+            }
+        }
         if preview.contains("typing") {
             window.makeFirstResponder(hearCard.amount)
             DispatchQueue.main.async { self.hearCard.amount.currentEditor()?.string = "2.5" }
@@ -2477,9 +2656,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let waiting = preview.map { $0.contains("waiting") } ?? (hear.state == .waiting)
         hearCard.show(on: hearOn, value: hear.halfSteps, active: hearOn, waiting: waiting)
         if advancedAlert == nil { advancedSwitch.isOn = hear.advanced }  // stays on while the alert asks
+        // Pitch Shift Pro: locked controls show the free version's value, dimmed with a small lock.
+        let locked = !Pro.shared.unlocked
+        tone.locked = locked
+        style.locked = locked
+        slowSwitch.locked = locked
         tone.value = (((hear.tones[outputUID] ?? 0) + 1) / 2 * 100).rounded() / 100
         tone.isEnabled = hear.advanced && hearOn
-        tone.toolTip = outputName.isEmpty ? nil : "For \(outputName)"
+        tone.toolTip = locked ? "Pitch Shift Pro" : outputName.isEmpty ? nil : "For \(outputName)"
+        // Auto EQ: off while Pitch Shift Pro is locked (its sliders show only while it's on).
+        autoEQSwitch.locked = locked
         let eq = hear.autoEQ(for: outputUID)
         autoEQSwitch.isOn = eq.on
         autoEQSwitch.isEnabled = hear.advanced && hearOn
