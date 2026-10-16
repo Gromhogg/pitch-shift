@@ -4,8 +4,8 @@
 //   {id, name, version, natural{targetHz, assumedInputHz, intonation, formant, breathDb, presenceDb, sibilanceKeep,
 //    eqAmount, ltas[21]}, realistic{model, encoder, rate, eqAmount}, credits}
 // A voice with only a "natural" block works on every Mac. Bad files are skipped and listed in `problems`. An added
-// voice with no speech reader (encoder) of its own uses the built-in one (contentvec.mlmodelc). Adding, renaming
-// and removing voices: VoiceImport.swift.
+// voice with no speech reader (encoder) of its own uses the built-in one (contentvec_ahead.mlmodelc since 3.1; see
+// sharedEncoder). Adding, renaming and removing voices: VoiceImport.swift.
 import Foundation
 
 struct VoiceManifest: Decodable, Equatable {
@@ -46,14 +46,12 @@ final class VoiceEntry {
     var id: String { manifest.id }
     var name: String { manifest.name }
     var modelURL: URL? { manifest.realistic.map { folder.appendingPathComponent($0.model) } }
-    // The voice's own speech reader, or (for an added voice that has none) the built-in one of that name, or
-    // contentvec.mlmodelc.
+    // The voice's own speech reader, or (for an added voice that has none) the built-in one (VoiceLibrary.sharedEncoder).
     var encoderURL: URL? {
         guard let realistic = manifest.realistic else { return nil }
         let own = folder.appendingPathComponent(realistic.encoder)
-        guard !builtIn, !FileManager.default.fileExists(atPath: own.path), let shared = VoiceLibrary.builtInFolder else { return own }
-        let named = shared.appendingPathComponent((realistic.encoder as NSString).lastPathComponent)
-        return FileManager.default.fileExists(atPath: named.path) ? named : shared.appendingPathComponent("contentvec.mlmodelc")
+        guard !builtIn, !FileManager.default.fileExists(atPath: own.path) else { return own }
+        return VoiceLibrary.sharedEncoder(named: realistic.encoder) ?? own
     }
     // Added by the user in the Voices folder (so it can be renamed and removed; built-in and --voices-dir ones can't).
     var isUserVoice: Bool { !builtIn && isInside(VoiceLibrary.userFolder) }
@@ -98,6 +96,15 @@ final class VoiceLibrary {
     private var made: [String: VoiceEntry] = [:]  // every entry ever made, by path, so pointers stay valid
 
     static var builtInFolder: URL? { Bundle.main.resourceURL?.appendingPathComponent("Voices") }
+    // The built-in speech reader for an added voice that has none of its own: the one it names if the app has it, else
+    // the look-ahead one (3.1 and later; it also reads for voices made in the first shape), else contentvec.mlmodelc.
+    static func sharedEncoder(named name: String) -> URL? {
+        guard let shared = builtInFolder else { return nil }
+        let fm = FileManager.default
+        let candidates = [(name as NSString).lastPathComponent, "contentvec_ahead.mlmodelc", "contentvec.mlmodelc"]
+        return candidates.map { shared.appendingPathComponent($0) }.first { fm.fileExists(atPath: $0.path) }
+            ?? shared.appendingPathComponent("contentvec_ahead.mlmodelc")
+    }
     static var userFolder: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Pitch Shift/Voices")

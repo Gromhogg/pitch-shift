@@ -60,7 +60,7 @@ enum VoiceFolder {
 
     A voice folder holds:
     - voice.json: the voice's name and settings. Pitch Shift writes it for you when you add a voice.
-    - a .mlmodelc folder (optional): the AI voice for Realistic mode (Macs with Apple silicon). Without one, the voice
+    - a .mlmodelc folder (optional): the AI voice (Macs with Apple silicon). Without one, the voice
       uses the plain voice changer.
 
     To add a voice:
@@ -319,10 +319,9 @@ struct VoiceImport {
                 file = target
             }
             var realistic = (voice["realistic"] as? [String: Any]) ?? [:]
-            let encoderName = (realistic["encoder"] as? String) ?? "contentvec.mlmodelc"
+            let encoderName = (realistic["encoder"] as? String) ?? "contentvec_ahead.mlmodelc"
             let ownEncoder = folder.appendingPathComponent(encoderName)
-            let encoder = fm.fileExists(atPath: ownEncoder.path) ? ownEncoder
-                : VoiceLibrary.builtInFolder?.appendingPathComponent("contentvec.mlmodelc")
+            let encoder = fm.fileExists(atPath: ownEncoder.path) ? ownEncoder : VoiceLibrary.sharedEncoder(named: encoderName)
             let rate = try Self.check(model: file, encoder: encoder, name: name)
             realistic["model"] = file.lastPathComponent
             realistic["encoder"] = encoderName
@@ -366,7 +365,9 @@ struct VoiceImport {
             throw Problem(message: rate == 0 ? "“\(name)”'s AI voice isn't one Pitch Shift can play. \(convert)"
                                              : "“\(name)” was made at \(rate) Hz; Pitch Shift can play voices made at 32, 40 or 48 kHz.")
         }
-        if let encoder, let frames = encoderFrames(encoder), frames != pitch[1] {
+        // The speech reader's window may be longer than the voice's (by an even number of frames), as VoiceModel.mm
+        // allows: the 3.1 reader (look-ahead shape) also reads for voices made in the first shape.
+        if let encoder, let frames = encoderFrames(encoder), frames < pitch[1] || (frames - pitch[1]) % 2 != 0 {
             throw Problem(message: "“\(name)” was made for a different version of Pitch Shift. Turn the original .pth voice into a Pitch Shift voice again with the converter (README, “Your own voices”).")
         }
         return rate
