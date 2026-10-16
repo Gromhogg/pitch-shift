@@ -39,9 +39,9 @@ typedef struct VoiceChangerPitch {
     float formantScale;    // Rubber Band formant scale to use now (already divided by the pitch scale)
     int voiced;            // 1 if the newest 10 ms frame was voiced
     float f0In;            // newest tracked pitch, Hz (0 = not voiced)
-    float f0Target;        // the pitch it is mapped to, Hz (0 = not voiced; creak holds the last good pitch)
+    float f0Target;        // the pitch the AI voice follows, Hz (0 = not voiced; creak holds or follows smoothly)
     int newFrames;         // 10 ms frames finished during this call (0 ... VOICECHANGER_MAX_PITCH_FRAMES)
-    float frameHz[VOICECHANGER_MAX_PITCH_FRAMES];     // each new frame's target pitch, Hz (0 = not voiced)
+    float frameHz[VOICECHANGER_MAX_PITCH_FRAMES];     // each new frame's pitch for the AI voice, Hz (0 = not voiced)
     int64_t framePos[VOICECHANGER_MAX_PITCH_FRAMES];  // each new frame's centre, in input samples since the last reset
 } VoiceChangerPitch;
 
@@ -57,6 +57,7 @@ typedef struct VoiceChangerStats {
     int64_t frames;        // 10 ms frames analysed since the last reset
     double analyseMs;      // time spent in analyse + post per 10 ms of sound: average ...
     double worstMs;        // ... and the worst single call (scaled to 10 ms of sound)
+    int64_t learnedFrames; // 10 ms frames the speaker's median has learned from (since voicechanger_new)
 } VoiceChangerStats;
 
 typedef struct VoiceChanger VoiceChanger;
@@ -72,6 +73,11 @@ void voicechanger_set(VoiceChanger *changer, const VoiceChangerVoice *voice, flo
 
 // Starts over (new chain or the shifter started fresh): forgets the sound, keeps the voice and the measured median.
 void voicechanger_reset(VoiceChanger *changer);
+
+// The speaker's median pitch measured earlier (by a changer that ran before, see VoiceChangerStats medianHz and
+// learnedFrames), as the first guess instead of the voice's assumedInputHz; weightFrames: how many 10 ms frames it
+// counts for. Call it after voicechanger_new, before the first analyse (same thread as create). 0 = forget it.
+void voicechanger_set_speaker(VoiceChanger *changer, float medianHz, float weightFrames);
 
 // Takes the next `frames` mic samples (before Rubber Band) and says which pitch and formant scale to use.
 // extraSemitones: pitch-only shift added on top ("Deeper when slow"), half-steps.

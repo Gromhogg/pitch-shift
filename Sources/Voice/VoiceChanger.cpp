@@ -5,13 +5,27 @@
 //   - low-passes and thins it to about 16 kHz (/3 at 48 kHz, /6 at 96 kHz, none at 16 kHz),
 //   - every 10 ms: YIN pitch tracker on the last ~43 ms (25 ms window, 55-600 Hz, threshold 0.12, parabolic
 //     interpolation); voiced = aperiodicity < 0.25 and level > noise floor + 10 dB and > -50 dBFS,
-//   - octave-jump fix against the median of the last 200 RAW pitch values (a light seed only, so a wrong seed can't
-//     lock it an octave off), then a median of 3 frames (so each decision is one frame late),
+//   - octave errors (YIN sometimes reads half or double the pitch for a frame or two, mostly where a sound starts or
+//     ends): each voiced frame's pitch may be its YIN value, half or double it; a small running path search picks
+//     the one that moves least from frame to frame (1 point per half-step), with a cost for taking half (4.5) or
+//     double (3.5) and, once the speaker's median is known, for going more than 10 half-steps from it (0.5 per
+//     half-step); a frame's choice is settled one frame later, when the next frame is in. A real fall to the bottom
+//     of the voice is gradual, so it is kept (the old median-based fix doubled it: the "cracks" at the ends of
+//     words); a lasting real octave drop (creak) is taken after ~4 frames. Then a median of 3 frames (so each
+//     decision is one frame late),
 //   - pitch mapping toward the voice's median pitch: off = 12 log2(target / speaker's median),
 //     P = strength * (off + (intonation - 1) * deviation) + extra, limited to +-15 half-steps, smoothed 25 ms,
 //     held through unvoiced and creaky frames (creak: < 70 Hz, < 0.62 x median, zig-zag jitter > 8 % over 3 frames,
-//     or aperiodicity 0.25-0.45 just after voice); the speaker's median (4 s, seeded by assumedInputHz) learns from
-//     voiced frames and from smooth low ones (>= 0.5 x median, not rough), so a deep voice finds its real median,
+//     or aperiodicity 0.25-0.45 just after voice); the speaker's median (4 s) starts from a light guess (0.1 s worth
+//     of the median an earlier chain measured, voicechanger_set_speaker, or else of assumedInputHz) and learns from
+//     voiced frames and from smooth low ones (>= 0.5 x median, not rough), so a deep voice finds its real median;
+//     for the first 0.5 s of voice every smooth frame counts and only < 70 Hz is creak (the guess may be far off);
+//     the median in use moves at most 0.3 half-steps per 10 ms, so learning it never makes the pitch jump,
+//   - the pitch the AI voice follows (Realistic mode, frameHz): the tracked pitch x the mapping; through creak it
+//     moves with a gradual fall or rise (not below 0.62 x median, mapped) and holds through a sudden drop or rough
+//     frames; an aperiodic moment up to 80 ms after voice holds it (never starts it); then it is eased into 9 (at
+//     most 12) half-steps above and 6 (at most 9) below the voice's own median, and moves at most 2 half-steps per
+//     10 ms while it sings (gaps up to 30 ms count as singing),
 //   - voice shape (formants): formant ^ (strength * |off| / |12 log2(target / assumedInputHz)|, limited to 1),
 //     gliding over 150 ms; Rubber Band gets shape / pitch.
 // post (after Rubber Band), per output sample, all plain filters (no added delay):
@@ -28,7 +42,8 @@
 // Inner tuning keys (voicechanger_tune), defaults in Tuning below: yinThreshold, voicedAp, voicedAboveFloorDb,
 // voicedMinDb, creakHz, creakRatio, creakJitter, creakApLow, creakApHigh, smoothMs, formantGlideMs, strengthGlideS,
 // maxSemitones, medianSeconds, seedFrames, eqMaxDb, eqStepDb, eqSeconds, eqStartSeconds, presenceHz, presenceQ,
-// sibilanceHz, breathAttackMs, breathReleaseMs.
+// sibilanceHz, breathAttackMs, breathReleaseMs, octUpCost, octDownCost, jumpCost, rangeSt, rangeCost, contFrames,
+// gapFrames, warmFrames, medianGlideSt, aiBandSt, aiMaxSt, aiBandLowSt, aiMinSt, aiHoldFrames, aiSlewSt.
 #include "VoiceChanger.h"
 
 #include <algorithm>
@@ -48,7 +63,6 @@ constexpr int kPitchBins = 48 * 6;               // quarter half-steps from 40 H
 constexpr float kBinLowHz = 40;
 constexpr int kLevelBins = 141;                  // 1 dB from -140 to 0 dBFS
 constexpr int kFlagFrames = 128;                 // voiced/creak decisions kept for post (1.28 s)
-constexpr int kRawFrames = 200;                  // raw pitch values for the octave-jump fix
 constexpr int kEqBlock = 256;                    // tone EQ measuring/updating block
 
 // One second-order filter (Robert Bristow-Johnson's audio EQ cookbook), transposed direct form II, in double.
@@ -103,7 +117,7 @@ struct Tuning {
     float strengthGlideS = 0.15f;
     float maxSemitones = 15;
     float medianSeconds = 4;
-    float seedFrames = 100;
+    float seedFrames = 10;           // weight of the first guess of the speaker's median (10 ms frames)
     float eqMaxDb = 6;
     float eqStepDb = 0.05f;
     float eqSeconds = 6;
@@ -113,6 +127,23 @@ struct Tuning {
     float sibilanceHz = 4500;
     float breathAttackMs = 5;
     float breathReleaseMs = 30;
+    // octave errors (see the top of this file)
+    float octUpCost = 3.5f;          // cost of taking double the YIN pitch (YIN read half)
+    float octDownCost = 4.5f;        // cost of taking half the YIN pitch (YIN read double)
+    float jumpCost = 1;              // cost per half-step moved from the frame before
+    float rangeSt = 10;              // once the median is known: more than this from it ...
+    float rangeCost = 0.5f;          // ... costs this per half-step
+    float contFrames = 3;            // a gap up to this many frames keeps the full move cost (and the AI's speed limit)
+    float gapFrames = 20;            // ... longer gaps weaken it, past this the next sound starts afresh
+    float warmFrames = 50;           // learned frames before the median is trusted for creak decisions
+    float medianGlideSt = 0.3f;      // the median in use moves at most this per frame
+    // the pitch handed to the AI voice
+    float aiBandSt = 9;              // up to this above the voice's median it is left alone ...
+    float aiMaxSt = 12;              // ... beyond it eased so it never goes further than this
+    float aiBandLowSt = 6;           // the same below the voice's median (a voice model sounds strained low)
+    float aiMinSt = 9;
+    float aiHoldFrames = 8;          // an aperiodic moment this soon after voice keeps the AI voice singing
+    float aiSlewSt = 2;              // the most it moves per frame inside voiced sound
 };
 
 struct TuneKey {
@@ -130,6 +161,12 @@ const TuneKey kTuneKeys[] = {
     {"eqSeconds", &Tuning::eqSeconds}, {"eqStartSeconds", &Tuning::eqStartSeconds},
     {"presenceHz", &Tuning::presenceHz}, {"presenceQ", &Tuning::presenceQ}, {"sibilanceHz", &Tuning::sibilanceHz},
     {"breathAttackMs", &Tuning::breathAttackMs}, {"breathReleaseMs", &Tuning::breathReleaseMs},
+    {"octUpCost", &Tuning::octUpCost}, {"octDownCost", &Tuning::octDownCost}, {"jumpCost", &Tuning::jumpCost},
+    {"rangeSt", &Tuning::rangeSt}, {"rangeCost", &Tuning::rangeCost}, {"contFrames", &Tuning::contFrames},
+    {"gapFrames", &Tuning::gapFrames}, {"warmFrames", &Tuning::warmFrames},
+    {"medianGlideSt", &Tuning::medianGlideSt}, {"aiBandSt", &Tuning::aiBandSt}, {"aiMaxSt", &Tuning::aiMaxSt},
+    {"aiBandLowSt", &Tuning::aiBandLowSt}, {"aiMinSt", &Tuning::aiMinSt}, {"aiHoldFrames", &Tuning::aiHoldFrames},
+    {"aiSlewSt", &Tuning::aiSlewSt},
 };
 
 struct VoiceKey {
@@ -225,12 +262,11 @@ struct VoiceChanger {
     float levelHist[kLevelBins] = {};
     uint8_t levelRing[512] = {};
     int levelCount = 0, levelAt = 0;
-    // Octave-jump fix: the last raw pitch values (bins) with a light seed.
-    float rawBins[kPitchBins] = {};
-    int16_t rawRing[kRawFrames] = {};
-    int rawCount = 0, rawAt = 0;
-    int64_t rawTotal = 0;
-    bool seeded = false;
+    // Octave errors: the last voiced frame's three choices (half, YIN, double), their path costs, and how many
+    // frames ago it was.
+    float octHz[3] = {};
+    float octPath[3] = {};
+    int octAge = 999;
     // The last three frames (for the median of 3): corrected pitch, aperiodicity, level, centre.
     float lastF0[3] = {}, lastAp[3] = {1, 1, 1}, lastLevel[3] = {-140, -140, -140};
     int64_t lastCentre[3] = {};
@@ -240,6 +276,11 @@ struct VoiceChanger {
     int mapCount = 0, mapAt = 0, mapCap = 400;
     int seedBin = 0;
     float seedWeight = 0;
+    bool seeded = false;
+    float speakerHz = 0;        // the speaker's median measured earlier (voicechanger_set_speaker), 0 = none
+    float speakerWeight = 0;
+    int64_t learned = 0;        // frames the median has learned from
+    float medianUse = 0;        // the median in use (glides toward the measured one), 0 = not yet
     float prev[3] = {};
     int prevCount = 0;
     float shiftFrame = 0;       // mapped shift (half-steps, before strength), smoothed per frame
@@ -250,6 +291,9 @@ struct VoiceChanger {
     float lastGoodHz = 0;
     float lastDev = 0;          // the last good frame's distance from the median (half-steps)
     int lastGoodAge = 999;
+    float aiHz = 0;             // the last pitch handed to the AI voice, and how many frames ago
+    int aiAge = 999;
+    int voicedAge = 999;        // frames since the last voiced frame (after the median of 3)
     float medianHz = 120;
     // Decisions for post.
     uint8_t flagRing[kFlagFrames] = {};
@@ -292,23 +336,46 @@ struct VoiceChanger {
         if (!(voice.targetHz > 0)) voice.targetHz = 200;
         if (!(voice.assumedInputHz > 0)) voice.assumedInputHz = 120;
         if (!(voice.formant > 0)) voice.formant = 1;
-        const int newSeed = pitchBin(voice.assumedInputHz);
-        if (!seeded) {  // the octave fix's first guess: 5 values at the assumed pitch
-            for (int k = 0; k < 5; ++k) pushRaw(newSeed);
-            seedWeight = tuning.seedFrames;
+        // The first guess of the speaker's median: measured earlier if known, else the voice's assumed input.
+        seedBin = pitchBin(speakerHz > 0 ? speakerHz : voice.assumedInputHz);
+        if (!seeded) {
+            seedWeight = speakerHz > 0 ? speakerWeight : tuning.seedFrames;
             seeded = true;
         }
-        seedBin = newSeed;
         mapCap = std::clamp((int)std::lround(tuning.medianSeconds * 100), 10, 1024);
     }
 
-    void pushRaw(int bin) {
-        if (rawCount == kRawFrames) rawBins[rawRing[rawAt]] -= 1;
-        else rawCount++;
-        rawRing[rawAt] = (int16_t)bin;
-        rawBins[bin] += 1;
-        rawAt = (rawAt + 1) % kRawFrames;
-        rawTotal++;
+    bool warm() const { return learned >= (int64_t)tuning.warmFrames || speakerHz > 0; }
+
+    // Once a frame: the median in use moves toward the measured one, at most medianGlideSt.
+    void glideMedian(float measured) {
+        if (!(medianUse > 0)) { medianUse = measured; return; }
+        const float d = std::clamp(semitones(measured / medianUse), -tuning.medianGlideSt, tuning.medianGlideSt);
+        medianUse = (float)(medianUse * std::exp2(d / 12));
+    }
+
+    // The pitch handed to the AI voice: eased into a band around the voice's own median (what this target pitch
+    // would be for the speaker's median), and moving at most aiSlewSt per frame inside voiced sound.
+    float aiPitch(float hz, float bandCentre) {
+        if (!(hz > 0)) {
+            if (aiAge < 1000) aiAge++;
+            return 0;
+        }
+        if (bandCentre > 0) {
+            const float up = std::max(0.0f, tuning.aiBandSt), upRoom = std::max(0.01f, tuning.aiMaxSt - up);
+            const float down = std::max(0.0f, tuning.aiBandLowSt), downRoom = std::max(0.01f, tuning.aiMinSt - down);
+            float s = semitones(hz / bandCentre);
+            if (s > up) s = up + upRoom * std::tanh((s - up) / upRoom);
+            else if (s < -down) s = -down - downRoom * std::tanh((-down - s) / downRoom);
+            hz = (float)(bandCentre * std::exp2(s / 12));
+        }
+        if (aiHz > 0 && aiAge <= (int)tuning.contFrames && tuning.aiSlewSt > 0) {
+            const float d = std::clamp(semitones(hz / aiHz), -tuning.aiSlewSt, tuning.aiSlewSt);
+            hz = (float)(aiHz * std::exp2(d / 12));
+        }
+        aiHz = hz;
+        aiAge = 0;
+        return hz;
     }
 
     void pushMap(int bin) {
@@ -325,6 +392,7 @@ struct VoiceChanger {
 
     void learnMedian(float f0) {
         pushMap(pitchBin(f0));
+        learned++;
         seedWeight = std::max(0.0f, seedWeight - 0.25f);  // the first guess fades as real frames come in
     }
 
@@ -401,23 +469,46 @@ struct VoiceChanger {
         const float floorDb = noiseFloor();
         const bool levelOk = level > floorDb + tuning.voicedAboveFloorDb && level > tuning.voicedMinDb;
         const bool voiced = ap < tuning.voicedAp && levelOk;
-        float corrected = 0;
+        float corrected = 0, settled = -1;  // settled: the frame before, now that this one is in (-1 = no change)
         if (voiced) {
-            const float rawMedian = (float)binHz(medianBin(rawBins, 0, 0));
-            corrected = f0;
-            const float st = semitones(f0 / rawMedian);
-            if (std::fabs(st) > 9 && rawTotal > 30) {
-                for (float m : {0.5f, 2.0f}) {
-                    if (std::fabs(semitones(f0 * m / rawMedian)) < 5) { corrected = f0 * m; break; }
+            static constexpr float kMul[3] = {0.5f, 1, 2};
+            const float stepCost[3] = {tuning.octDownCost, 0, tuning.octUpCost};
+            const bool ranged = warm() && medianUse > 0;
+            const bool linked = octAge <= (int)tuning.gapFrames;
+            const float w = tuning.jumpCost * std::min(1.0f, std::max(1.0f, tuning.contFrames) / (float)std::max(1, octAge));
+            float hz[3], path[3];
+            int from[3] = {1, 1, 1};
+            for (int k = 0; k < 3; ++k) {
+                hz[k] = f0 * kMul[k];
+                float cost = stepCost[k];
+                if (!(hz[k] >= 50 && hz[k] <= 650)) cost += 1e6f;
+                if (ranged) cost += tuning.rangeCost * std::max(0.0f, std::fabs(semitones(hz[k] / medianUse)) - tuning.rangeSt);
+                if (linked) {
+                    float best = 1e30f;
+                    for (int j = 0; j < 3; ++j) {
+                        const float c = octPath[j] + w * std::fabs(semitones(hz[k] / octHz[j]));
+                        if (c < best) { best = c; from[k] = j; }
+                    }
+                    cost += best;
                 }
+                path[k] = cost;
             }
-            pushRaw(pitchBin(f0));  // the raw value: a wrong guess can't lock itself in
+            int pick = 1;
+            for (int k = 0; k < 3; ++k) if (path[k] < path[pick]) pick = k;
+            const float low = path[pick];
+            for (int k = 0; k < 3; ++k) { octPath[k] = std::min(path[k] - low, 1e6f); }
+            if (linked && octAge == 1) settled = octHz[from[pick]];  // the frame before, seen from this one
+            for (int k = 0; k < 3; ++k) octHz[k] = hz[k];
+            octAge = 0;
+            corrected = hz[pick];
         }
+        if (octAge < 1000) octAge++;
         // shift the last three frames
         for (int k = 0; k < 2; ++k) {
             lastF0[k] = lastF0[k + 1]; lastAp[k] = lastAp[k + 1];
             lastLevel[k] = lastLevel[k + 1]; lastCentre[k] = lastCentre[k + 1];
         }
+        if (settled > 0 && lastF0[1] > 0) lastF0[1] = settled;  // (lastF0[1] is now the frame before)
         lastF0[2] = corrected; lastAp[2] = ap; lastLevel[2] = level;
         lastCentre[2] = (decCount - span / 2) * down;
         hops++;
@@ -434,10 +525,13 @@ struct VoiceChanger {
 
     void mapFrame(float f0, float ap, bool levelOk, int64_t centre, float extra, VoiceChangerPitch *out) {
         const int mb = medianBin(mapBins, seedBin, seedWeight);
-        const float median = (float)binHz(mb);
+        const float measured = (float)binHz(mb);
+        glideMedian(measured);
+        const float median = medianUse;  // moves smoothly, so learning the median never makes the pitch jump
         medianHz = median;
         const bool voiced = f0 > 0;
-        bool creak = false;
+        voicedAge = voiced ? 0 : std::min(voicedAge + 1, 1000);
+        bool creak = false, rough = false;
         if (voiced) {
             if (prevCount < 3) prev[prevCount++] = f0;
             else { prev[0] = prev[1]; prev[1] = prev[2]; prev[2] = f0; }
@@ -446,17 +540,19 @@ struct VoiceChanger {
                 const float mean = (prev[0] + prev[1] + prev[2]) / 3;
                 jitter = std::fabs(prev[1] - 0.5f * (prev[0] + prev[2])) / mean;
             }
-            const bool rough = jitter > tuning.creakJitter;
-            creak = f0 < tuning.creakHz || f0 < tuning.creakRatio * median || rough;
+            rough = jitter > tuning.creakJitter;
+            // Until the median is known (the first guess may be far off) only very low and rough frames are creak.
+            const bool known = warm();
+            creak = f0 < tuning.creakHz || (known && f0 < tuning.creakRatio * measured) || rough;
             // The speaker's median also learns from smooth low frames (a deep voice talks below 70 Hz; without them
             // its median would stay at the first guess). Rough frames and octave-low ones (fry) stay out.
-            if (creak && !rough && f0 >= 0.5f * median) learnMedian(f0);
+            if (creak && !rough && (f0 >= 0.5f * measured || !known)) learnMedian(f0);
         } else {
             prevCount = 0;
             creak = levelOk && ap >= tuning.creakApLow && ap <= tuning.creakApHigh && lastGoodAge <= 15;
         }
         frames++;
-        float target = 0;
+        float target = 0, aiWant = 0;  // aiWant: the pitch the AI voice should sing now (0 = unvoiced)
         if (voiced && !creak) {
             learnMedian(f0);
             const float off = semitones(voice.targetHz / median);
@@ -470,6 +566,7 @@ struct VoiceChanger {
             shapePower = full > 0.25f ? std::clamp(std::fabs(off) / full, 0.0f, 1.0f) : (std::fabs(off) > 0.25f ? 1.0f : 0.0f);
             const float total = std::clamp(strength * shiftFrame + extra, -tuning.maxSemitones, tuning.maxSemitones);
             target = f0 * std::exp2(total / 12);
+            aiWant = target;
             lastGoodHz = target;
             lastGoodAge = 0;
             voicedFrames++;
@@ -484,16 +581,40 @@ struct VoiceChanger {
                 const float shift = semitones(voice.targetHz / median) + (voice.intonation - 1) * lastDev;
                 shiftFrame += (1 - std::exp(-10.0f / std::max(1.0f, tuning.smoothMs))) * (shift - shiftFrame);
             }
+            // The AI voice through creak: while it sings, it moves with a gradual fall or rise (not below
+            // creakRatio x median, mapped) and holds through a sudden drop (an octave drop, creak) or rough frames;
+            // a voiced sound that starts in creak starts at its own pitch (not below the floor); an aperiodic
+            // moment holds only while the AI voice is still singing (it never starts from an old pitch).
+            if (creak && shiftKnown) {
+                // (an aperiodic frame keeps it going only up to aiHoldFrames after the last voiced frame)
+                const bool going = aiHz > 0 && aiAge <= (int)tuning.contFrames && voicedAge <= (int)tuning.aiHoldFrames;
+                const float total = std::clamp(strength * shiftFrame + extra, -tuning.maxSemitones, tuning.maxSemitones);
+                const float floorHz = tuning.creakRatio * median * std::exp2(total / 12);
+                if (going) {
+                    float ratio = 1;
+                    if (voiced && !rough && prevCount >= 2) {
+                        const float r = prev[prevCount - 1] / prev[prevCount - 2];
+                        if (std::fabs(semitones(r)) <= 2.5f) ratio = r;
+                    }
+                    aiWant = std::max(aiHz * ratio, std::min(aiHz, floorHz));
+                } else if (voiced) {
+                    aiWant = std::max(f0 * std::exp2(total / 12), floorHz);
+                }
+            }
         }
+        // Realistic mode's pitch: the band's centre is where the speaker's median lands.
+        const float bandCentre = shiftKnown ? median * std::exp2(std::clamp(strength * semitones(voice.targetHz / median) + extra,
+                                                                               -tuning.maxSemitones, tuning.maxSemitones) / 12) : 0;
+        const float aiTarget = aiPitch(aiWant, bandCentre);
         const int64_t index = ++flagLatest;
         flagRing[index % kFlagFrames] = (uint8_t)(voiced || creak);
         flagCentre[index % kFlagFrames] = centre;
         if (out) {
             out->voiced = voiced ? 1 : 0;
             out->f0In = voiced ? f0 : 0;
-            out->f0Target = target;
+            out->f0Target = aiTarget;
             if (out->newFrames < VOICECHANGER_MAX_PITCH_FRAMES) {
-                out->frameHz[out->newFrames] = target;
+                out->frameHz[out->newFrames] = aiTarget;
                 out->framePos[out->newFrames] = centre;
                 out->newFrames++;
             }
@@ -579,6 +700,9 @@ struct VoiceChanger {
         for (int k = 0; k < 3; ++k) { lastF0[k] = 0; lastAp[k] = 1; lastLevel[k] = -140; lastCentre[k] = 0; }
         prevCount = 0;
         lastGoodAge = 999;
+        for (int k = 0; k < 3; ++k) { octHz[k] = 0; octPath[k] = 0; }
+        octAge = 999;
+        aiHz = 0; aiAge = 999; voicedAge = 999;
         flagLatest = -1;
         frames = voicedFrames = creakFrames = 0;
         sibTop.clear(); sibOrigTop.clear();
@@ -718,6 +842,16 @@ void voicechanger_reset(VoiceChanger *c) {
         const double shape = std::log((double)c->voice.formant) * c->strength * c->shapePower;
         c->shapeLogNow = shape;
     }
+}
+
+void voicechanger_set_speaker(VoiceChanger *c, float medianHz, float weightFrames) {
+    if (!c) return;
+    const bool ok = std::isfinite(medianHz) && medianHz >= 50 && medianHz <= 500 && std::isfinite(weightFrames) && weightFrames > 0;
+    c->speakerHz = ok ? medianHz : 0;
+    c->speakerWeight = ok ? weightFrames : 0;
+    c->seeded = false;   // the first guess is made again
+    c->medianUse = 0;
+    if (c->hasVoice) c->applyVoice();
 }
 
 void voicechanger_analyse(VoiceChanger *c, const float *in, int frames, float extraSemitones, VoiceChangerPitch *out) {
@@ -881,6 +1015,7 @@ void voicechanger_get_stats(const VoiceChanger *c, VoiceChangerStats *out) {
     const double tenMs = 0.01 * c->rate;
     out->analyseMs = c->inPos > 0 ? c->spentNs / 1e6 * tenMs / (double)c->inPos : 0;
     out->worstMs = c->worstMs;
+    out->learnedFrames = c->learned;
 }
 
 }  // extern "C"

@@ -658,10 +658,12 @@ final class VoiceChain {
     private var counts = VoiceStats()
     private var overloadListener: Listener?
 
-    // `changerTune`: --changer-tune settings for the voice changer (command line only).
+    // `changerTune`: --changer-tune settings for the voice changer (command line only). `speaker`: the speaker's
+    // median pitch as an earlier chain measured it (so a new chain doesn't start from a guess).
     init(mic: AudioDeviceID, feed: AudioDeviceID, params: OSAllocatedUnfairLock<VoiceParams>, sounds: OSAllocatedUnfairLock<SoundPlay>,
          bufferFrames: UInt32? = nil, testSource: ((UnsafeMutablePointer<Float>, Int) -> Void)? = nil,
-         changerTune: [(String, Float)] = [], realistic: (id: String, model: OpaquePointer?)? = nil) throws {
+         changerTune: [(String, Float)] = [], realistic: (id: String, model: OpaquePointer?)? = nil,
+         speaker: (hz: Float, frames: Float)? = nil) throws {
         realisticID = realistic?.id
         self.testSource = testSource  // set before the sound starts, so a test never sends the real mic
         micName = deviceName(mic)
@@ -688,6 +690,7 @@ final class VoiceChain {
         stretcher = made
         changer = madeChanger
         for (key, value) in changerTune { _ = voicechanger_tune(changer, key, value) }
+        if let speaker { voicechanger_set_speaker(changer, speaker.hz, speaker.frames) }
         voicechanger_set(changer, start.changer, start.strength)
         voicechanger_reset(changer)
         changerPitch = .allocate(capacity: 1)
@@ -1089,6 +1092,9 @@ final class VoiceShifter {
     private var stopLater: DispatchWorkItem?
     private let debounce = Debouncer(0.3)
     private var rebuilds: [Date] = []
+    // The speaker's median pitch from the last chain that heard at least a second of voice: the next chain starts
+    // from it instead of the voice's guess (Realistic remakes the chain when the voice changes).
+    private var lastSpeaker: (hz: Float, frames: Float)?
 
     init(halfSteps: Float, cartoon: Float, slowDeeper: Bool = false, micUID: String?) {
         self.halfSteps = halfSteps
@@ -1336,7 +1342,7 @@ final class VoiceShifter {
                     let ai = realisticWanted.map { (id: $0.id, model: models.model(for: $0.id)) }
                     let made = try VoiceChain(mic: mic, feed: feed, params: params, sounds: sounds,
                                               bufferFrames: testBufferFrames, testSource: testSource, changerTune: changerTune,
-                                              realistic: ai)
+                                              realistic: ai, speaker: lastSpeaker)
                     chain = made
                 } catch {
                     setState(.problem((error as? Problem)?.message ?? "\(error)"))
@@ -1366,6 +1372,10 @@ final class VoiceShifter {
     }
 
     private func closeChain() {
+        if let chain {
+            let heard = chain.stats.withLock { $0.changer }
+            if heard.learnedFrames >= 100 && heard.medianHz > 0 { lastSpeaker = (heard.medianHz, Float(min(heard.learnedFrames, 100))) }
+        }
         chain?.close()
         chain = nil
         models.freeRetired()  // an AI voice switched away from: its chain is gone now
