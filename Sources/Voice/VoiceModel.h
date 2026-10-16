@@ -68,7 +68,8 @@ VoiceStream *voicestream_new(VoiceModel *model, double chainRate, int maxFrames,
 void voicestream_delete(VoiceStream *stream);
 
 // Gives a stream made with model NULL its model (off the sound thread; the worker starts at the newest sound and
-// crossfades in). Returns 0 if it doesn't fit this stream's hop / crossfade / search or reserve; make a new stream then.
+// crossfades in). Returns 0 if it doesn't fit this stream's hop / crossfade / search, reserve or voice sample rate (a stream
+// made with no model expects 48 kHz); make a new stream then.
 int voicestream_set_model(VoiceStream *stream, VoiceModel *model);
 
 // Test settings (--changer-tune): "aiSlowMs" = extra time added to each piece (forces late pieces),
