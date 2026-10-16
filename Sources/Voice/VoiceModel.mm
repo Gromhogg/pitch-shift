@@ -19,10 +19,12 @@
 // Look-ahead (models in the "ahead" shape): the window still ends at the newest sound, but the piece that is made
 // comes from LA frames earlier, so the speech reader hears LA frames of what comes after it (no more guessing at a
 // cut-off word; adds LA to the delay). The ring index of piece k stays k * hop, so changing LA never moves where the
-// sound thread reads: only what the next pieces hold (the switch waits for a quiet moment, so nothing is heard twice).
+// sound thread reads: only what the next pieces hold (the switch waits for a quiet moment, so nothing is heard twice,
+// or 1.2 s at most).
 // The pitch the AI follows is smoothed over the frames on both sides of each frame (they are known by then).
-// A new live stream plays Natural's sound as it is (no added delay) until its first quiet moment with the AI voice
-// ready, then moves to the fixed delay: so starting it never makes a gap.
+// A new stream plays at its fixed delay from the start (as in 3.0.0): Natural's sound fills in, delayed to the same
+// point, and the AI voice takes over with its first piece (10 ms crossfade), or as soon as its models are given.
+// (3.1.0 played Natural with no delay until a quiet moment: in a noisy room the AI voice then never came in.)
 //
 // Model files (made by research/voicechanger/pack_voices.sh, look-ahead shape by convert_generator.py --ahead):
 //   encoder  in "audio" Float32 [1, T*160] (16 kHz) -> out "features" Float32 [1, T/2, 768]
@@ -406,6 +408,8 @@ struct VoiceStream {
     int laNow = 0;                 // look-ahead the pieces are made with now (10 ms frames)
     bool started = false;          // the AI voice has been switched in (live: at a quiet moment)
     int64_t askedAtHop = -1;       // hop when the look-ahead asked for first differed from the one in use
+    static constexpr double kSwitchWaitS = 1.2;  // a look-ahead switch waits this long for a quiet moment at most
+                                                 // (plus up to two pieces: heard within 1.5 s of the ask)
     std::vector<float> levels = std::vector<float>(500, -120.0f), sorted;  // input frame levels, last 5 s (dB)
     int64_t levelsAt = 0;
     float floorDb = -120;
@@ -422,10 +426,8 @@ struct VoiceStream {
     float mix = 0;                 // 1 = the AI voice, 0 = Natural
     bool playing = false;          // the AI voice has played (so a fall back counts as a miss)
     bool lateNow = false;
-    bool direct = true;            // live, before the AI voice starts: Natural plays with no added delay
     int playLatency = 0;           // Natural's fill-in lines up with this delay
     int64_t junctionSeen = INT64_MIN;
-    float directMix = 1;           // 1 = Natural as it is (direct), 0 = delayed to playLatency
 
     // tuning (tests)
     std::atomic<int> slowMs{0}, slowEvery{1};
@@ -444,6 +446,7 @@ struct VoiceStream {
 
     // stats
     std::atomic<int> loaded{0};
+    std::atomic<int> aiNow{0};     // sound thread: 1 = the AI voice is what played in the last callback
     std::atomic<int64_t> hops{0}, misses{0}, fallbackFrames{0}, skipped{0}, switches{0};
     std::atomic<double> sumHopMs{0}, worstHopMs{0}, cpuShare{0};
 
@@ -781,25 +784,23 @@ struct VoiceStream {
         return true;
     }
 
-    // Before hop `next` (E = (next + 1) * H): starts the AI voice (live: at a quiet moment) and switches the
-    // look-ahead when another one was asked for, also at a quiet moment so nothing is heard twice or lost (after a
-    // few seconds without one, it switches anyway: the crossfade then joins the two). The converted index of the
-    // hop's block stays next * H either way; only what it holds moves.
+    // Before hop `next` (E = (next + 1) * H): starts the AI voice (at once: the stream has played at its fixed
+    // delay from the start, Natural filling in, so nothing is heard twice) and switches the look-ahead when another
+    // one was asked for, at a quiet moment so nothing is heard twice or lost (after 1.2 s without one, it switches
+    // anyway: the crossfade then joins the two). The converted index of the hop's block stays next * H either way;
+    // only what it holds moves.
     void junction(int64_t next) {
         const int want = std::clamp(laWant.load(), 0, maxAhead());
         const int64_t E = (next + 1) * H;
         const int64_t step = (int64_t)H * kFrame16;
         bool go = false;
         if (!started) {
-            // the AI starts at this block's sound (A) and, until now, Natural was heard with no delay: everything
-            // from A to the newest sound would be heard twice, so it must be quiet (or long ago: 6 s at the latest)
-            const int64_t A = E - want - H - X - S;
-            if (askedAtHop < 0) askedAtHop = next;
-            go = offline || quiet(A - 2, (in16End - 2 * kFrame16) / kFrame16) || (next - askedAtHop) * step > 6 * kRate16;
+            go = true;
         } else if (want != laNow) {
             const int64_t A0 = E - laNow - H - X - S, A1 = E - want - H - X - S;
             if (askedAtHop < 0) askedAtHop = next;
-            go = offline || quiet(std::min(A0, A1) - 2, std::max(A0, A1) + X + 2) || (next - askedAtHop) * step > 3 * kRate16;
+            go = offline || quiet(std::min(A0, A1) - 2, std::max(A0, A1) + X + 2) ||
+                 (double)((next - askedAtHop) * step) > kSwitchWaitS * kRate16;
         }
         if (!go) return;
         laNow = want;
@@ -928,13 +929,12 @@ struct VoiceStream {
         if (jAt != junctionSeen && q0 >= jAt) {
             junctionSeen = jAt;
             playLatency = junctionLatency.load(std::memory_order_relaxed);
-            direct = false;
         }
         const int64_t natBack = std::max<int64_t>(0, playLatency - std::max(0, naturalDelay));
         // Decide for the whole callback: play the AI voice when all of it is final and (when coming back) a ramp's
         // worth more is ready too; fall back when it is not final (a late hop: the provisional tail carries the fade).
         float target;
-        if (!direct && loaded.load(std::memory_order_relaxed) && q0 >= first && qEnd <= fin && (mix > 0 || qEnd + rampLen <= fin)) {
+        if (loaded.load(std::memory_order_relaxed) && q0 >= first && qEnd <= fin && (mix > 0 || qEnd + rampLen <= fin)) {
             target = 1;
         } else {
             target = 0;
@@ -942,16 +942,10 @@ struct VoiceStream {
         }
         if (target == 1) lateNow = false;
         const float step = 1.0f / (float)rampLen;
-        const float directTarget = direct ? 1.0f : 0.0f;
         for (int i = 0; i < frames; i++) {
             const int64_t pos = P + i;
             const int64_t np = pos - natBack;
-            float nat = np >= 0 ? natural.at(np) : 0.0f;
-            if (directMix > 0) {  // Natural as it is, until the AI's first start (then 10 ms into the delayed one)
-                const float now = naturalNow ? naturalNow[i] : 0.0f;
-                nat = directMix * now + (1 - directMix) * nat;
-                if (directMix > directTarget) directMix = std::max(0.0f, directMix - step);
-            }
+            const float nat = np >= 0 ? natural.at(np) : 0.0f;  // (silence until Natural's sound reaches the delay)
             const int64_t q = q0 + i;
             float ai = 0;
             bool have = q >= first && q < prov;
@@ -962,6 +956,7 @@ struct VoiceStream {
         }
         if (mix >= 1) playing = true;
         if (playing && mix < 1) fallbackFrames.fetch_add(frames);
+        aiNow.store(mix >= 1 ? 1 : 0, std::memory_order_relaxed);
         pulled = P + frames;
     }
 };
@@ -1136,7 +1131,6 @@ VoiceStream *voicestream_new(VoiceModel *model, double chainRate, int maxFrames,
     s->laWant.store(std::clamp(c.lookaheadMs, 0, 1000) / 10);
     const int la = model ? std::clamp(s->laWant.load(), 0, model->maxAheadMs / 10) : s->laWant.load();
     s->playLatency = s->latencyFor(la);
-    if (s->offline) { s->direct = false; s->directMix = 0; }  // offline: the AI voice from the start, lined up
     const int64_t ringSize = (int64_t)(chainRate * 4) + maxFrames;
     s->in.init(ringSize);
     s->out.init(ringSize);
@@ -1250,6 +1244,7 @@ void voicestream_get_stats(const VoiceStream *stream, VoiceStreamStats *out) {
     out->cpuShare = stream->cpuShare.load();
     out->lookaheadMs = stream->laShown.load(std::memory_order_relaxed) * 10;
     out->switches = stream->switches.load();
+    out->aiNow = stream->aiNow.load(std::memory_order_relaxed);
 }
 
 }  // extern "C"

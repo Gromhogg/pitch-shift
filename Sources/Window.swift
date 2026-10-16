@@ -2534,10 +2534,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     private func refreshDelay() {
-        let text = delayText(for: realism.value)
+        // while the plain voice changer stands in for the AI voice (loading, starting, a late piece), the card says so
+        let text = delayText(for: realism.value) + (showsBackup ? " · backup voice" : "")
         if delayLabel.stringValue != text { delayLabel.stringValue = text }
-        realism.setAccessibilityValueDescription(delayText(for: realism.value, spoken: true))
+        realism.setAccessibilityValueDescription(delayText(for: realism.value, spoken: true) + (showsBackup ? ", backup voice for now" : ""))
     }
+    private var showsBackup = false  // set by showChanger
 
     // MARK: Switches
 
@@ -2834,7 +2836,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
         if realismApply == nil { realism.value = realisticOffered ? voice.changer.realism : 0 }  // (not while it moves)
         realism.isEnabled = active && hasRealistic && realisticOffered
-        refreshDelay()
 
         enum Look { case natural, loading, realistic, fallback(Int), unavailable(String) }
         var look: Look
@@ -2850,7 +2851,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             if preview.contains("changer-realistic") { look = .realistic }
             if preview.contains("changer-fallback") { look = .fallback(3) }
         }
-        var note: String?, loading = false, warning = false
+        var note: String?, loading = false, warning = false, backup = false
         if !realisticOffered {
             note = "The more real voices need a Mac with Apple silicon"
         } else if let chosen, !hasRealistic {
@@ -2859,17 +2860,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             switch look {
             case .loading:
                 loading = true
-                note = VoiceModelStore.shared.loadingNote(chosen) + " Natural plays meanwhile."
+                backup = true
+                note = VoiceModelStore.shared.loadingNote(chosen) + " The backup voice (Natural) plays meanwhile."
             case .fallback(let misses):
                 warning = true
-                note = "The realistic voice fell behind \(misses == 1 ? "once" : "\(misses) times"). Natural filled in."
+                backup = true
+                note = "The realistic voice fell behind \(misses == 1 ? "once" : "\(misses) times"). The backup voice (Natural) filled in."
             case .unavailable(let reason):
                 warning = true
+                backup = true
                 note = reason
             case .natural, .realistic:
                 break
             }
         }
+        showsBackup = backup
+        refreshDelay()
         if realisticLoading.isHidden == loading {
             realisticLoading.isHidden = !loading
             if loading { realisticLoading.startAnimation(nil) } else { realisticLoading.stopAnimation(nil) }

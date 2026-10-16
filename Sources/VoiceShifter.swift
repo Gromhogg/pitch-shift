@@ -1304,7 +1304,10 @@ final class VoiceShifter {
     // in until the models are ready); they are freed when Realistic goes off.
     private let models = VoiceModelStore.shared
     private var aiPolling = false
-    private var lastMisses: Int64 = 0, missesAt = Date.distantPast
+    // The AI stream's counts at the last look (once a second), for the chain they came from, and until when the
+    // window says Natural filled in.
+    private weak var seenChain: VoiceChain?
+    private var seenMisses: Int64 = 0, seenFilled: Double = 0, filledUntil = Date.distantPast
     var micUID: String? { didSet { if oldValue != micUID { rebuild() } } }  // nil = the Mac's default mic
     var onChange: () -> Void = {}
     var testSource: ((UnsafeMutablePointer<Float>, Int) -> Void)?
@@ -1408,6 +1411,12 @@ final class VoiceShifter {
         params.withLock { $0.silent = silent }
     }
 
+    // The AI voice's fixed delay in seconds (0 without the AI voice): what is said comes out this much later.
+    var aiDelay: Double {
+        guard let ms = chain?.aiStats?.latencyMs, ms > 0 else { return 0 }
+        return ms / 1000
+    }
+
     // With the voice off (only the Soundboard running) the voice goes through unchanged, and the voice changer only
     // runs while "Your voice" is on.
     private func pushParams() {
@@ -1490,16 +1499,29 @@ final class VoiceShifter {
         #endif
     }
 
+    // What the window shows: the AI voice only while it is what plays; "backup voice" (loading or fallback) whenever
+    // Natural plays instead: while the models load, before the first AI piece, and while (or since the last look, a
+    // second ago) late pieces were filled in.
     private func realisticState() -> ChangerState {
         guard let entry = VoiceLibrary.shared.voice(changer.voiceID) else { return .unavailable("no voice") }
         guard entry.manifest.realistic != nil else { return .unavailable("\(entry.name) has no AI voice") }
         switch models.status {
         case .failed(let id, let why) where id == entry.id: return .unavailable(why)
         case .ready(let id) where id == entry.id:
-            guard let ai = chain?.aiStats else { return .realistic }  // nobody listening yet: ready to go
-            if ai.stats.loaded == 0 { return .loading }               // fading in
-            if ai.stats.misses > lastMisses { lastMisses = ai.stats.misses; missesAt = Date() }
-            return Date().timeIntervalSince(missesAt) < 10 ? .fallback(misses: Int(ai.stats.misses)) : .realistic
+            guard let chain, let ai = chain.aiStats else { return .realistic }  // nobody listening yet: ready to go
+            if seenChain !== chain {  // a new chain counts from 0
+                seenChain = chain
+                seenMisses = 0
+                seenFilled = 0
+                filledUntil = .distantPast
+            }
+            if ai.stats.loaded == 0 { return .loading }  // starting: Natural until the first AI piece plays
+            if ai.stats.aiNow == 0 || ai.stats.misses > seenMisses || ai.stats.fallbackSeconds > seenFilled + 0.001 {
+                filledUntil = Date().addingTimeInterval(1.2)  // shown at least until the next look
+            }
+            seenMisses = ai.stats.misses
+            seenFilled = ai.stats.fallbackSeconds
+            return Date() < filledUntil ? .fallback(misses: max(1, Int(ai.stats.misses))) : .realistic
         default: return .loading
         }
     }
@@ -1702,7 +1724,9 @@ final class Recorder {
     }
 }
 
-// The Test button: record 5 seconds of what Pitch Shift Mic sends, then play it back.
+// The Test button: record 5 seconds of what Pitch Shift Mic sends, then play it back. With the AI voice on, what is
+// said comes out its fixed delay later (0.3 to 1 s): the recording goes on that much longer and is played from that
+// point, so the clip holds the 5 seconds said, all in the AI voice (not the quiet start of a new AI stream).
 final class VoiceTest {
     enum Phase: Equatable { case idle, recording(Int), playing }
     private(set) var phase: Phase = .idle
@@ -1712,6 +1736,7 @@ final class VoiceTest {
     private var countdown: DispatchWorkItem?
     private var engine: AVAudioEngine?
     private let seconds = 5
+    private var skip: Double = 0  // the AI voice's delay: recorded on top, left out of the clip
 
     init(voice: VoiceShifter) { self.voice = voice }
 
@@ -1731,8 +1756,9 @@ final class VoiceTest {
     private func startRecording() {
         guard let mic = Mics.virtualMic else { NSSound.beep(); return }
         voice.hold(true)
+        skip = voice.aiDelay
         do {
-            recorder = try Recorder(device: mic, seconds: Double(seconds))
+            recorder = try Recorder(device: mic, seconds: Double(seconds) + skip)
         } catch {
             voice.hold(false)
             NSSound.beep()
@@ -1741,21 +1767,22 @@ final class VoiceTest {
         tick(seconds)
     }
 
-    // Counts down once a second while recording.
+    // Counts down once a second while recording (the last second also covers the AI voice's delay).
     private func tick(_ left: Int) {
         guard left > 0 else { finishRecording(); return }
         setPhase(.recording(left))
         let work = DispatchWorkItem { [weak self] in self?.tick(left - 1) }
         countdown = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1 + (left == 1 ? skip : 0), execute: work)
     }
 
     private func finishRecording() {
         countdown?.cancel()
         countdown = nil
         guard let recorder else { return }
-        let samples = recorder.finish()
         let rate = recorder.sampleRate
+        let recorded = recorder.finish()
+        let samples = Array(recorded.dropFirst(min(recorded.count, Int(skip * rate))))  // from what was said first on
         self.recorder = nil
         let peak = samples.reduce(Float(0)) { max($0, abs($1)) }
         guard peak > 0.001, let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1),
