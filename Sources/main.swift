@@ -229,7 +229,9 @@ if let pid = arg("--watchdog").flatMap({ pid_t($0) }) { DefaultMic.watch(pid) }
 // owner's headphones. Otherwise they stop right away, before touching any device.
 func refuseIfMicsBusy() {
     let me = ProcessInfo.processInfo.processIdentifier
-    if NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "local.pitch-shift")
+    // (also the installed app's own name: a copy of the app with another bundle name must still see it)
+    let names = Set([Bundle.main.bundleIdentifier ?? "local.pitch-shift", "local.pitch-shift"])
+    if names.flatMap({ NSRunningApplication.runningApplications(withBundleIdentifier: $0) })
         .contains(where: { $0.processIdentifier != me }) {
         print("Not starting: the Pitch Shift app is open (its voice or sound would mix into the test). Nothing was changed; try again later.")
         exit(2)
