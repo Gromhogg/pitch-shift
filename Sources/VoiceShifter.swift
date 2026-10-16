@@ -9,6 +9,18 @@ import os
 let virtualMicUID = "PitchShiftMic_UID"        // the mic people see
 let virtualMicFeedUID = "PitchShiftMic_2_UID"  // its hidden other side, which the app writes into
 
+// The delay a device adds in one direction as the Mac reports it (seconds): its latency, its stream's latency and
+// its safety offset.
+func deviceDelay(_ id: AudioObjectID, _ scope: AudioObjectPropertyScope) -> Double {
+    let rate = nominalRate(id)
+    guard rate > 0 else { return 0 }
+    let latency = getValue(id, kAudioDevicePropertyLatency, scope, default: UInt32(0))
+    let safety = getValue(id, kAudioDevicePropertySafetyOffset, scope, default: UInt32(0))
+    let stream = getArray(id, kAudioDevicePropertyStreams, scope, of: AudioStreamID.self).first
+        .map { getValue($0, kAudioStreamPropertyLatency, default: UInt32(0)) } ?? 0
+    return Double(latency) / rate + Double(safety) / rate + Double(stream) / rate
+}
+
 struct MicInfo: Equatable {
     let uid: String
     let name: String
@@ -76,12 +88,28 @@ struct VoiceParams: @unchecked Sendable {
     var strength: Float = 1                               // the voice changer's strength, 0 ... 1
 }
 
-// The voice changer card's settings: on/off, which voice (VoiceLibrary id), how strong, and Realistic (AI) or not.
+// The voice changer card's settings: on/off, which voice (VoiceLibrary id), how strong, and the "Faster ↔ More real"
+// slider: 0 = Natural (no AI, the least delay), from `aiStart` on the AI voice (Apple silicon), hearing more of what
+// comes next (look-ahead) the further right it is: up to `maxLookaheadMs` at 1 (about a second in all).
 struct ChangerSettings: Equatable {
+    static let aiStart: Float = 0.05         // the first slider position with the AI voice (no look-ahead)
+    static let maxLookaheadMs = 700
+    static let defaultRealism: Float = 0.25  // the AI voice with 150 ms of look-ahead: the least delay without stutters
     var on = false
     var voiceID = "woman"
     var strength: Float = 1
-    var realistic = false
+    var realism: Float = 0
+    var realistic: Bool { realism >= Self.aiStart }  // the AI voice
+    // How much the AI voice hears ahead (10 ms steps): 0 at aiStart, maxLookaheadMs at 1.
+    var lookaheadMs: Int {
+        guard realistic else { return 0 }
+        let share = (min(1, realism) - Self.aiStart) / (1 - Self.aiStart)
+        return Int((share * Float(Self.maxLookaheadMs) / 10).rounded()) * 10
+    }
+    // The slider position for a look-ahead (the inverse of lookaheadMs).
+    static func realism(lookaheadMs: Int) -> Float {
+        aiStart + (1 - aiStart) * Float(max(0, min(maxLookaheadMs, lookaheadMs))) / Float(maxLookaheadMs)
+    }
 }
 
 // What the voice changer is doing, for the window.
@@ -860,6 +888,7 @@ final class VoiceChain {
     // (Sources/Voice/VoiceModel.h). Made with the chain when Realistic is on; its models may come later (attach).
     private var ai: OpaquePointer?
     let realisticID: String?  // the voice the AI stream is for (nil = no AI stream)
+    private(set) var callbackFrames = 128  // the sound callback's size (samples)
     // Sound effects (Soundboard): mixed in after the voice, never through the mic or the pitch change.
     private let sounds: OSAllocatedUnfairLock<SoundPlay>
     private var callMix: CallMix
@@ -877,7 +906,7 @@ final class VoiceChain {
     // median pitch as an earlier chain measured it (so a new chain doesn't start from a guess).
     init(mic: AudioDeviceID, feed: AudioDeviceID, params: OSAllocatedUnfairLock<VoiceParams>, sounds: OSAllocatedUnfairLock<SoundPlay>,
          bufferFrames: UInt32? = nil, testSource: ((UnsafeMutablePointer<Float>, Int) -> Void)? = nil,
-         changerTune: [(String, Float)] = [], realistic: (id: String, model: OpaquePointer?)? = nil,
+         changerTune: [(String, Float)] = [], realistic: (id: String, model: OpaquePointer?, lookaheadMs: Int)? = nil,
          speaker: (hz: Float, frames: Float)? = nil) throws {
         realisticID = realistic?.id
         self.testSource = testSource  // set before the sound starts, so a test never sends the real mic
@@ -948,10 +977,16 @@ final class VoiceChain {
         if range.mMaximum > 0 { frames = UInt32(min(max(Double(frames), range.mMinimum), range.mMaximum)) }
         var sizeAddress = address(kAudioDevicePropertyBufferFrameSize)
         AudioObjectSetPropertyData(aggregate, &sizeAddress, 0, nil, UInt32(MemoryLayout<UInt32>.size), &frames)
+        callbackFrames = Int(getValue(aggregate, kAudioDevicePropertyBufferFrameSize, default: frames))
         if let realistic {  // the AI voice: its delay includes one callback, so it is made once the size is known
             let callback = getValue(aggregate, kAudioDevicePropertyBufferFrameSize, default: frames)
-            ai = voicestream_new(realistic.model, rate, Int32(max(callback, 1)), 0, nil)
-            if let ai { for (key, value) in changerTune { _ = voicestream_tune(ai, key, value) } }
+            var config = VoiceStreamConfig(hopMs: 160, contextMs: 480, crossfadeMs: 40, solaMs: 10, reserveMs: 70,
+                                           lookaheadMs: Int32(realistic.lookaheadMs))
+            ai = voicestream_new(realistic.model, rate, Int32(max(callback, 1)), 0, &config)
+            if let ai {
+                voicestream_set_intonation(ai, Self.aiIntonation(start))
+                for (key, value) in changerTune { _ = voicestream_tune(ai, key, value) }
+            }
         }
         overloadListener = Listener(aggregate, kAudioDeviceProcessorOverload) { [weak self] in
             self?.stats.withLock { $0.overloads += 1 }
@@ -1148,6 +1183,7 @@ final class VoiceChain {
         // The voice changer: a new voice or strength glides there; turning it on or off blends over 0.15 s.
         if latest.changer != applied.changer || latest.strength != applied.strength {
             voicechanger_set(changer, latest.changer, latest.strength)
+            if let ai { voicestream_set_intonation(ai, Self.aiIntonation(latest)) }
         }
         let changerWasActive = stretcher.changerActive
         let changerToggled = (latest.changer != nil) != stretcher.changerOn
@@ -1180,6 +1216,18 @@ final class VoiceChain {
     func attach(model: OpaquePointer) -> Bool {
         guard let ai else { return false }
         return voicestream_set_model(ai, model) != 0
+    }
+
+    // Realistic: another look-ahead ("Faster ↔ More real"), without making the chain again: the AI voice keeps
+    // playing and moves to the new delay at the next quiet moment (main thread).
+    func setLookahead(_ ms: Int) {
+        if let ai { voicestream_set_lookahead(ai, Int32(ms)) }
+    }
+
+    // The intonation the AI voice's pitch frames come with (the changer makes the speaker's moves this much bigger).
+    static func aiIntonation(_ p: VoiceParams) -> Float {
+        guard let voice = p.changer else { return 0 }
+        return 1 + max(0, min(1, p.strength)) * (voice.pointee.intonation - 1)
     }
 
     // Realistic: what the AI voice is doing, and its fixed delay in ms (nil without an AI stream).
@@ -1400,6 +1448,37 @@ final class VoiceShifter {
         onChange()
     }
 
+    // The AI voices run on Apple silicon only.
+    static var aiRuns: Bool {
+        #if arch(arm64)
+        return true
+        #else
+        return false
+        #endif
+    }
+
+    // "Delay: about …" on the Voice changer card: from the mic to the call, in seconds, for these settings. The
+    // processing (Natural: the shifter and its waiting sound, as the running chain measures it, else 45 ms; AI: the
+    // stream's fixed delay at this look-ahead), the sound waiting one callback in and out, and what the mic and Pitch
+    // Shift Mic add as the Mac reports them.
+    func changerDelay(for settings: ChangerSettings) -> Double {
+        let mic = chain?.devices.first ?? currentMic
+        let rate = chain?.sampleRate ?? mic.map(nominalRate).flatMap { $0 > 0 ? $0 : nil } ?? 48000
+        let callback = Double(chain?.callbackFrames ?? (rate > 48000 ? 256 : 128))
+        var seconds: Double
+        if settings.realistic && Self.aiRuns {
+            let model = models.model(for: VoiceLibrary.shared.voice(settings.voiceID)?.id ?? "")
+            seconds = voicestream_delay_ms(model, rate, Int32(callback), Int32(settings.lookaheadMs)) / 1000 + callback / rate
+        } else {
+            let measured = chain.map { c in c.stats.withLock { $0.changing && $0.sending ? Double($0.delay) / c.sampleRate : 0 } } ?? 0
+            seconds = (measured > 0 ? measured : 0.045) + 2 * callback / rate
+        }
+        if let mic { seconds += deviceDelay(mic, kAudioDevicePropertyScopeInput) }
+        if let feed = Mics.virtualFeed { seconds += deviceDelay(feed, kAudioDevicePropertyScopeOutput) }
+        if let virtualMic = Mics.virtualMic { seconds += deviceDelay(virtualMic, kAudioDevicePropertyScopeInput) }
+        return seconds
+    }
+
     // The voice the AI is wanted for now (nil = Realistic is off, or this Mac can't run it).
     private var realisticWanted: VoiceEntry? {
         #if arch(arm64)
@@ -1430,6 +1509,7 @@ final class VoiceShifter {
     private func updateRealistic() {
         let want = realisticWanted
         if let want { models.want(want) }
+        if let chain, want != nil, chain.realisticID == want?.id { chain.setLookahead(changer.lookaheadMs) }  // no new chain
         if running, let chain, chain.realisticID != want?.id {
             DispatchQueue.main.async { [weak self] in  // not from inside pushParams
                 guard let self, let current = self.chain, current.realisticID != self.realisticWanted?.id else { return }
@@ -1525,7 +1605,7 @@ final class VoiceShifter {
             stopLater = nil
             if chain == nil {
                 do {
-                    let ai = realisticWanted.map { (id: $0.id, model: models.model(for: $0.id)) }
+                    let ai = realisticWanted.map { (id: $0.id, model: models.model(for: $0.id), lookaheadMs: changer.lookaheadMs) }
                     let made = try VoiceChain(mic: mic, feed: feed, params: params, sounds: sounds,
                                               bufferFrames: testBufferFrames, testSource: testSource, changerTune: changerTune,
                                               realistic: ai, speaker: lastSpeaker)

@@ -16,12 +16,21 @@
 // libsamplerate keeps output sample i exactly at input time i / ratio; it only hands it over a little later (its
 // "lag", measured once), which the fixed delay includes.
 //
-// Model files (made by research/voicechanger/pack_voices.sh):
+// Look-ahead (models in the "ahead" shape): the window still ends at the newest sound, but the piece that is made
+// comes from LA frames earlier, so the speech reader hears LA frames of what comes after it (no more guessing at a
+// cut-off word; adds LA to the delay). The ring index of piece k stays k * hop, so changing LA never moves where the
+// sound thread reads: only what the next pieces hold (the switch waits for a quiet moment, so nothing is heard twice).
+// The pitch the AI follows is smoothed over the frames on both sides of each frame (they are known by then).
+// A new live stream plays Natural's sound as it is (no added delay) until its first quiet moment with the AI voice
+// ready, then moves to the fixed delay: so starting it never makes a gap.
+//
+// Model files (made by research/voicechanger/pack_voices.sh, look-ahead shape by convert_generator.py --ahead):
 //   encoder  in "audio" Float32 [1, T*160] (16 kHz) -> out "features" Float32 [1, T/2, 768]
 //   voice    in "features" [1, T/2, 768], "pitch" Int32 [1, T], "source" Float32 [1, 1, DEC*upp],
 //            "noise" Float32 [1, 192, FLOW] -> out "audio" Float32 [1, DEC*upp]
+//            look-ahead shape: also "pick" Int32 [DEC] (the window frames to decode); FLOW = T
 //   metadata: rate, upp, window_frames (T), dec_frames, flow_frames, hop_ms, context_ms (+ xfade_ms, sola_ms,
-//   margin_ms on newer files).
+//   margin_ms on newer files; + right_ms, max_ahead_ms, pick_frames in the look-ahead shape).
 #include "VoiceModel.h"
 
 #include <cstdio>
@@ -59,6 +68,7 @@ const int kNoiseChannels = 192;
 const int kZpFrames = 4096;    // fixed z-noise table: 192 x 4096
 const int kSourceNoise = 1 << 18;
 const int kPitchSlots = 2048;  // 20 s of 10 ms pitch frames
+const int kEdgeFrames = 5;     // less look-ahead than this (10 ms frames): the pieces are made at the window's end
 
 double nowMs() {
     static mach_timebase_info_data_t tb = [] { mach_timebase_info_data_t t; mach_timebase_info(&t); return t; }();
@@ -248,13 +258,16 @@ struct VoiceModel {
     MLModel *voice = nil;
     int unitsEncoder = 0, unitsVoice = 0;
     bool cpuOnly = false;          // fell back to the CPU (or asked for it): needs the bigger reserve
-    int encoderSamples = 0;        // T * 160
-    int featureFrames = 0;         // T / 2
+    int encoderSamples = 0;        // the encoder's window * 160 (T * 160, or more: then the voice gets the newest part)
+    int featureFrames = 0;         // the encoder's window / 2
     int T = 0;                     // pitch frames (10 ms)
     int decSamples = 0;            // DEC * upp
     int flowFrames = 0;            // FLOW
     int rate = 48000, upp = 480;
     int hopMs = 160, contextMs = 0, decFrames = 0, xfadeMs = 40, solaMs = 10, marginMs = 60;
+    bool picks = false;            // look-ahead shape: the "pick" input says which window frames to decode
+    int rightMs = 0;               // ... frames decoded after each piece and dropped (the decoder hears past its end)
+    int maxAheadMs = 0;            // ... the most look-ahead it can use
     double loadMs = 0, warmMs = 0, probeHopMs = 0;
     std::string describe;
 };
@@ -264,13 +277,16 @@ namespace {
 // Everything a stream needs for one model (made off the sound thread, then handed to the worker).
 struct Runner {
     VoiceModel *model = nullptr;
-    Buffer audio16, features, pitch, source, noise, audioOut;
+    Buffer audio16, features, pitch, source, noise, audioOut, pick, voiceFeatures;
     id<MLFeatureProvider> encoderIn = nil, voiceIn = nil;
     MLPredictionOptions *encoderOptions = nil, *voiceOptions = nil;
     std::vector<float> sourceNoise;   // kSourceNoise values
     std::vector<float> zp;            // kNoiseChannels x kZpFrames
     std::vector<double> f0;           // T values, Hz
+    std::vector<float> st, level;     // T values: pitch in half-steps (0 = not voiced), input loudness (dB)
+    std::vector<uint8_t> known;       // T values: 1 = the pitch tracker has decided this frame
     std::vector<float> y, block, tail, sola, fadeIn, fadeOut, gains;
+    std::vector<float> prevTail;      // research trace only
 };
 
 bool predict(MLModel *m, id<MLFeatureProvider> in, MLPredictionOptions *opt, NSString *outName, Buffer &out) {
@@ -287,17 +303,26 @@ bool makeRunner(VoiceModel *m, Runner &r) {
     NSError *why = nil;
     if (!r.audio16.make(@[@1, @(m->encoderSamples)], MLMultiArrayDataTypeFloat32)) return false;
     if (!r.features.make(@[@1, @(m->featureFrames), @(kFeatureDim)], MLMultiArrayDataTypeFloat32)) return false;
+    // an encoder with a longer window than the voice (a voice made for a shorter one): the voice gets its newest part
+    const bool longer = m->featureFrames > m->T / 2;
+    if (longer && !r.voiceFeatures.make(@[@1, @(m->T / 2), @(kFeatureDim)], MLMultiArrayDataTypeFloat32)) return false;
     if (!r.pitch.make(@[@1, @(m->T)], MLMultiArrayDataTypeInt32)) return false;
     if (!r.source.make(@[@1, @1, @(m->decSamples)], MLMultiArrayDataTypeFloat32)) return false;
     if (!r.noise.make(@[@1, @(kNoiseChannels), @(m->flowFrames)], MLMultiArrayDataTypeFloat32)) return false;
     if (!r.audioOut.make(@[@1, @(m->decSamples)], MLMultiArrayDataTypeFloat32)) return false;
+    if (m->picks && !r.pick.make(@[@(m->decFrames)], MLMultiArrayDataTypeInt32)) return false;
     r.encoderIn = [[MLDictionaryFeatureProvider alloc] initWithDictionary:@{@"audio" : [MLFeatureValue featureValueWithMultiArray:r.audio16.array]} error:&why];
-    r.voiceIn = [[MLDictionaryFeatureProvider alloc] initWithDictionary:@{
-        @"features" : [MLFeatureValue featureValueWithMultiArray:r.features.array],
+    NSMutableDictionary *voiceInputs = [@{
+        @"features" : [MLFeatureValue featureValueWithMultiArray:(longer ? r.voiceFeatures : r.features).array],
         @"pitch" : [MLFeatureValue featureValueWithMultiArray:r.pitch.array],
         @"source" : [MLFeatureValue featureValueWithMultiArray:r.source.array],
         @"noise" : [MLFeatureValue featureValueWithMultiArray:r.noise.array],
-    } error:&why];
+    } mutableCopy];
+    if (m->picks) {
+        for (int i = 0; i < m->decFrames; i++) r.pick.i()[i] = m->T - m->decFrames + i;  // (no look-ahead until a hop says)
+        voiceInputs[@"pick"] = [MLFeatureValue featureValueWithMultiArray:r.pick.array];
+    }
+    r.voiceIn = [[MLDictionaryFeatureProvider alloc] initWithDictionary:voiceInputs error:&why];
     if (!r.encoderIn || !r.voiceIn) return false;
     r.encoderOptions = [MLPredictionOptions new];
     r.encoderOptions.outputBackings = @{@"features" : r.features.array};
@@ -310,8 +335,21 @@ bool makeRunner(VoiceModel *m, Runner &r) {
     r.zp.resize((size_t)kNoiseChannels * kZpFrames);
     for (auto &v : r.zp) v = gz.next();
     r.f0.assign((size_t)m->T, 0.0);
+    r.st.assign((size_t)m->T, 0.0f);
+    r.level.assign((size_t)m->T, -120.0f);
+    r.known.assign((size_t)m->T, 0);
     r.y.assign((size_t)m->decSamples, 0.0f);
     return true;
+}
+
+// The fixed delay (chain samples) for a stream with these piece sizes; the same sum for voicestream_new and the
+// window's delay line. hop/xfade/sola/reserve/lookahead in ms.
+int latencyFrames(double rate, int maxFrames, bool offline, int hopMs, int xfadeMs, int solaMs, int reserveMs, int lookaheadMs,
+                  double inLag16, double outLag) {
+    const int lags = (int)std::ceil(inLag16 * rate / kRate16) + (int)std::ceil(outLag);
+    if (offline) return (int)std::llround((hopMs + xfadeMs + solaMs + lookaheadMs) * rate / 1000) + lags + 64;
+    return (int)std::llround((hopMs + xfadeMs + solaMs + reserveMs + lookaheadMs) * rate / 1000) + lags
+         + std::min(maxFrames, (int)(rate * 0.011));
 }
 
 }  // namespace
@@ -323,8 +361,7 @@ struct VoiceStream {
     bool offline = false;
     int H = 16, X = 4, S = 1;      // hop, crossfade, search (10 ms frames)
     int reserveMs = 60;
-    int latency = 0;               // chain samples
-    int64_t aheadA = 0;            // converted stream index - input index ((X + S) * 10 ms)
+    int baseBack = 0;              // chain samples from "now" back to the converted index being played (no look-ahead part)
     double inLag16 = 0;            // 16 kHz samples the input resampler holds back
     double outLag = 0;             // chain samples the output resampler holds back
     int rampLen = 480;             // 10 ms crossfade between the AI voice and Natural
@@ -343,6 +380,14 @@ struct VoiceStream {
     std::atomic<int64_t> outFinal{0};  // converted samples final up to here
     std::atomic<int64_t> outProv{0};   // ... plus a provisional tail up to here (late hops fade out on it)
     std::atomic<int64_t> outStart{INT64_MAX};  // first converted index ever written (after a model is attached)
+    // Look-ahead switches (and the first start of the AI voice): from converted index `junctionAt` on, the sound is
+    // `junctionLatency` behind the mic (Natural's fill-in must line up with that from there on).
+    std::atomic<int64_t> junctionAt{INT64_MIN};
+    std::atomic<int> junctionLatency{0};
+
+    // any thread -> worker
+    std::atomic<int> laWant{0};    // look-ahead asked for (10 ms frames)
+    std::atomic<int> laShown{0};   // worker -> stats: the look-ahead in use
 
     // worker state
     std::atomic<VoiceModel *> pending{nullptr};
@@ -356,6 +401,13 @@ struct VoiceStream {
     int64_t phaseAt = INT64_MIN;   // model-rate sample where `phase` applies
     double phase = 0;
     float lastGain = 0;
+    int lastO = 0;                 // the last piece's crossfade offset (samples)
+    int laNow = 0;                 // look-ahead the pieces are made with now (10 ms frames)
+    bool started = false;          // the AI voice has been switched in (live: at a quiet moment)
+    int64_t askedAtHop = -1;       // hop when the look-ahead asked for first differed from the one in use
+    std::vector<float> levels = std::vector<float>(500, -120.0f), sorted;  // input frame levels, last 5 s (dB)
+    int64_t levelsAt = 0;
+    float floorDb = -120;
     std::vector<float> scratch, scratch16;
     pthread_t thread{};
     bool threadStarted = false;
@@ -369,15 +421,36 @@ struct VoiceStream {
     float mix = 0;                 // 1 = the AI voice, 0 = Natural
     bool playing = false;          // the AI voice has played (so a fall back counts as a miss)
     bool lateNow = false;
+    bool direct = true;            // live, before the AI voice starts: Natural plays with no added delay
+    int playLatency = 0;           // Natural's fill-in lines up with this delay
+    int64_t junctionSeen = INT64_MIN;
+    float directMix = 1;           // 1 = Natural as it is (direct), 0 = delayed to playLatency
 
     // tuning (tests)
     std::atomic<int> slowMs{0}, slowEvery{1};
     std::atomic<float> gainMaxDb{18};
+    std::atomic<int> smoothFrames{1};   // pitch smoothing half-width (frames on each side)
+    std::atomic<int> slowFrames{7};     // the melody line's half-width (frames on each side)
+    std::atomic<float> intonation{0};   // the voice's intonation in use (0 = don't reshape the pitch line)
+    std::atomic<int> gapFrames{8};      // short unvoiced gaps bridged inside a loud sound (a voiced consonant, a flicker)
+    std::atomic<int> onsetFrames{3};    // unvoiced frames just before a vowel that take its first pitch
+    std::atomic<int> solaMode{-1};      // -1 = by look-ahead: with it the pieces line up already, so the crossfade keeps
+                                        // the timing (a search would skip or repeat bits of sound); without, it searches
+                                        // 0 = search the whole range, 1 = keep the timing, 2 = search near the last one
+    std::atomic<int> gainMs{50};        // loudness match window (ms; 20 before 3.1: it pumped the AI voice's own loudness)
+    std::atomic<float> quietDb{-45};    // a frame this quiet (dBFS) counts as a pause (for look-ahead switches)
+    FILE *trace = nullptr;              // research: per-piece trace (offline only, PITCHSHIFT_AI_TRACE)
 
     // stats
     std::atomic<int> loaded{0};
-    std::atomic<int64_t> hops{0}, misses{0}, fallbackFrames{0}, skipped{0};
+    std::atomic<int64_t> hops{0}, misses{0}, fallbackFrames{0}, skipped{0}, switches{0};
     std::atomic<double> sumHopMs{0}, worstHopMs{0}, cpuShare{0};
+
+    int maxAhead() const { return run ? run->model->maxAheadMs / 10 : 0; }
+
+    int latencyFor(int la) const {
+        return latencyFrames(rate, maxFrames, offline, H * 10, X * 10, S * 10, reserveMs, la * 10, inLag16, outLag);
+    }
 
     // ------------------------------------------------------------------------------------------- worker side
     // Moves new mic sound through the 16 kHz resampler.
@@ -396,14 +469,16 @@ struct VoiceStream {
     }
 
     // Target pitch (Hz) at chain-sample position c, from A1's tracker frames (nearest one; newer than the newest
-    // frame: hold the newest).
-    double pitchAt(double c, int64_t pend, int64_t &cursor) const {
+    // frame: hold the newest, and say it is not known yet).
+    double pitchAt(double c, int64_t pend, int64_t &cursor, bool &isKnown) const {
+        isKnown = false;
         if (pend <= 0) return 0;
         int64_t oldest = std::max<int64_t>(0, pend - kPitchSlots + 8);
         if (cursor < oldest) cursor = oldest;
         while (cursor + 1 < pend && pitchPos[(size_t)((cursor + 1) % kPitchSlots)] <= c) cursor++;
         int64_t a = cursor, b = std::min(cursor + 1, pend - 1);
         double pa = (double)pitchPos[(size_t)(a % kPitchSlots)], pb = (double)pitchPos[(size_t)(b % kPitchSlots)];
+        isKnown = c <= pb + rate * 0.005;
         if (c >= pb) return pitchHz[(size_t)(b % kPitchSlots)];  // the newest frames lack look-ahead: hold
         if (c < pa - rate * 0.02) return 0;
         return std::fabs(c - pa) <= std::fabs(pb - c) ? pitchHz[(size_t)(a % kPitchSlots)] : pitchHz[(size_t)(b % kPitchSlots)];
@@ -417,31 +492,160 @@ struct VoiceStream {
         return (int)std::lrint(m);
     }
 
-    // One hop: frames [E - T, E). Returns false if the models failed.
-    bool makeHop(int64_t E) {
-        Runner &r = *run;
-        VoiceModel &m = *r.model;
-        const int T = m.T, upp = m.upp, DEC = m.decFrames, FLOW = m.flowFrames;
-        const int M = DEC - H - X - S;
-        double t0 = nowMs();
-        // 1. the window at 16 kHz
-        in16.get((E - T) * kFrame16, r.audio16.f(), T * kFrame16, 0);
-        // 2. pitch for every frame (frame j's centre is 16 kHz sample 160 j + 80)
+    // Input loudness of 16 kHz frame a (dBFS, 20 ms around its centre).
+    float levelAt(int64_t a) const {
+        double e = 0;
+        for (int i = -kFrame16 / 2; i < kFrame16 * 3 / 2; i++) {
+            int64_t p = a * kFrame16 + i;
+            float v = p < 0 ? 0 : in16.at(p);
+            e += v * v;
+        }
+        return (float)(10 * std::log10(e / (2 * kFrame16) + 1e-12));
+    }
+
+    // Zero crossings per sample of 16 kHz frame a (hiss like "s" crosses often, a voice seldom).
+    float crossingsAt(int64_t a) const {
+        int n = 0;
+        float prev = a * kFrame16 > 0 ? in16.at(a * kFrame16 - 1) : 0.0f;
+        for (int i = 0; i < kFrame16; i++) {
+            const int64_t p = a * kFrame16 + i;
+            const float v = p < 0 ? 0 : in16.at(p);
+            if ((v >= 0) != (prev >= 0)) n++;
+            prev = v;
+        }
+        return (float)n / kFrame16;
+    }
+
+    // Is the input quiet over 16 kHz frames [a, b)? Quiet = below quietDb, or within 6 dB of the room's own noise
+    // (the 10th percentile of the last 5 s, so a noisy room has pauses too). Frames before the stream started count.
+    bool quiet(int64_t a, int64_t b) {
+        noteLevels();
+        const float q = std::max(quietDb.load(), floorDb + 6);
+        for (int64_t f = std::max<int64_t>(a, 0); f < b; f++)
+            if (levelAt(f) > q) return false;
+        return true;
+    }
+
+    // The room's noise level (worker thread, before a quiet check).
+    void noteLevels() {
+        const int64_t newest = in16End / kFrame16 - 2;
+        if (levelsAt < newest - (int64_t)levels.size()) levelsAt = newest - (int64_t)levels.size();
+        for (; levelsAt < newest; levelsAt++) levels[(size_t)(levelsAt % (int64_t)levels.size())] = levelAt(levelsAt);
+        const size_t have = (size_t)std::min<int64_t>(levelsAt, (int64_t)levels.size());
+        if (have < 50) { floorDb = -120; return; }
+        sorted.assign(levels.begin(), levels.begin() + (long)have);
+        std::nth_element(sorted.begin(), sorted.begin() + (long)(have / 10), sorted.end());
+        floorDb = sorted[have / 10];
+    }
+
+    // The pitch the AI voice follows, for the window's T frames (window frame t = 16 kHz frame E - T + t):
+    // A1's tracker frames (nearest), each voiced frame smoothed with its voiced neighbours on both sides (the frames
+    // after it are known by the time it is made, at least with look-ahead), short unvoiced gaps inside a loud sound
+    // bridged, frames newer than the tracker holding the newest.
+    void windowPitch(int64_t E, Runner &r, bool shapeIt) {
+        const int T = r.model->T;
         int64_t pend = pitchEnd.load(std::memory_order_acquire), cursor = 0;
         const double toChain16 = rate / kRate16;
         for (int t = 0; t < T; t++) {
             int64_t j = E - T + t;
-            double f = j < 0 ? 0 : pitchAt((kFrame16 * (double)j + kFrame16 / 2) * toChain16, pend, cursor);
+            bool k = false;
+            double f = j < 0 ? 0 : pitchAt((kFrame16 * (double)j + kFrame16 / 2) * toChain16, pend, cursor, k);
             r.f0[(size_t)t] = f;
-            r.pitch.i()[t] = coarse(f);
+            r.known[(size_t)t] = j < 0 || k;
+            r.st[(size_t)t] = f > 0 ? (float)(12 * std::log2(f / 100.0)) + 1000 : 0;  // + 1000: 0 stays "not voiced"
         }
-        // 3. NSF source for the last DEC frames at the model rate (phase in double, carried across hops)
-        const int64_t decStart = (E - DEC) * (int64_t)upp;
+        const int gap = shapeIt ? gapFrames.load() : 0;
+        if (gap > 0) {
+            for (int t = 0; t < T; t++) r.level[(size_t)t] = levelAt(E - T + t);
+            for (int t = 1; t < T; t++) {
+                if (r.st[(size_t)t] != 0 || r.st[(size_t)(t - 1)] == 0 || !r.known[(size_t)t]) continue;
+                int e = t;
+                while (e < T && r.st[(size_t)e] == 0 && e - t < gap) e++;
+                if (e >= T || r.st[(size_t)e] == 0 || !r.known[(size_t)e]) continue;  // too long, or not known yet
+                const float edge = std::min(r.level[(size_t)(t - 1)], r.level[(size_t)e]);
+                bool loud = true;
+                for (int u = t; u < e; u++) if (r.level[(size_t)u] < edge - 9) loud = false;  // a stop or a pause: keep it
+                if (!loud) continue;
+                const float a = r.st[(size_t)(t - 1)], b = r.st[(size_t)e];
+                for (int u = t; u < e; u++) r.st[(size_t)u] = a + (b - a) * (float)(u - t + 1) / (float)(e - t + 1);
+                t = e;
+            }
+        }
+        // the start of a vowel: the tracker needs a few frames to call it voiced, and in them the AI voice would
+        // breathe a little "h" (heard as "its" for "a"); a loud, smooth (not hissy) lead-in takes the vowel's first pitch
+        const int onset = shapeIt ? onsetFrames.load() : 0;
+        if (onset > 0) {
+            for (int t = 1; t < T; t++) {
+                if (r.st[(size_t)t] == 0 || r.st[(size_t)(t - 1)] != 0 || !r.known[(size_t)t]) continue;
+                const float lv = levelAt(E - T + t);
+                for (int u = t - 1; u >= std::max(0, t - onset); u--) {
+                    if (r.st[(size_t)u] != 0 || !r.known[(size_t)u]) break;
+                    if (levelAt(E - T + u) < lv - 6 || crossingsAt(E - T + u) > 0.25f) break;
+                    r.st[(size_t)u] = r.st[(size_t)t];
+                }
+            }
+        }
+        // Two smoothed lines over the voiced, known frames: a light one (±w frames: tracker noise out) and a slow one
+        // (±ws: the speaker's melody). The voice's intonation made every move `into` times bigger, small fast ones
+        // too (the wobble of a held note, the little dips at consonants); those go back to the speaker's own size.
+        const int w = shapeIt ? smoothFrames.load() : 0, ws = slowFrames.load();
+        const float into = intonation.load();
+        const bool shape = shapeIt && into > 0.05f && ws > 0 && std::fabs(into - 1) > 1e-3f;
+        auto line = [&](int t, int half) -> double {
+            double sum = 0, wsum = 0;
+            for (int d = -half; d <= half; d++) {
+                int u = t + d;
+                if (u < 0 || u >= T || r.st[(size_t)u] == 0 || !r.known[(size_t)u]) continue;
+                double wt = half + 1 - std::abs(d);
+                sum += wt * r.st[(size_t)u];
+                wsum += wt;
+            }
+            return wsum > 0 ? sum / wsum : (double)r.st[(size_t)t];
+        };
+        for (int t = 0; t < T; t++) {
+            const float v = r.st[(size_t)t];
+            if (v != 0 && (w > 0 || shape) && r.known[(size_t)t]) {
+                double s = w > 0 ? line(t, w) : v;
+                if (shape) {
+                    const double slow = line(t, ws);
+                    s = slow + (s - slow) / into;
+                }
+                r.f0[(size_t)t] = 100.0 * std::exp2((s - 1000) / 12);
+            } else if (v != 0 && !(r.f0[(size_t)t] > 0)) {  // a bridged gap
+                r.f0[(size_t)t] = 100.0 * std::exp2((v - 1000) / 12);
+            }
+            r.pitch.i()[t] = coarse(r.f0[(size_t)t]);
+        }
+    }
+
+    // One hop: the window is frames [E - T, E); this hop's sound comes from frames [A, A + H + X + S) with
+    // A = E - LA - H - X - S. Returns false if the models failed.
+    bool makeHop(int64_t E) {
+        Runner &r = *run;
+        VoiceModel &m = *r.model;
+        const int T = m.T, upp = m.upp, DEC = m.decFrames, FLOW = m.flowFrames;
+        const int LA = laNow;
+        const int64_t A = E - LA - H - X - S;
+        int64_t d0 = A - (m.picks ? m.marginMs / 10 : DEC - H - X - S);  // first decoded frame
+        if (d0 + DEC > E) d0 = E - DEC;                                   // (look-ahead shorter than the right frames)
+        const int M = (int)(A - d0);                                      // this hop's sound starts here in the block
+        double t0 = nowMs();
+        // 1. the window at 16 kHz (the encoder's: T frames, or more for a voice made for a shorter window)
+        const int64_t encFrames = m.encoderSamples / kFrame16;
+        in16.get((E - encFrames) * kFrame16, r.audio16.f(), (int)encFrames * kFrame16, 0);
+        // 2. pitch for every frame (frame j's centre is 16 kHz sample 160 j + 80); with (almost) no look-ahead the
+        // pieces are made at the window's newest end, where the frames are still being decided: no smoothing then
+        // (it would differ from one piece to the next) and the crossfade searches for the best fit, as before
+        const bool atEdge = LA < kEdgeFrames;
+        windowPitch(E, r, !atEdge);
+        if (m.picks) for (int i = 0; i < DEC; i++) r.pick.i()[i] = (int32_t)(d0 - (E - T)) + i;
+        // 3. NSF source for the decoded frames at the model rate (phase in double, carried across hops)
+        const int64_t decStart = d0 * (int64_t)upp;
         double ph = phaseAt == decStart ? phase : 0.0;
         const int64_t keep = decStart + (int64_t)H * upp;
         float *src = r.source.f();
         for (int t = 0; t < DEC; t++) {
-            const double f = r.f0[(size_t)(T - DEC + t)];
+            const double f = r.f0[(size_t)(d0 - (E - T) + t)];
             const double inc = f / modelRate;
             for (int i = 0; i < upp; i++) {
                 const int64_t s = decStart + (int64_t)t * upp + i;
@@ -461,6 +665,10 @@ struct VoiceStream {
             }
         // 5. the models
         if (!predict(m.encoder, r.encoderIn, r.encoderOptions, @"features", r.features)) return false;
+        if (r.voiceFeatures.count) {  // the voice's (shorter) window is the newest part of the encoder's
+            const size_t keep = r.voiceFeatures.count, skip = r.features.count - keep;
+            std::memcpy(r.voiceFeatures.f(), r.features.f() + skip, sizeof(float) * keep);
+        }
         if (!predict(m.voice, r.voiceIn, r.voiceOptions, @"audio", r.audioOut)) return false;
         const int slow = slowMs.load();
         if (slow > 0 && slowEvery.load() > 0 && (hop % slowEvery.load()) == 0) usleep((useconds_t)slow * 1000);
@@ -468,38 +676,48 @@ struct VoiceStream {
         const float *y = r.audioOut.f() + (size_t)M * upp;
         const int hopN = H * upp, xN = X * upp, sN = S * upp;
         int o = 0;
+        const int mode = solaMode.load() >= 0 ? solaMode.load() : (atEdge ? 0 : 1);
         if (hops.load() > 0 && xN > 0 && sN > 0) {
-            double best = -1e30;
-            float energy = 0;
-            vDSP_svesq(y, 1, &energy, (vDSP_Length)xN);
-            for (int k = 0; k <= sN; k++) {
-                float dot = 0;
-                vDSP_dotpr(y + k, 1, r.sola.data(), 1, &dot, (vDSP_Length)xN);
-                double score = dot / std::sqrt((double)energy + 1e-8);
-                if (score > best) { best = score; o = k; }
-                if (k < sN) energy += y[k + xN] * y[k + xN] - y[k] * y[k];
+            if (mode == 1) {
+                o = std::clamp(lastO, 0, sN);  // the pieces line up already: keep the timing
+            } else {
+                const int lo = mode == 2 ? std::max(0, lastO - upp / 10) : 0, hi = mode == 2 ? std::min(sN, lastO + upp / 10) : sN;
+                double best = -1e30;
+                float energy = 0;
+                vDSP_svesq(y + lo, 1, &energy, (vDSP_Length)xN);
+                o = lo;
+                for (int k = lo; k <= hi; k++) {
+                    float dot = 0;
+                    vDSP_dotpr(y + k, 1, r.sola.data(), 1, &dot, (vDSP_Length)xN);
+                    double score = dot / std::sqrt((double)energy + 1e-8);
+                    if (score > best) { best = score; o = k; }
+                    if (k < hi) energy += y[k + xN] * y[k + xN] - y[k] * y[k];
+                }
             }
         }
+        lastO = o;
         float *blk = r.block.data();
         std::memcpy(blk, y + o, sizeof(float) * (size_t)hopN);
         for (int i = 0; i < xN; i++) blk[i] = blk[i] * r.fadeIn[(size_t)i] + r.sola[(size_t)i] * r.fadeOut[(size_t)i];
+        if (trace && hops.load() > 0) r.prevTail = r.sola;
         std::memcpy(r.sola.data(), y + o + hopN, sizeof(float) * (size_t)xN);
         std::memcpy(r.tail.data(), r.sola.data(), sizeof(float) * (size_t)xN);
         // 7. loudness: follow the mic's own loudness, 10 ms by 10 ms (RVC's "rms mix" at 0), up to +gainMaxDb
         const float gmax = std::pow(10.0f, gainMaxDb.load() / 20);
         const int frames = H + X;
+        const int hw16 = gainMs.load() * kRate16 / 2000, hwOut = gainMs.load() * modelRate / 2000;  // half windows
         for (int f = 0; f < frames; f++) {
-            const int64_t a = E - H - X - S + f;  // the 16 kHz frame this output frame came from
+            const int64_t a = A + f;  // the 16 kHz frame this output frame came from
             double ein = 0;
-            for (int i = -kFrame16 / 2; i < kFrame16 * 3 / 2; i++) {
+            for (int i = kFrame16 / 2 - hw16; i < kFrame16 / 2 + hw16; i++) {
                 int64_t p = a * kFrame16 + i;
                 float v = p < 0 ? 0 : in16.at(p);
                 ein += v * v;
             }
-            double rin = std::sqrt(ein / (2 * kFrame16));
+            double rin = std::sqrt(ein / (2 * hw16));
             double eout = 0;
             int cnt = 0;
-            for (int i = -upp / 2; i < upp * 3 / 2; i++) {
+            for (int i = upp / 2 - hwOut; i < upp / 2 + hwOut; i++) {
                 int p = o + f * upp + i;
                 if (p < 0 || p >= (int)(r.audioOut.count - (size_t)M * upp)) continue;
                 eout += (double)y[p] * y[p];
@@ -521,6 +739,25 @@ struct VoiceStream {
             g0 = g1;
         }
         lastGain = gEnd;
+        if (trace) {  // research: how alike the two pieces are where they are crossfaded (1 = the same sound)
+            float ey = 0, et = 0;
+            vDSP_svesq(y + o, 1, &ey, (vDSP_Length)xN);
+            double ncc = 0;
+            if (!r.prevTail.empty()) {
+                float d2 = 0, e2 = 0;
+                vDSP_dotpr(y + o, 1, r.prevTail.data(), 1, &d2, (vDSP_Length)xN);
+                vDSP_svesq(r.prevTail.data(), 1, &e2, (vDSP_Length)xN);
+                ncc = d2 / std::sqrt((double)ey * e2 + 1e-12);
+                et = e2;
+            }
+            std::fprintf(trace, "hop %lld E %lld A %lld la %d M %d o %d ncc %.3f lev %.1f", (long long)hop, (long long)E, (long long)A,
+                         LA, M, o, ncc, 10 * std::log10(et / std::max(1, xN) + 1e-12));
+            std::fprintf(trace, " | f0");
+            for (int t = 0; t < H + X + S; t++) std::fprintf(trace, " %.1f", r.f0[(size_t)(A - (E - T) + t)]);
+            std::fprintf(trace, " | gain");
+            for (int f = 0; f < frames; f++) std::fprintf(trace, " %.3f", r.gains[(size_t)f]);
+            std::fprintf(trace, "\n");
+        }
         // 8. into the output ring (chain rate): the final block, then the provisional tail after it
         toChain.run(blk, hopN, [&](const float *p, int n) {
             out.put(written, p, n);
@@ -541,6 +778,38 @@ struct VoiceStream {
         double wall = nowMs() - attachWallMs;
         if (wall > 0) cpuShare.store((threadCpuMs() - attachCpuMs) / wall);
         return true;
+    }
+
+    // Before hop `next` (E = (next + 1) * H): starts the AI voice (live: at a quiet moment) and switches the
+    // look-ahead when another one was asked for, also at a quiet moment so nothing is heard twice or lost (after a
+    // few seconds without one, it switches anyway: the crossfade then joins the two). The converted index of the
+    // hop's block stays next * H either way; only what it holds moves.
+    void junction(int64_t next) {
+        const int want = std::clamp(laWant.load(), 0, maxAhead());
+        const int64_t E = (next + 1) * H;
+        const int64_t step = (int64_t)H * kFrame16;
+        bool go = false;
+        if (!started) {
+            // the AI starts at this block's sound (A) and, until now, Natural was heard with no delay: everything
+            // from A to the newest sound would be heard twice, so it must be quiet (or long ago: 6 s at the latest)
+            const int64_t A = E - want - H - X - S;
+            if (askedAtHop < 0) askedAtHop = next;
+            go = offline || quiet(A - 2, (in16End - 2 * kFrame16) / kFrame16) || (next - askedAtHop) * step > 6 * kRate16;
+        } else if (want != laNow) {
+            const int64_t A0 = E - laNow - H - X - S, A1 = E - want - H - X - S;
+            if (askedAtHop < 0) askedAtHop = next;
+            go = offline || quiet(std::min(A0, A1) - 2, std::max(A0, A1) + X + 2) || (next - askedAtHop) * step > 3 * kRate16;
+        }
+        if (!go) return;
+        laNow = want;
+        laShown.store(laNow, std::memory_order_relaxed);
+        askedAtHop = -1;
+        if (started) switches.fetch_add(1);
+        started = true;
+        // the pull side lines Natural's fill-in up with the new delay from this block on
+        const int64_t at = (int64_t)std::llround(next * (double)H * run->model->upp * rate / run->model->rate);
+        junctionLatency.store(latencyFor(laNow), std::memory_order_relaxed);
+        junctionAt.store(at, std::memory_order_release);
     }
 
     // Starts a model on this stream (worker thread, or the caller's in offline mode).
@@ -572,7 +841,9 @@ struct VoiceStream {
         outProv.store(written, std::memory_order_release);
         outStart.store(written, std::memory_order_release);
         lastGain = 0;
+        lastO = 0;
         phaseAt = INT64_MIN;
+        laNow = std::clamp(laNow, 0, maxAhead());
         attachWallMs = nowMs();
         attachCpuMs = threadCpuMs();
         loaded.store(1);
@@ -602,6 +873,7 @@ struct VoiceStream {
             outProv.store(written, std::memory_order_release);
         }
         while (!quit.load() && (hop + 1) * step <= in16End) {
+            junction(hop);
             if (!makeHop((hop + 1) * H)) { hop++; break; }
             hop++;
             resampleNew();
@@ -645,16 +917,23 @@ struct VoiceStream {
         const int64_t P = pulled;
         if (naturalNow) natural.put(P, naturalNow, frames);
         else for (int i = 0; i < frames; i++) natural.buf[(size_t)((P + i) & natural.mask)] = 0;
-        const int64_t natBack = std::max<int64_t>(0, latency - std::max(0, naturalDelay));
         const int64_t fin = outFinal.load(std::memory_order_acquire);
         const int64_t prov = outProv.load(std::memory_order_acquire);
         const int64_t first = outStart.load(std::memory_order_acquire);
-        const int64_t q0 = P - latency + aheadA;  // converted index for this callback's first sample
+        const int64_t q0 = P - baseBack;          // converted index for this callback's first sample
         const int64_t qEnd = q0 + frames;         // one past the last
+        // A look-ahead switch (or the AI's first start) reached: Natural's fill-in moves to the new delay with it.
+        const int64_t jAt = junctionAt.load(std::memory_order_acquire);
+        if (jAt != junctionSeen && q0 >= jAt) {
+            junctionSeen = jAt;
+            playLatency = junctionLatency.load(std::memory_order_relaxed);
+            direct = false;
+        }
+        const int64_t natBack = std::max<int64_t>(0, playLatency - std::max(0, naturalDelay));
         // Decide for the whole callback: play the AI voice when all of it is final and (when coming back) a ramp's
         // worth more is ready too; fall back when it is not final (a late hop: the provisional tail carries the fade).
         float target;
-        if (loaded.load(std::memory_order_relaxed) && q0 >= first && qEnd <= fin && (mix > 0 || qEnd + rampLen <= fin)) {
+        if (!direct && loaded.load(std::memory_order_relaxed) && q0 >= first && qEnd <= fin && (mix > 0 || qEnd + rampLen <= fin)) {
             target = 1;
         } else {
             target = 0;
@@ -662,10 +941,16 @@ struct VoiceStream {
         }
         if (target == 1) lateNow = false;
         const float step = 1.0f / (float)rampLen;
+        const float directTarget = direct ? 1.0f : 0.0f;
         for (int i = 0; i < frames; i++) {
             const int64_t pos = P + i;
             const int64_t np = pos - natBack;
-            const float nat = np >= 0 ? natural.at(np) : 0.0f;
+            float nat = np >= 0 ? natural.at(np) : 0.0f;
+            if (directMix > 0) {  // Natural as it is, until the AI's first start (then 10 ms into the delayed one)
+                const float now = naturalNow ? naturalNow[i] : 0.0f;
+                nat = directMix * now + (1 - directMix) * nat;
+                if (directMix > directTarget) directMix = std::max(0.0f, directMix - step);
+            }
             const int64_t q = q0 + i;
             float ai = 0;
             bool have = q >= first && q < prov;
@@ -722,8 +1007,10 @@ VoiceModel *voicemodel_load(const char *encoderPath, const char *voicePath, int 
         NSArray<NSNumber *> *vn = vd.inputDescriptionsByName[@"noise"].multiArrayConstraint.shape;
         NSArray<NSNumber *> *va = vd.outputDescriptionsByName[@"audio"].multiArrayConstraint.shape;
         if (ein.count != 2 || eout.count != 3 || vf.count != 3 || vp.count != 2 || vs.count != 3 || vn.count != 3 || va.count != 2 ||
-            ![eout isEqualToArray:vf] || eout[2].intValue != kFeatureDim || vn[1].intValue != kNoiseChannels ||
-            vs[2].intValue != va[1].intValue || ein[1].intValue != vp[1].intValue * kFrame16 ||
+            eout[2].intValue != kFeatureDim || vf[2].intValue != kFeatureDim || vn[1].intValue != kNoiseChannels ||
+            vf[1].intValue * 2 != vp[1].intValue || eout[1].intValue * 2 * kFrame16 != ein[1].intValue ||  // (the encoder's
+            ein[1].intValue < vp[1].intValue * kFrame16 || (ein[1].intValue / kFrame16 - vp[1].intValue) % 2 ||  // window may be longer)
+            vs[2].intValue != va[1].intValue ||
             vd.inputDescriptionsByName[@"pitch"].multiArrayConstraint.dataType != MLMultiArrayDataTypeInt32) {
             say(err, errSize, "the voice model files don't fit together");
             delete m;
@@ -745,6 +1032,21 @@ VoiceModel *voicemodel_load(const char *encoderPath, const char *voicePath, int 
         m->solaMs = metaInt(meta, @"sola_ms", 10);
         m->marginMs = metaInt(meta, @"margin_ms", m->decFrames * 10 - m->hopMs - m->xfadeMs - m->solaMs);
         if (m->contextMs <= 0) m->contextMs = m->T * 10 - m->hopMs - m->xfadeMs - m->solaMs;
+        // the look-ahead shape: a "pick" input says which window frames to decode; the flow covers the whole window
+        if (MLFeatureDescription *pick = vd.inputDescriptionsByName[@"pick"]) {
+            NSArray<NSNumber *> *ps = pick.multiArrayConstraint.shape;
+            m->picks = true;
+            m->rightMs = metaInt(meta, @"right_ms", 0);
+            m->maxAheadMs = metaInt(meta, @"max_ahead_ms", 0);
+            if (ps.count != 1 || ps[0].intValue != m->decFrames || pick.multiArrayConstraint.dataType != MLMultiArrayDataTypeInt32 ||
+                m->flowFrames != m->T || m->maxAheadMs < 0 || m->maxAheadMs % 10 || m->rightMs < 0 ||
+                m->decFrames * 10 != m->marginMs + m->hopMs + m->xfadeMs + m->solaMs + m->rightMs ||
+                m->T * 10 < m->maxAheadMs + m->marginMs + m->hopMs + m->xfadeMs + m->solaMs) {
+                say(err, errSize, "the voice model files have unexpected sizes");
+                delete m;
+                return nullptr;
+            }
+        }
         if (m->decFrames * m->upp != m->decSamples || m->flowFrames < m->decFrames || m->T < m->flowFrames ||
             m->decFrames * 10 < m->hopMs + m->xfadeMs + m->solaMs || m->rate != 48000) {
             say(err, errSize, "the voice model files have unexpected sizes");
@@ -775,6 +1077,7 @@ VoiceModel *voicemodel_load(const char *encoderPath, const char *voicePath, int 
         std::snprintf(buf, sizeof buf, "encoder on %s, voice on %s; hop %d ms, past sound %d ms; one hop %.0f ms; ready in %.1f s",
                       unitsName(ue), unitsName(uv), m->hopMs, m->contextMs, m->probeHopMs, (nowMs() - t0) / 1000);
         m->describe = buf;
+        if (m->picks) m->describe += "; look-ahead up to " + std::to_string(m->maxAheadMs) + " ms";
         return m;
     }
 }
@@ -783,9 +1086,21 @@ void voicemodel_free(VoiceModel *model) { delete model; }
 
 const char *voicemodel_describe(const VoiceModel *model) { return model ? model->describe.c_str() : ""; }
 
+int voicemodel_max_lookahead_ms(const VoiceModel *model) { return model ? model->maxAheadMs : 0; }
+
+double voicestream_delay_ms(const VoiceModel *model, double chainRate, int maxFrames, int lookaheadMs) {
+    if (chainRate < 8000 || maxFrames <= 0) return 0;
+    const int hop = model ? model->hopMs : 160, xf = model ? model->xfadeMs : 40, sola = model ? model->solaMs : 10;
+    const int reserve = 70;  // (a CPU-only model gets 70 too)
+    const int la = model ? std::clamp(lookaheadMs / 10 * 10, 0, model->maxAheadMs) : std::max(0, lookaheadMs / 10 * 10);
+    const int frames = latencyFrames(chainRate, maxFrames, false, hop, xf, sola, reserve, la,
+                                     Resampler::lag(kRate16 / chainRate), Resampler::lag(chainRate / 48000.0));
+    return frames / chainRate * 1000;
+}
+
 VoiceStream *voicestream_new(VoiceModel *model, double chainRate, int maxFrames, int offline, const VoiceStreamConfig *config) {
     if (chainRate < 8000 || chainRate > 384000 || maxFrames <= 0) return nullptr;
-    VoiceStreamConfig c = config ? *config : VoiceStreamConfig{160, 480, 40, 10, 60};
+    VoiceStreamConfig c = config ? *config : VoiceStreamConfig{160, 480, 40, 10, 70, 0};
     if (model) { c.hopMs = model->hopMs; c.crossfadeMs = model->xfadeMs; c.solaMs = model->solaMs; }
     if (c.hopMs < 10 || c.hopMs % 10 || c.crossfadeMs % 10 || c.solaMs % 10 || c.crossfadeMs < 0 || c.solaMs < 0) return nullptr;
     auto *s = new VoiceStream();
@@ -796,18 +1111,22 @@ VoiceStream *voicestream_new(VoiceModel *model, double chainRate, int maxFrames,
     s->reserveMs = std::max(0, c.reserveMs);
     if (model && model->cpuOnly) s->reserveMs = std::max(s->reserveMs, 70);  // the CPU's slow hops need more room
     s->rampLen = std::max(1, (int)std::lrint(chainRate * 0.01));
-    s->aheadA = (int64_t)std::llround((s->X + s->S) * chainRate / 100);
     s->inLag16 = Resampler::lag(kRate16 / chainRate);
     s->outLag = Resampler::lag(chainRate / 48000.0);
-    // fixed delay = hop + crossfade + search + reserve + what the resamplers hold back + one callback
-    s->latency = (int)std::llround((c.hopMs + c.crossfadeMs + c.solaMs + s->reserveMs) * chainRate / 1000)
-               + (int)std::ceil(s->inLag16 * chainRate / kRate16) + (int)std::ceil(s->outLag) + std::min(maxFrames, (int)(chainRate * 0.011));
-    if (s->offline) s->latency = (int)std::llround((c.hopMs + c.crossfadeMs + c.solaMs) * chainRate / 1000)
-                               + (int)std::ceil(s->inLag16 * chainRate / kRate16) + (int)std::ceil(s->outLag) + 64;
+    // fixed delay = hop + crossfade + search + reserve + look-ahead + what the resamplers hold back + one callback;
+    // the sound thread reads converted index (now - baseBack), whatever the look-ahead
+    s->baseBack = s->latencyFor(0) - (int)std::llround((s->X + s->S) * chainRate / 100);
+    s->laWant.store(std::clamp(c.lookaheadMs, 0, 1000) / 10);
+    const int la = model ? std::clamp(s->laWant.load(), 0, model->maxAheadMs / 10) : s->laWant.load();
+    s->playLatency = s->latencyFor(la);
+    if (s->offline) { s->direct = false; s->directMix = 0; }  // offline: the AI voice from the start, lined up
     const int64_t ringSize = (int64_t)(chainRate * 4) + maxFrames;
     s->in.init(ringSize);
     s->out.init(ringSize);
-    s->natural.init(s->latency + 4 * (int64_t)maxFrames + 64);
+    s->natural.init(s->latencyFor(100) + 4 * (int64_t)maxFrames + 64);  // room for any look-ahead (up to 1 s)
+    if (s->offline) {
+        if (const char *path = getenv("PITCHSHIFT_AI_TRACE")) s->trace = std::fopen(path, "w");
+    }
     s->in16.init((int64_t)kRate16 * 8);
     s->pitchPos.assign(kPitchSlots, 0);
     s->pitchHz.assign(kPitchSlots, 0.0f);
@@ -847,11 +1166,27 @@ void voicestream_delete(VoiceStream *stream) {
         dispatch_semaphore_signal(stream->wake);
         pthread_join(stream->thread, nullptr);
     }
+    if (stream->trace) std::fclose(stream->trace);
     delete stream->run;
     delete stream;
 }
 
-int voicestream_latency_frames(const VoiceStream *stream) { return stream ? stream->latency : 0; }
+int voicestream_latency_frames(const VoiceStream *stream) {
+    if (!stream) return 0;
+    const VoiceModel *m = stream->run ? stream->run->model : stream->pending.load();
+    const int most = m ? m->maxAheadMs / 10 : 100;
+    return stream->latencyFor(std::clamp(stream->laWant.load(), 0, most));
+}
+
+void voicestream_set_lookahead(VoiceStream *stream, int lookaheadMs) {
+    if (!stream) return;
+    stream->laWant.store(std::clamp(lookaheadMs, 0, 1000) / 10);
+    if (!stream->offline) dispatch_semaphore_signal(stream->wake);
+}
+
+void voicestream_set_intonation(VoiceStream *stream, float intonation) {
+    if (stream && std::isfinite(intonation)) stream->intonation.store(std::max(0.0f, intonation), std::memory_order_relaxed);
+}
 
 void voicestream_push(VoiceStream *stream, const float *mic, int frames, const float *f0Hz, const int64_t *f0Pos, int n) {
     if (stream && frames > 0) stream->push(mic, frames, f0Hz, f0Pos, n);
@@ -872,6 +1207,15 @@ int voicestream_tune(VoiceStream *stream, const char *key, float value) {
     if (k == "aiSlowMs") { stream->slowMs.store((int)value); return 1; }
     if (k == "aiSlowEvery") { stream->slowEvery.store(std::max(1, (int)value)); return 1; }
     if (k == "aiGainMaxDb") { stream->gainMaxDb.store(value); return 1; }
+    if (k == "aiSmoothFrames") { stream->smoothFrames.store(std::clamp((int)value, 0, 10)); return 1; }
+    if (k == "aiGapFrames") { stream->gapFrames.store(std::clamp((int)value, 0, 10)); return 1; }
+    if (k == "aiSlowFrames") { stream->slowFrames.store(std::clamp((int)value, 0, 20)); return 1; }
+    if (k == "aiOnsetFrames") { stream->onsetFrames.store(std::clamp((int)value, 0, 10)); return 1; }
+    if (k == "aiIntonation") { stream->intonation.store(value); return 1; }
+    if (k == "aiSolaMode") { stream->solaMode.store(std::clamp((int)value, -1, 2)); return 1; }
+    if (k == "aiGainMs") { stream->gainMs.store(std::clamp((int)value, 10, 200)); return 1; }
+    if (k == "aiQuietDb") { stream->quietDb.store(value); return 1; }
+    if (k == "aiLookaheadMs") { voicestream_set_lookahead(stream, (int)value); return 1; }
     return 0;
 }
 
@@ -886,6 +1230,8 @@ void voicestream_get_stats(const VoiceStream *stream, VoiceStreamStats *out) {
     out->averageHopMs = out->hops ? stream->sumHopMs.load() / (double)out->hops : 0;
     out->worstHopMs = stream->worstHopMs.load();
     out->cpuShare = stream->cpuShare.load();
+    out->lookaheadMs = stream->laShown.load(std::memory_order_relaxed) * 10;
+    out->switches = stream->switches.load();
 }
 
 }  // extern "C"
@@ -905,6 +1251,10 @@ VoiceStream *voicestream_new(VoiceModel *, double, int, int, const VoiceStreamCo
 int voicestream_set_model(VoiceStream *, VoiceModel *) { return 0; }
 void voicestream_delete(VoiceStream *) {}
 int voicestream_latency_frames(const VoiceStream *) { return 0; }
+int voicemodel_max_lookahead_ms(const VoiceModel *) { return 0; }
+double voicestream_delay_ms(const VoiceModel *, double, int, int) { return 0; }
+void voicestream_set_lookahead(VoiceStream *, int) {}
+void voicestream_set_intonation(VoiceStream *, float) {}
 void voicestream_push(VoiceStream *, const float *, int, const float *, const int64_t *, int) {}
 
 void voicestream_pull(VoiceStream *, const float *naturalNow, int, float *out, int frames) {
