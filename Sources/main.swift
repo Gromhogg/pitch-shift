@@ -566,8 +566,10 @@ if args.contains("--test-voice") {
                 if abs(x) > 0.02 {
                     if quiet >= Int(0.15 * recorder.sampleRate), recorder.firstInputTime > 0 {
                         let at = base + Double(scanned + k) / recorder.sampleRate
-                        // Count only the first sound within 0.4 s of a tone start (a tone fades in and out a little).
-                        if let index = (0..<toneCount).last(where: { toneStarts[$0] <= at }), index >= matched, at - toneStarts[index] < 0.4 {
+                        // Count only the first sound soon after a tone start (a tone fades in and out a little): within
+                        // 0.9 s for the tone (it starts every second), 1.5 s for a file (the AI voice can be 1 s late).
+                        if let index = (0..<toneCount).last(where: { toneStarts[$0] <= at }), index >= matched,
+                           at - toneStarts[index] < (watchFile ? 1.5 : 0.9) {
                             delays.append((at - toneStarts[index]) * 1000)
                             matched = index + 1
                         }
