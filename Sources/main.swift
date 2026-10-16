@@ -19,9 +19,10 @@
 //                                              the sound waiting to go out, the dry-outs/trims/replays and the delay from
 //                                              the mic to Pitch Shift Mic (the delay parts are printed at the start).
 //                                              --buffer N: callback size to ask for (default 128, or 256 above 48 kHz)
-//                                              --voice Woman [--strength S] [--quality natural] [--changer-tune ...]
+//                                              --voice Woman [--strength S] [--realism R] [--changer-tune ...]
 //                                              [--changer-stats] [--compute cpu|gpu|ane|all]: with the voice changer
-//                                              on (--quality realistic: the AI voice; its fixed delay, late pieces and
+//                                              on (--realism 0 ... 1 = "Faster ↔ More real": from 0.05 the AI voice;
+//                                              --quality realistic = its default 0.25; its fixed delay, late pieces and
 //                                              the time Natural filled in are printed; --watch also prints what
 //                                              it does; with --file, --watch measures the delay at each start of the
 //                                              file's sound: give it a file with ~1 s of silence first)
@@ -29,7 +30,7 @@
 //                [--voice-preset old]          shifts a sound file with the voice's own settings (offline, no devices;
 //                                              --cartoon-at "1:1,2:0" moves the style to 1 at 1 s and back to 0 at 2 s;
 //                                              --voice-preset old: as before the Natural level fix, for comparing)
-//                [--voice Woman [--strength 1] [--quality natural] [--changer-tune "k=v,..."] [--changer-stats]]
+//                [--voice Woman [--strength 1] [--realism R] [--changer-tune "k=v,..."] [--changer-stats]]
 //                                              with the voice changer (the amount, style and --slow-deeper are then
 //                                              ignored: only one at a time;
 //                                              --changer-stats prints what it does once per second of sound)
@@ -44,13 +45,13 @@
 //                                              scale, and how long the mixing takes per callback (--sound-preset old:
 //                                              as in 2.0.2, before the limiter, fades and loudness cap)
 //   --test-button [--mic NAME] [--volume 0.03] presses Test with a quiet tone as the voice (record 5 s, play back)
-//                [--file F] [--voice Woman [--quality realistic]]
+//                [--file F] [--voice Woman [--realism R | --quality realistic]]
 //                                              --file: a speech file as the voice (looped, its loudest point at
 //                                              --volume); --voice: with the voice changer on, so it records and plays
 //                                              back the changed voice (Realistic: Test is pressed once the AI voice
 //                                              is ready; --steps is not used with --voice: only one at a time)
 //   --test-sounds FILE [--speakers] [--seconds S] [--out F.caf] [--mic NAME] [--steps 3] [--volume 0.05] [--hear 0.02]
-//                [--sound-volume 0.5] [--voice-off] [--voice Woman [--quality realistic]]
+//                [--sound-volume 0.5] [--voice-off] [--voice Woman [--realism R | --quality realistic]]
 //                                              Soundboard: plays FILE into Pitch Shift Mic 1 s in, with a quiet tone as
 //                                              the voice, records Pitch Shift Mic and checks it (one copy of the sound,
 //                                              its level; --speakers: as if on the Mac's speakers, so the voice must
@@ -84,14 +85,15 @@ func arg(_ name: String) -> String? {
 // a state for screenshots, without touching any sound or settings, and without switching apps (states: hear-on,
 // voice-on, waiting, typing, recording, playing, listening, hover, menu, roll, resize, no-driver, advanced-alert,
 // sounds, rename, volume, drop, light, tone, slow, changer, changer-man, changer-realistic, changer-loading,
-// changer-fallback, changer-alert, changer-intel; --cartoon-amount sets the voice style slider; sounds opens the
-// Soundboard with example names, rename shows the first name being changed, volume the first sound's volume slider
-// and drop files being dragged over it; "tone" shows Advanced processing on, and --tone-amount sets the
-// Bass ↔ Treble slider; slow turns on "Deeper when slow"; changer turns on the Voice changer (and Your voice) with
-// Woman, changer-man with Man, --strength sets its Strength slider, changer-realistic/-loading/-fallback show
-// Realistic on and working/getting ready/standing in with Natural, changer-alert the alert for turning Realistic on,
-// changer-intel the card as on an Intel Mac (no Realistic); resize drags the window's corner through the three
-// layouts).
+// changer-fallback, changer-slider-natural|fast|default|max|NN, changer-intel; --cartoon-amount sets the voice style
+// slider; sounds opens the Soundboard with example names, rename shows the first name being changed, volume the first
+// sound's volume slider and drop files being dragged over it; "tone" shows Advanced processing on, and --tone-amount
+// sets the Bass ↔ Treble slider; slow turns on "Deeper when slow"; changer turns on the Voice changer (and Your voice)
+// with Woman, changer-man with Man, --strength sets its Strength slider, changer-realistic/-loading/-fallback show
+// the AI voice (the slider's default) working/getting ready/standing in with Natural, changer-slider-* puts the
+// "Faster ↔ More real" slider at Natural, the first AI step, the default, the far right or NN percent,
+// changer-intel the card as on an Intel Mac (the slider stays at Natural); resize drags the window's corner through
+// the three layouts).
 let preview = arg("--preview")
 
 var signalSources: [DispatchSourceSignal] = []
@@ -131,8 +133,8 @@ let cartoonArg: Float? = args.contains("--cartoon") ? 1 : arg("--cartoon-amount"
 let slowDeeperAsked = args.contains("--slow-deeper")
 
 // The voice changer, for --render-voice and --test-voice: --voice NAME (Woman, Man or another voice's id),
-// --strength S (0 ... 1, default 1), --quality natural|realistic, --changer-tune "key=value,..." (VoiceChanger.h),
-// --changer-stats (once a second: what it is doing). --voices-dir DIR: also read voices from DIR (they replace
+// --strength S (0 ... 1, default 1), --realism R (0 ... 1) or --quality natural|realistic, --changer-tune
+// "key=value,..." (VoiceChanger.h, VoiceModel.h), --changer-stats (once a second: what it is doing). --voices-dir DIR: also read voices from DIR (they replace
 // built-in voices with the same id). --list-voices: the voices found, and files that were skipped.
 if let dir = arg("--voices-dir") { VoiceLibrary.extraFolder = URL(fileURLWithPath: dir) }
 let changerTuneArg: [(String, Float)] = (arg("--changer-tune") ?? "").split(separator: ",").compactMap { item in
@@ -150,7 +152,8 @@ let changerArg: ChangerOptions? = {
     }
     guard let natural = entry.natural else { print("--voice: \(entry.name) has no Natural mode settings"); exit(1) }
     if !changerTuneArg.isEmpty, let probe = voicechanger_new(48000, 512) {  // check the keys before starting
-        let aiKeys = ["aiSlowMs", "aiSlowEvery", "aiGainMaxDb"]  // Realistic mode's test keys (voicestream_tune)
+        let aiKeys = ["aiSlowMs", "aiSlowEvery", "aiGainMaxDb", "aiSmoothFrames", "aiGapFrames", "aiQuietDb",
+                      "aiLookaheadMs", "aiSlowFrames", "aiIntonation", "aiSolaMode", "aiGainMs", "aiOnsetFrames"]  // Realistic mode's test keys (voicestream_tune)
         let unknown = changerTuneArg.filter { voicechanger_tune(probe, $0.0, $0.1) == 0 && !aiKeys.contains($0.0) && !isVoiceShifterTuneKey($0.0) }.map(\.0)
         voicechanger_delete(probe)
         if !unknown.isEmpty { print("--changer-tune: unknown keys \(unknown.joined(separator: ", "))"); exit(1) }
@@ -179,13 +182,22 @@ if let name = arg("--compute") {
     guard let units = computeUnits(named: name) else { print("--compute: cpu, gpu, ane, all or auto"); exit(1) }
     VoiceModelStore.computeUnits = units
 }
-let realisticArg: Bool = {
+// The voice changer's "Faster ↔ More real" slider: --realism 0 ... 1 (0 = Natural, from 0.05 the AI voice with more
+// look-ahead further right, 1 = the most real, about a second of delay). --quality realistic = the slider's default
+// AI position, --quality natural = 0 (the old switch's two settings).
+let realismArg: Float = {
+    if let text = arg("--realism") {
+        guard let value = Float(text), value.isFinite, value >= 0, value <= 1 else { print("--realism: a number from 0 to 1"); exit(1) }
+        return value
+    }
     switch arg("--quality") ?? "natural" {
-    case "natural": return false
-    case "realistic": return true
+    case "natural": return 0
+    case "realistic": return ChangerSettings.defaultRealism
     default: print("--quality: natural or realistic"); exit(1)
     }
 }()
+let realisticArg = realismArg >= ChangerSettings.aiStart
+let lookaheadArg = ChangerSettings(realism: realismArg).lookaheadMs
 
 if args.contains("--list-voices") {
     let library = VoiceLibrary.shared
@@ -385,7 +397,8 @@ if let input = arg("--render-voice") {
         // fallback sound (only used before the first piece is ready).
         if let changerArg, realisticArg, realisticUnavailable == nil, let entry = arg("--voice").flatMap({ VoiceLibrary.shared.voice($0) }) {
             let natural = try readMonoFile(args[i + 2])
-            try renderRealisticFile(input: input, natural: natural.samples, rate: natural.rate, output: args[i + 2], entry: entry, options: changerArg)
+            try renderRealisticFile(input: input, natural: natural.samples, rate: natural.rate, output: args[i + 2], entry: entry,
+                                    options: changerArg, lookaheadMs: lookaheadArg)
         }
         print("wrote \(args[i + 2])")
         exit(0)
@@ -481,7 +494,7 @@ if args.contains("--test-voice") {
     let voice = VoiceShifter(halfSteps: steps, cartoon: cartoonArg ?? 0, slowDeeper: slowDeeperArg, micUID: micUID)
     if let changerArg, let entry = arg("--voice").flatMap({ VoiceLibrary.shared.voice($0) }) {  // --voice: the voice changer on
         voice.changerTune = changerArg.tune
-        voice.changer = ChangerSettings(on: true, voiceID: entry.id, strength: changerArg.strength, realistic: realisticArg)
+        voice.changer = ChangerSettings(on: true, voiceID: entry.id, strength: changerArg.strength, realism: realismArg)
     }
     guard let mic = voice.currentMic, let virtualMic = Mics.virtualMic else { print("No mic or Pitch Shift Mic not installed"); exit(1) }
     let rate = nominalRate(mic)
@@ -531,6 +544,11 @@ if args.contains("--test-voice") {
     voice.start()
     voice.hold(true)  // runs the chain like the Test button does (no app is listening yet)
     guard let chain = voice.chain else { print("voice did not start: \(voice.state)"); exit(1) }
+    if changerArg != nil {  // the Voice changer card's "Delay: about …" for these settings (the test's sound skips the mic's own part)
+        let card = voice.changerDelay(for: voice.changer), mic = deviceDelay(mic, kAudioDevicePropertyScopeInput)
+        print(String(format: "card: Delay: about %.2f s (%.0f ms; without the mic's own %.0f ms: %.0f ms, to compare with the measured delay)",
+                     card, card * 1000, mic * 1000, (card - mic) * 1000))
+    }
     let recorder = try! Recorder(device: virtualMic, seconds: seconds)
     var delays: [Double] = []  // --watch: mic to Pitch Shift Mic, once per tone start (ms)
     if watch {
@@ -699,8 +717,8 @@ if args.contains("--test-button") {
     }
     if let changerArg, let entry = arg("--voice").flatMap({ VoiceLibrary.shared.voice($0) }) {  // --voice: the voice changer on
         voice.changerTune = changerArg.tune
-        voice.changer = ChangerSettings(on: true, voiceID: entry.id, strength: changerArg.strength, realistic: realisticArg)
-        print("voice changer: \(entry.name), \(realisticArg && realisticUnavailable == nil ? "Realistic" : "Natural")")
+        voice.changer = ChangerSettings(on: true, voiceID: entry.id, strength: changerArg.strength, realism: realismArg)
+        print("voice changer: \(entry.name), \(realisticArg && realisticUnavailable == nil ? "Realistic (look-ahead \(lookaheadArg) ms)" : "Natural")")
     }
     let test = VoiceTest(voice: voice)
     let started = Date()
@@ -785,7 +803,7 @@ if let path = arg("--test-sounds") {
     // the tone then comes out at the voice's pitch, not at --steps).
     if !voiceOff, let changerArg, let entry = arg("--voice").flatMap({ VoiceLibrary.shared.voice($0) }) {
         voice.changerTune = changerArg.tune
-        voice.changer = ChangerSettings(on: true, voiceID: entry.id, strength: changerArg.strength, realistic: realisticArg)
+        voice.changer = ChangerSettings(on: true, voiceID: entry.id, strength: changerArg.strength, realism: realismArg)
     }
     if voiceOff { voice.keepForSounds(true) } else { voice.start() }
     voice.hold(true)  // runs the chain like the Test button does (no app is listening yet)

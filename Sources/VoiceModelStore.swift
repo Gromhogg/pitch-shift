@@ -145,15 +145,16 @@ func voicestreamPush(_ stream: OpaquePointer, _ mic: UnsafePointer<Float>, _ fra
 
 // One line about the AI voice for --watch and --render-voice --quality realistic.
 func aiStatsLine(_ s: VoiceStreamStats, latencyMs: Double, seconds: Double) -> String {
-    String(format: "%4.0fs  AI voice: %@ | delay %.0f ms (fixed) | pieces %lld, late %lld, Natural filled in %.2f s | piece %.1f ms average, %.1f ms worst | AI thread %.0f%% of a core",
-           seconds, s.loaded != 0 ? "playing" : "not yet", latencyMs, s.hops, s.misses, s.fallbackSeconds,
+    String(format: "%4.0fs  AI voice: %@ | delay %.0f ms (fixed; look-ahead %d ms, %lld switches) | pieces %lld, late %lld, Natural filled in %.2f s | piece %.1f ms average, %.1f ms worst | AI thread %.0f%% of a core",
+           seconds, s.loaded != 0 ? "playing" : "not yet", latencyMs, s.lookaheadMs, s.switches, s.hops, s.misses, s.fallbackSeconds,
            s.averageHopMs, s.worstHopMs, s.cpuShare * 100)
 }
 
 // --render-voice ... --voice X --quality realistic: runs the AI voice inline over a file (it never comes late) after
 // the Natural render (`natural`, lined up with the input), and writes the result lined up with the input too.
 // Prints what it does once per second of sound.
-func renderRealisticFile(input: String, natural: [Float], rate: Double, output: String, entry: VoiceEntry, options: ChangerOptions) throws {
+func renderRealisticFile(input: String, natural: [Float], rate: Double, output: String, entry: VoiceEntry, options: ChangerOptions,
+                         lookaheadMs: Int = 0) throws {
     let file = try AVAudioFile(forReading: URL(fileURLWithPath: input))
     guard file.processingFormat.sampleRate == rate,
           let source = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length)) else {
@@ -170,8 +171,13 @@ func renderRealisticFile(input: String, natural: [Float], rate: Double, output: 
     defer { voicemodel_free(model) }
     print(String(cString: voicemodel_describe(model)))
     let block = 128
-    guard let stream = voicestream_new(model, rate, Int32(block), 1, nil) else { throw Problem(message: "Could not start the AI voice.") }
+    var config = VoiceStreamConfig(hopMs: 160, contextMs: 480, crossfadeMs: 40, solaMs: 10, reserveMs: 70, lookaheadMs: Int32(lookaheadMs))
+    guard let stream = voicestream_new(model, rate, Int32(block), 1, &config) else { throw Problem(message: "Could not start the AI voice.") }
     defer { voicestream_delete(stream) }
+    if lookaheadMs > 0 && Int(voicemodel_max_lookahead_ms(model)) < lookaheadMs {
+        print("Note: \(entry.name)'s AI voice file can look ahead \(voicemodel_max_lookahead_ms(model)) ms at most (asked for \(lookaheadMs) ms)")
+    }
+    voicestream_set_intonation(stream, 1 + max(0, min(1, options.strength)) * (options.voice.pointee.intonation - 1))
     for (key, value) in options.tune { _ = voicestream_tune(stream, key, value) }
     guard let changer = voicechanger_new(rate, Int32(block)) else { throw Problem(message: "Could not start the voice changer.") }
     defer { voicechanger_delete(changer) }
