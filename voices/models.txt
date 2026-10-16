@@ -1,9 +1,12 @@
-# The Realistic mode's AI model files (Apple silicon, Core ML, 8-bit weights; ~133 MB zipped, ~145 MB unpacked).
+# The Realistic mode's AI model files (Apple silicon, Core ML, 8-bit weights; ~133 MB zipped, ~146 MB unpacked).
 # Too big for git, so build.sh takes them from a local copy (build/voices/, or research/voicechanger/models/ in this
 # checkout or the main one) or downloads them from the address below, checks the SHA-256 sum and unpacks them into
 # Contents/Resources/Voices/. To publish: upload the three zips as assets of a GitHub release and put its tag in place
 # of PLACEHOLDER (made by research/voicechanger/pack_voices.sh from the blend in research/voicechanger/pretrained/).
-# name                    size(bytes)  sha256                                                            url
-contentvec.mlmodelc.zip   82963628     1dd04110a6cf08a274b5b17c03563362b29092dbab787b3d17b02f57edc140a6  https://github.com/Gromhogg/pitch-shift/releases/download/PLACEHOLDER/contentvec.mlmodelc.zip
-woman.mlmodelc.zip        24919067     d23e8a4e2b5e1ac91948b8a3ecdf34c5e6ff30f28a06c558232c44859397c754  https://github.com/Gromhogg/pitch-shift/releases/download/PLACEHOLDER/woman.mlmodelc.zip
-man.mlmodelc.zip          24919094     3188fffbe2a1357b0eec947a4e382626c7a6ce2977ba12ae5f7cabfc2f657ac8  https://github.com/Gromhogg/pitch-shift/releases/download/PLACEHOLDER/man.mlmodelc.zip
+# The look-ahead shape (Pitch Shift 3.1, "_ahead"): one file per voice serves every "Faster ↔ More real" position
+# (convert_generator.py --context-ms 1000 --ahead-ms 700 --right-ms 40; the encoder: convert_contentvec.py
+# --context-ms 1710, 1.92 s window). Older voice files (the first shape) still load and use no look-ahead.
+# name                         size(bytes)  sha256                                                            url
+contentvec_ahead.mlmodelc.zip  82964437     3566ad71d0625e4f7ac6eb1f77d7d3e9edf946a9ed5a913d4db7feab37354eb5  https://github.com/Gromhogg/pitch-shift/releases/download/PLACEHOLDER/contentvec_ahead.mlmodelc.zip
+woman_ahead.mlmodelc.zip       24920126     e8093d8decc4f3feb41d034a219312fa79f822c136543f584ffa83a650d0c7cf  https://github.com/Gromhogg/pitch-shift/releases/download/PLACEHOLDER/woman_ahead.mlmodelc.zip
+man_ahead.mlmodelc.zip         24920084     090bf99c62e637a0681ce700123f055a443dbe271a4fd90d485add25eea5edd7  https://github.com/Gromhogg/pitch-shift/releases/download/PLACEHOLDER/man_ahead.mlmodelc.zip
