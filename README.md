@@ -63,8 +63,25 @@ More help: [windows/README.md](windows/README.md).
 - Slide from **Light** to **Full** to choose how strong the change is.
 - Turn on **Realistic** for an AI voice that sounds more like a real person (Macs with Apple silicon). It adds about a quarter of a second of delay. The first time, it takes up to half a minute to get ready; the plain voice changer plays meanwhile. With Realistic on, the slider moves only the pitch, from **Your pitch** to the voice's.
 - Only one at a time: a voice sets your pitch, so turning one on puts the amount at 0 and turns **Deeper when slow** off. Changing the amount or turning **Deeper when slow** on turns the voice changer off. The **Natural**…**Cartoon** slider is not used while a voice is on. **Test** and the Soundboard still work.
+- Add your own voices with the **⋯** button next to the voice menu (see [Your own voices](#your-own-voices)).
 
 All of them can be on at the same time. Closing the window keeps Pitch Shift running. Quit it with ⌘Q.
+
+## Your own voices (Mac)
+
+The voice changer can also use voices you download. They sound best with **Realistic** on (Macs with Apple silicon).
+
+- **Where to find voices:** people share RVC voices on sites like [Hugging Face](https://huggingface.co/models?search=rvc) (search for "RVC v2"). You need the voice's `.pth` file (it often comes in a `.zip` with an `.index` file, which Pitch Shift doesn't need). Voices made at 32, 40 or 48 kHz work; older "v1" voices don't.
+- **Turn it into a Pitch Shift voice:** open Terminal, paste this line, type a space, drag the `.pth` (or `.zip`) file onto the Terminal window, and press Return:
+
+```
+curl -fsSL https://raw.githubusercontent.com/Gromhogg/pitch-shift/main/tools/convert-voice.sh | bash -s --
+```
+
+- It asks how high the voice is (High for most women's voices, Low for most men's). The first time, it downloads what it needs (about 0.5 GB, a few minutes) into `~/Library/Application Support/Pitch Shift/Converter` (delete that folder to remove it). It never asks for your password. After that, each voice takes about half a minute.
+- The new voice shows up in the Voice changer's voice menu. Pick it and turn on **Realistic**.
+- **The Voices folder:** click the **⋯** button next to the voice menu, then **Open Voices Folder**. Each voice is a folder in there. In the same menu, **Add Voice…** adds a voice folder (or a `.zip` of one) that someone shared with you, and **Rename…** and **Remove** change the voice you picked. Built-in voices can't be removed.
+- Voices copied from a real person, and fan-made voices of characters, are your own responsibility: only use voices you're allowed to use, and don't pretend to be someone you're not.
 
 ## If something goes wrong
 
@@ -95,8 +112,8 @@ brew install rubberband
 - **Advanced processing:** going up, the bass is shifted an octave less so it stays bass; going down, the song's very top is kept; and a slow tone control keeps the song's overall balance like the original's. Details: [notes/advanced-processing-research.md](notes/advanced-processing-research.md).
 - **Your voice:** your mic goes through Rubber Band's low-delay shifter (from 6 half-steps up or down: Pitch Shift's own pulse shifter, which moves each pulse of your voice whole, so big shifts don't buzz) into "Pitch Shift Mic", a virtual mic built from [BlackHole](https://github.com/ExistentialAudio/BlackHole) that comes with Pitch Shift (you don't need to install BlackHole). It only runs while an app is listening to Pitch Shift Mic.
 - **Soundboard:** sounds are added to Pitch Shift Mic after your voice, at their normal pitch and an even loudness (very loud, squashed sounds are turned down to match the others); each sound also has its own volume (0–150%). While a sound plays, voice and sound are kept under −3 dBFS, so call apps don't get them clipped. On your Mac's own speakers, your mic is muted while a sound plays, so the call never hears it twice.
-- **Voice changer:** Pitch Shift follows the pitch of your voice and moves it to a typical woman's or man's pitch (about 200 or 112 Hz, keeping your ups and downs), and Pitch Shift's pulse shifter makes the change, moving each pulse of your voice whole (so the big move doesn't buzz) and changing the shape of the voice (its formants) the way a smaller or larger throat would. A light tone control then moves the sound toward the average woman's or man's voice. It adds no delay.
-- **Realistic voice changer:** an AI voice model (RVC v2 with the ContentVec speech reader) says your words again in the new voice. It runs on your Mac with Core ML (nothing goes online), only on Apple silicon, and waits about 0.28 s to have enough of your voice to work with. If it ever falls behind, the plain voice changer fills in, so the call never hears silence or your own voice. The voices are blends of 8 speakers each from a public speech collection (VCTK), not copies of a real person. Details: [notes/voice-changer-plan.md](notes/voice-changer-plan.md).
+- **Voice changer:** Pitch Shift follows the pitch of your voice and moves it to a typical woman's or man's pitch (about 235 or 112 Hz, keeping your ups and downs, a bit bigger for Woman), and Pitch Shift's pulse shifter makes the change, moving each pulse of your voice whole (so the big move doesn't buzz) and changing the shape of the voice (its formants) the way a smaller or larger throat would. A light tone control then moves the sound toward the average woman's or man's voice. It adds no delay.
+- **Realistic voice changer:** an AI voice model (RVC v2 with the ContentVec speech reader) says your words again in the new voice. It runs on your Mac with Core ML (nothing goes online), only on Apple silicon, and waits about 0.28 s to have enough of your voice to work with. If it ever falls behind, the plain voice changer fills in, so the call never hears silence or your own voice. The voices are blends of 8 speakers each from a public speech collection (VCTK; Woman's are all American), not copies of a real person. Details: [notes/voice-changer-plan.md](notes/voice-changer-plan.md).
 
 ## Credits and license
 

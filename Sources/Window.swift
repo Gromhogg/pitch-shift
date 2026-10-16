@@ -754,6 +754,7 @@ final class ShiftCard: NSView {
     private var column: CGFloat = 232          // width of the rows
     private var active: Bool?
     private var numberActive: Bool?
+    private var accessoryScale: ((CGFloat) -> Void)?  // sizes the views next to the picker (addPickerAccessory)
 
     init(title text: String, extraRows: [NSView] = [], showsAmount: Bool = true) {
         title = NSTextField(labelWithString: text)
@@ -822,6 +823,27 @@ final class ShiftCard: NSView {
         heights = [:]
     }
 
+    // Small views to the right of the picker, in its row (the Voice changer's voices button). `onScale` sizes them.
+    func addPickerAccessory(_ views: [NSView], onScale: @escaping (CGFloat) -> Void) {
+        guard let index = stack.arrangedSubviews.firstIndex(of: picker) else { return }
+        if let width = widths.first(where: { $0.firstItem === picker }) {
+            width.isActive = false
+            widths.removeAll { $0 === width }
+        }
+        stack.removeArrangedSubview(picker)
+        let row = NSStackView(views: [picker] + views)
+        row.distribution = .fill  // the picker takes the room the views leave
+        row.spacing = 6
+        picker.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        picker.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        for view in views { view.setContentHuggingPriority(.required, for: .horizontal) }
+        stack.insertArrangedSubview(row, at: index)
+        widen(row)
+        accessoryScale = onScale
+        if scale > 0 { onScale(scale) }
+        heights = [:]
+    }
+
     // A row with a label on the left and a small switch on the right, for settings like "Advanced processing".
     // The label dims while the switch can't be used. `notes`: small views right after the label (shown when needed).
     static func switchRow(_ text: String, _ toggle: GradientSwitch, notes: [NSView] = []) -> CardRow {
@@ -864,6 +886,7 @@ final class ShiftCard: NSView {
             zero.attributedTitle = NSAttributedString(string: "0", attributes: [
                 .foregroundColor: Theme.mid, .font: NSFont.systemFont(ofSize: Theme.fontSize(size), weight: .medium)])
             picker.useSize(size)
+            accessoryScale?(s)
             stack.edgeInsets = NSEdgeInsets(top: (14 * s).rounded(), left: 0, bottom: (16 * s).rounded(), right: 0)
             stack.spacing = (12 * s).rounded()
             if showsAmount { stack.setCustomSpacing((8 * s).rounded(), after: amount) }
@@ -1062,7 +1085,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     func restoreChanger() {
         if let preview {
             voice.changer.on = preview.contains("changer")
-            voice.changer.voiceID = preview.contains("changer-man") ? "man" : "woman"
+            voice.changer.voiceID = arg("--voice").flatMap { VoiceLibrary.shared.voice($0)?.id }
+                ?? (preview.contains("changer-man") ? "man" : "woman")  // --voice NAME: that voice (an added one too)
             voice.changer.strength = arg("--strength").flatMap(Float.init).map { max(0, min(1, $0)) } ?? 1
             voice.changer.realistic = realisticOffered
                 && ["changer-realistic", "changer-loading", "changer-fallback"].contains { preview.contains($0) }
@@ -1111,6 +1135,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     let realisticLoading = NSProgressIndicator()  // while the realistic voice is being prepared
     let realisticWarning = NSImageView()          // it fell behind, or can't run (the tooltip says why)
     var realisticRow: CardRow!
+    lazy var voiceTools = VoiceTools(app: self)  // the voices button next to the voice picker (VoiceTools.swift)
     let advancedSwitch = GradientSwitch()
     let style = GradientSlider(left: "Natural", right: "Cartoon", name: "Voice style") { value in
         value <= 0 ? "Natural" : value >= 1 ? "Cartoon" : "\(Int((value * 100).rounded())) percent Cartoon"
@@ -1351,6 +1376,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         changerCard.picker.action = #selector(changerVoicePicked)
         changerCard.picker.setAccessibilityLabel("Voice")
         changerCard.onToggle = { [weak self] on in self?.setChanger(on) }
+        changerCard.addPickerAccessory(voiceTools.views) { [unowned self] scale in voiceTools.size(for: scale) }
 
         let background = BackgroundView()
         background.wantsLayer = true

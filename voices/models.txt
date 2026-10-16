@@ -5,5 +5,5 @@
 # of PLACEHOLDER (made by research/voicechanger/pack_voices.sh from the blend in research/voicechanger/pretrained/).
 # name                    size(bytes)  sha256                                                            url
 contentvec.mlmodelc.zip   82963628     1dd04110a6cf08a274b5b17c03563362b29092dbab787b3d17b02f57edc140a6  https://github.com/Gromhogg/pitch-shift/releases/download/v3.0.0/contentvec.mlmodelc.zip
-woman.mlmodelc.zip        24919067     d23e8a4e2b5e1ac91948b8a3ecdf34c5e6ff30f28a06c558232c44859397c754  https://github.com/Gromhogg/pitch-shift/releases/download/v3.0.0/woman.mlmodelc.zip
+woman_us.mlmodelc.zip     24919199     b9c5413f6e4cc6455dfeae67af3e6928410c997ab1a99d8aea0b44684aca94b8  https://github.com/Gromhogg/pitch-shift/releases/download/PLACEHOLDER/woman_us.mlmodelc.zip
 man.mlmodelc.zip          24919094     3188fffbe2a1357b0eec947a4e382626c7a6ce2977ba12ae5f7cabfc2f657ac8  https://github.com/Gromhogg/pitch-shift/releases/download/v3.0.0/man.mlmodelc.zip

@@ -113,13 +113,16 @@ final class VoiceModelStore {
         onChange()
     }
 
-    // Changes when the model files change (size of the voice file), so a new version counts as "first time" again.
+    // Changes when the model files change (size of the voice file, and its name when it isn't "<id>.mlmodelc", as for
+    // Woman's woman_us.mlmodelc, which has the old Woman's size), so a new version counts as "first time" again.
     private static func preparedKey(_ entry: VoiceEntry) -> String {
         let size = entry.modelURL.flatMap { url -> Int? in
             let weights = url.appendingPathComponent("weights/weight.bin")
             return (try? FileManager.default.attributesOfItem(atPath: weights.path)[.size] as? Int) ?? nil
         } ?? 0
-        return "aiVoicePrepared.\(entry.id).\(size)"
+        let model = entry.manifest.realistic?.model ?? ""
+        let name = model == "\(entry.id).mlmodelc" || model.isEmpty ? "" : ".\(model)"
+        return "aiVoicePrepared.\(entry.id)\(name).\(size)"
     }
 }
 
