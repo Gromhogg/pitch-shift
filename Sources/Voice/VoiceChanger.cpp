@@ -16,10 +16,12 @@
 //   - pitch mapping toward the voice's median pitch: off = 12 log2(target / speaker's median),
 //     P = strength * (off + (intonation - 1) * deviation) + extra, limited to +-15 half-steps, smoothed 25 ms,
 //     held through unvoiced and creaky frames (creak: < 70 Hz, < 0.62 x median, zig-zag jitter > 8 % over 3 frames,
-//     or aperiodicity 0.25-0.45 just after voice); the speaker's median (4 s) starts from a light guess (0.1 s worth
-//     of the median an earlier chain measured, voicechanger_set_speaker, or else of assumedInputHz) and learns from
-//     voiced frames and from smooth low ones (>= 0.5 x median, not rough), so a deep voice finds its real median;
-//     for the first 0.5 s of voice every smooth frame counts and only < 70 Hz is creak (the guess may be far off);
+//     or aperiodicity 0.25-0.45 just after voice); the speaker's median (4 s) starts from a guess (the median an
+//     earlier chain measured, voicechanger_set_speaker, or else assumedInputHz, worth 1 s of voice; each learned frame
+//     takes 0.25 frames off it, or 10 if it is more than 7 half-steps from the guess, so a guess that doesn't fit the
+//     speaker is gone after ~0.1 s of voice) and learns from voiced frames and from smooth low ones (>= 0.5 x median,
+//     not rough), so a deep voice finds its real median; for the first 0.5 s of voice every smooth frame counts and
+//     only < 70 Hz is creak (the guess may be far off);
 //     the median in use moves at most 0.3 half-steps per 10 ms, so learning it never makes the pitch jump,
 //   - the pitch the AI voice follows (Realistic mode, frameHz): the tracked pitch x the mapping; through creak it
 //     moves with a gradual fall or rise (not below 0.62 x median, mapped) and holds through a sudden drop or rough
@@ -41,7 +43,7 @@
 //
 // Inner tuning keys (voicechanger_tune), defaults in Tuning below: yinThreshold, voicedAp, voicedAboveFloorDb,
 // voicedMinDb, creakHz, creakRatio, creakJitter, creakApLow, creakApHigh, smoothMs, formantGlideMs, strengthGlideS,
-// maxSemitones, medianSeconds, seedFrames, eqMaxDb, eqStepDb, eqSeconds, eqStartSeconds, presenceHz, presenceQ,
+// maxSemitones, medianSeconds, seedFrames, seedFarSt, seedFarFade, eqMaxDb, eqStepDb, eqSeconds, eqStartSeconds, presenceHz, presenceQ,
 // sibilanceHz, breathAttackMs, breathReleaseMs, octUpCost, octDownCost, jumpCost, rangeSt, rangeCost, contFrames,
 // gapFrames, warmFrames, medianGlideSt, aiBandSt, aiMaxSt, aiBandLowSt, aiMinSt, aiHoldFrames, aiSlewSt.
 #include "VoiceChanger.h"
@@ -117,7 +119,9 @@ struct Tuning {
     float strengthGlideS = 0.15f;
     float maxSemitones = 15;
     float medianSeconds = 4;
-    float seedFrames = 10;           // weight of the first guess of the speaker's median (10 ms frames)
+    float seedFrames = 100;          // weight of the first guess of the speaker's median (10 ms frames)
+    float seedFarSt = 7;             // a learned frame further than this from the guess ...
+    float seedFarFade = 10;          // ... takes this much weight off it (a near one 0.25)
     float eqMaxDb = 6;
     float eqStepDb = 0.05f;
     float eqSeconds = 6;
@@ -163,7 +167,8 @@ const TuneKey kTuneKeys[] = {
     {"breathAttackMs", &Tuning::breathAttackMs}, {"breathReleaseMs", &Tuning::breathReleaseMs},
     {"octUpCost", &Tuning::octUpCost}, {"octDownCost", &Tuning::octDownCost}, {"jumpCost", &Tuning::jumpCost},
     {"rangeSt", &Tuning::rangeSt}, {"rangeCost", &Tuning::rangeCost}, {"contFrames", &Tuning::contFrames},
-    {"gapFrames", &Tuning::gapFrames}, {"warmFrames", &Tuning::warmFrames},
+    {"gapFrames", &Tuning::gapFrames}, {"warmFrames", &Tuning::warmFrames}, {"seedFarSt", &Tuning::seedFarSt},
+    {"seedFarFade", &Tuning::seedFarFade},
     {"medianGlideSt", &Tuning::medianGlideSt}, {"aiBandSt", &Tuning::aiBandSt}, {"aiMaxSt", &Tuning::aiMaxSt},
     {"aiBandLowSt", &Tuning::aiBandLowSt}, {"aiMinSt", &Tuning::aiMinSt}, {"aiHoldFrames", &Tuning::aiHoldFrames},
     {"aiSlewSt", &Tuning::aiSlewSt},
@@ -393,7 +398,10 @@ struct VoiceChanger {
     void learnMedian(float f0) {
         pushMap(pitchBin(f0));
         learned++;
-        seedWeight = std::max(0.0f, seedWeight - 0.25f);  // the first guess fades as real frames come in
+        // The first guess fades as real frames come in: slowly while they fit it, fast when they are far from it (a
+        // speaker the guess doesn't fit, e.g. a man using the Man voice).
+        const bool far = std::fabs(semitones(f0 / binHz(seedBin))) > tuning.seedFarSt;
+        seedWeight = std::max(0.0f, seedWeight - (far ? tuning.seedFarFade : 0.25f));
     }
 
     float noiseFloor() const {  // 10th percentile of the levels of the last ~5 s
