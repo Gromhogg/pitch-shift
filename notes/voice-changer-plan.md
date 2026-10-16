@@ -366,7 +366,96 @@ silicon's (largest difference 0.00005); no new compiler warnings; hidden preview
 306×844 and 1300×640 (light and dark, Natural, first AI step, default, most real, loading, standing in, Intel). The
 card is 33 pt taller (smallest windows 588×581 and 306×850; side by side 870×369 is unchanged).
 
-**Left / not sure:** nobody has listened yet; the jitter goal was met on synthetic held notes, not a real singer;
+**Left / not sure (3.1):** nobody has listened yet; the jitter goal was met on synthetic held notes, not a real singer;
 Whisper hears the "a" of "a judicial review" as "its" in most versions (also today's), a breathy start the AI voice
 adds; slider moves in a room that is never quiet switch after 3 s with a crossfade (heard as a small jump); the delay
 on the card uses what Core Audio reports for the mic and Pitch Shift Mic (a live measurement is still to do).
+
+## 3.1.1: the AI voice starts right away again, and held notes stay put (2026-10-16)
+
+**What the owner heard in 3.1.0:** through the Test button, slider at the right end, noisy room: "sounds worse than
+when there was no slider at all … like the intel mac fallback … super staticky"; and "the notes holding and changing
+are still a problem for each mode". Cause of the first (research/voicechanger/results/regression31.md): a new 3.1.0
+AI stream played Natural with no delay until it found a quiet stretch as long as the look-ahead + 0.21 s (else 6 s),
+so in a noisy room the 5 s Test recording was almost all Natural, and when the AI came in up to 1 s was heard twice.
+
+**Fixes:**
+1. *Start:* a new stream plays at its fixed delay from the start, like 3.0.0 (Natural fills in, delayed to the same
+   point; silence until it gets there) and the AI takes over with its first piece, or as soon as the models are given
+   to a stream made while they were loading. Look-ahead changes (slider moves) still wait for a pause, 1.2 s at most
+   (was 3 s), so they are made within 1.5 s of the ask.
+2. *Test:* with the AI voice on, the recording goes on for the AI's fixed delay after the countdown and is played
+   from that point, so the clip is the 5 s that were said, in the AI voice.
+3. *Card:* "· backup voice" after the delay (and the spoken description) whenever Natural plays instead of the AI:
+   loading, before the first AI piece, and for a second or two after Natural filled in for a late piece (the stream now
+   reports whether the AI is what plays, `VoiceStreamStats.aiNow`).
+4. *Held notes, both modes (VoiceChanger.cpp):* the speaker's middle pitch (Natural's and the AI's own) no longer
+   learns from held notes or moves while one is held: a voiced stretch (gaps up to 80 ms) whose slow pitch line (mean
+   of its last 16 voiced frames: vibrato averages out) stays within 1 half-step for 0.4 s is a held note; a stretch's
+   frames are learned when it is over (1.5 s late at most), so the start of a note (even a slow scoop) is never
+   learned; the median is read between the histogram's quarter steps (no more stairs), and once the speaker is known
+   Natural's moves at most 0.05 half-steps per 10 ms. `--changer-tune heldMode=0` gives 3.1.0's behaviour exactly.
+5. *AI ceiling:* the AI pitch is eased into at most 11 half-steps above the voice's median (was 12). At 12 (about
+   470 Hz for Woman) a note held there came out an octave low for a second or more and then jumped up (3.1.0 too);
+   11 (about 440 Hz) stays whole. On men's speech it moves 0.3 % of the AI pitch frames (by 0.7 half-steps on average).
+
+**Test button, simulated** (the app's stream code paced in real time, 128-sample callbacks, CPU, models in memory,
+two American men talking on from the first moment; seconds of AI voice in what Test plays back: 3.1.0 = its first
+5 s, 3.1.1 = the 5 s from the fixed delay on):
+
+| input | slider 0.05 | slider 0.25 | slider 1 |
+|---|---|---|---|
+| talking, clean room | 4.66 → 4.89 s | 4.54 → 4.89 s | 3.99 → 4.88 s |
+| talking, room noise −35 dBFS | 1.40 → 4.97 s | 1.24 → 5.00 s | 0.00 → 5.00 s |
+| talking, room noise −25 dBFS | 4.28 → 5.00 s | 1.56 → 5.00 s | 0.00 → 5.00 s |
+| talking, distant babble −30 dBFS | 1.72 → 4.98 s | 1.38 → 5.00 s | 0.00 → 5.00 s |
+| 0.6 s pauses, clean | 3.90 → 4.19 s | 3.75 → 4.19 s | 3.20 → 4.19 s |
+| 0.6 s pauses, noise −35 dBFS | 4.28 → 5.00 s | 4.12 → 5.00 s | 0.00 → 5.00 s |
+| noise −35, models still loading at the press | 1.40 → 4.95 s | 1.24 → 5.00 s | 0.00 → 5.00 s |
+
+(Clean rows: the rest is silence, the pauses between sentences and the 0.3 s before the first word, where the AI is
+silent too. "Loading" here is the CPU load from the cache, 0.3–0.6 s: the AI came in as soon as it was loaded.) The AI
+is now first heard at the fixed delay (0.26 / 0.41 / 0.97 s), in 3.1.0 after 3.3–6.3 s in noise. Nothing is heard twice
+any more (the output's lag behind the input stays at the fixed delay; 3.1.0 repeated 0.28 / 0.44 / 0.98 s at the
+handover).
+
+**Held notes** (real sung notes from VocalSet, CC BY 4.0, used only for testing, never shipped: 10 men's
+notes at 127–264 Hz → Woman, 6 women's at 261–536 Hz → Man, straight, forte with vibrato and soft; each after 8 s
+of talking and also cold; plus 6 synthetic notes; Praat pitch over the held part. Slide = how far the output moves
+from the first to the last 0.5 s beyond what the singer did × intonation; steps = 30 ms jumps > 0.3 half-steps the
+singer's moves don't explain; 3.1.0 → 3.1.1):
+
+| | slide, mean / worst (half-steps) | steps | octave flips (frames) | jitter vs the singer (median) |
+|---|---|---|---|---|
+| Natural, real notes, offline (32) | 3.12 / 16.9 → **0.07 / 0.28** | 259 → 17 | 278 → 0 | 1.35 → 0.94 |
+| Natural, real time, men after talking (14) | 2.40 / 15.1 → **0.09 / 0.21** | 77 → 0 | 111 → 0 | 0.99 → 0.71 |
+| Natural, real time, women (8) | 0.32 / 1.92 → **0.03 / 0.08** | 8 → 1 | 0 → 0 | 1.43 → 1.34 |
+| AI 0.05 / 0.25 / 1, real notes, offline (32) | 1.29 / 0.92 / 0.93 → **0.06 / 0.07 / 0.08** (worst 12.3 → 0.33) | 80 / 76 / 84 → 3 / 0 / 0 | 202 / 160 / 292 → 0 | 1.67 / 1.08 / 1.14 → 1.54 / 1.15 / 1.22 |
+| AI, real time, men after talking (14) | 2.51 / 1.65 / 1.65 → **0.12 / 0.12 / 0.12** | 39 / 18 / 17 → 0 / 0 / 0 | 117 / 218 / 171 → 0 | 1.93 / 1.03 / 1.05 → 1.17 / 0.94 / 0.94 |
+| AI, real time, women (8) | 0.62 / 0.60 / 0.61 → **0.05 / 0.03 / 0.04** | 16 / 20 / 22 → 11 / 16 / 12 | 0 → 0 | 2.65 / 2.27 / 2.51 → 1.85 / 1.89 / 1.71 |
+| synthetic notes, offline (12): Natural / AI 0.25 | 1.45 → 0.02 / 0.06 → 0.03 | 22 → 0 / 24 → 25 | 0 | 0.96 → 0.85 / 1.29 → 1.21 |
+
+The remaining AI steps are on one synthetic woman's flat note (our pitch tracker reads that made-up vowel 0.7
+half-steps high now and then, in 3.1.0 too) and, at 0.25 in real time, during late pieces. The AI's jitter ratio is
+above 1.3 on very steady notes (and at slider 0.05, where there is no look-ahead to smooth with), but the extra
+wobble is about 0.01 half-steps (1 cent). Natural's remaining "steps" are at vibrato turns (its bigger vibrato lags
+the singer's by ~20 ms), not stairs. At the pitch feed (no measuring noise) the tracker made 0 octave flips on these
+notes and held the pitch through 21 rough frames (the same before and after).
+
+**Speech (Natural), 3.1.0 → 3.1.1,** a4 sets warmed up with 8 s of the same speaker: VCTK men → Woman (40 clips)
+judged a woman 100 → 100 %, word errors 5.3 → 5.3 %, Distill-MOS 3.49 → 3.48, pitch median 233 → 234 Hz, 5–95 %
+spread 15.9 → 16.5 half-steps; VCTK women → Man (40) 100 → 100 %, 6.0 → 6.3 % (one word), 3.71 → 3.72, 112 →
+113 Hz, 12.1 → 11.7; `say` men → Woman (70) 100 → 100 %, 20.5 → 19.8 %, 1.88 → 1.88, 218 → 218 Hz, 12.9 → 13.1;
+`say` women → Man (70) 100 → 100 %, 7.8 → 7.4 %, 2.86 → 2.83, 111 → 111 Hz, 7.3 → 7.4. Frame by frame the output
+pitch moved 0.11–0.32 half-steps on average (median 0): the middle pitch now changes when a stretch of voice ends
+instead of every frame, and smoothly.
+
+**Checks:** changer off 14/14 byte-identical to a fresh main build; with `heldMode=0,aiMaxSt=12` Natural (Woman,
+Man) and the AI (0.05, 0.25) are byte-identical to 3.1.0 (6/6); forced late pieces (200 ms extra every 8th piece,
+60 s at 0.25 and 1): 0 frames at the speaker's own pitch (Natural filled in 2.2–2.5 s of voice); slider moves in a
+room that is never quiet: made 1.21–1.33 s after the ask (0.13 s when a pause came); 60 s runs: 0–4 late pieces a
+minute in both versions, with or without slider moves (pieces of 80–110 ms while the Mac was busy: moving wallpaper,
+WindowServer, kernel_task), 0 in the quieter runs; Intel half says "needs Apple silicon" (Natural matches Apple
+silicon within 0.00011); 36 compiler warnings (as main); hidden previews of loading / backup voice / AI at 870×369,
+588×581, 306×850 (dark and light) fine. Live microphone tests skipped (the owner's app was open). Tools:
+`research/voicechanger/r311/` (git-ignored).
