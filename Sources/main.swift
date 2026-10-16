@@ -37,6 +37,11 @@
 //                                              waiting sound), printing the delay they add (no devices)
 //   --list-voices [--voices-dir DIR]           the voice changer's voices (and files that were skipped)
 //   --test-button [--mic NAME] [--volume 0.03] presses Test with a quiet tone as the voice (record 5 s, play back)
+//                [--file F] [--voice Woman [--quality realistic]]
+//                                              --file: a speech file as the voice (looped, its loudest point at
+//                                              --volume); --voice: with the voice changer on, so it records and plays
+//                                              back the changed voice (Realistic: Test is pressed once the AI voice
+//                                              is ready; --steps is not used with --voice: only one at a time)
 //   --test-sounds FILE [--speakers] [--seconds S] [--out F.caf] [--mic NAME] [--steps 3] [--volume 0.05] [--hear 0.02]
 //                [--sound-volume 0.5] [--voice-off] [--voice Woman [--quality realistic]]
 //                                              Soundboard: plays FILE into Pitch Shift Mic 1 s in, with a quiet tone as
@@ -221,6 +226,25 @@ func refuseIfMicsBusy() {
         exit(2)
     }
 }
+// A sound file as one channel at `rate`, to play into the voice chain as the "mic" (--test-voice, --test-button).
+func testVoiceFile(_ path: String, rate: Double) -> [Float] {
+    guard let file = try? AVAudioFile(forReading: URL(fileURLWithPath: path)),
+          let input = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length)),
+          (try? file.read(into: input)) != nil,
+          let target = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1),
+          let converter = AVAudioConverter(from: file.processingFormat, to: target),
+          let converted = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: AVAudioFrameCount(Double(file.length) * rate / file.processingFormat.sampleRate) + 1024)
+    else { print("Can't read \(path)"); exit(1) }
+    var given = false
+    _ = converter.convert(to: converted, error: nil) { _, status in
+        if given { status.pointee = .endOfStream; return nil }
+        given = true
+        status.pointee = .haveData
+        return input
+    }
+    return Array(UnsafeBufferPointer(start: converted.floatChannelData![0], count: Int(converted.frameLength)))
+}
+
 if ["--test", "--test-voice", "--test-button", "--test-default-mic"].contains(where: { args.contains($0) })
     || (args.contains("--test-sounds") && !args.contains("--recording")) { refuseIfMicsBusy() }
 
@@ -421,24 +445,7 @@ if args.contains("--test-voice") {
     let cpuStart = Double(usage.ru_utime.tv_sec + usage.ru_stime.tv_sec) + Double(usage.ru_utime.tv_usec + usage.ru_stime.tv_usec) / 1e6
     let wallStart = Date()
     let tone = arg("--tone").flatMap(Double.init)
-    var sourceSamples: [Float] = []
-    if let path = arg("--file") {
-        // Load a sound file as one channel at the mic's rate, to play into the chain in a loop.
-        let file = try! AVAudioFile(forReading: URL(fileURLWithPath: path))
-        let input = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length))!
-        try! file.read(into: input)
-        let target = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1)!
-        let converter = AVAudioConverter(from: file.processingFormat, to: target)!
-        let converted = AVAudioPCMBuffer(pcmFormat: target, frameCapacity: AVAudioFrameCount(Double(file.length) * rate / file.processingFormat.sampleRate) + 1024)!
-        var given = false
-        _ = converter.convert(to: converted, error: nil) { _, status in
-            if given { status.pointee = .endOfStream; return nil }
-            given = true
-            status.pointee = .haveData
-            return input
-        }
-        sourceSamples = Array(UnsafeBufferPointer(start: converted.floatChannelData![0], count: Int(converted.frameLength)))
-    }
+    let sourceSamples: [Float] = arg("--file").map { testVoiceFile($0, rate: rate) } ?? []
     var phase = 0.0, position = 0
     let toneStart = Int(rate)  // the tone starts 1 s in, once recording runs, so its delay can be measured
     // --watch: the tone plays for half of every second, so the delay can be measured again each second.
@@ -624,27 +631,52 @@ if args.contains("--test-voice") {
 }
 
 // Presses the Test button with a quiet tone as the "voice": records 5 s from Pitch Shift Mic, then plays it back.
+// --voice NAME [--quality realistic]: with the voice changer on, so it records the changed voice (Realistic: Test is
+// pressed once the AI voice is ready). --file F: a speech file (looped, its loudest point at --volume) instead of the
+// tone.
 if args.contains("--test-button") {
     let micUID = arg("--mic").flatMap { name in Mics.list().first { $0.name == name }?.uid }  // e.g. not a Bluetooth headset's
-    let voice = VoiceShifter(halfSteps: 3, cartoon: 0, micUID: micUID)
+    let voice = VoiceShifter(halfSteps: voiceStepsArg(3), cartoon: 0, micUID: micUID)
     let rate = voice.currentMic.map(nominalRate) ?? 48000
     let volume = arg("--volume").flatMap(Double.init) ?? 0.03
-    var phase = 0.0
+    var speech = arg("--file").map { testVoiceFile($0, rate: rate) } ?? []
+    if let peak = speech.map(abs).max(), peak > 0 { speech = speech.map { $0 * Float(volume) / peak } }
+    var phase = 0.0, position = 0
     voice.testSource = { buffer, frames in
-        for i in 0..<frames { buffer[i] = Float(volume * sin(phase)); phase += 2 * .pi * 440 / rate }
+        for i in 0..<frames {
+            if speech.isEmpty {
+                buffer[i] = Float(volume * sin(phase)); phase += 2 * .pi * 440 / rate
+            } else {
+                buffer[i] = speech[position % speech.count]; position += 1
+            }
+        }
+    }
+    if let changerArg, let entry = arg("--voice").flatMap({ VoiceLibrary.shared.voice($0) }) {  // --voice: the voice changer on
+        voice.changerTune = changerArg.tune
+        voice.changer = ChangerSettings(on: true, voiceID: entry.id, strength: changerArg.strength, realistic: realisticArg)
+        print("voice changer: \(entry.name), \(realisticArg && realisticUnavailable == nil ? "Realistic" : "Natural")")
     }
     let test = VoiceTest(voice: voice)
     let started = Date()
     test.onChange = {
         let silent = voice.params.withLock { $0.silent }
-        print(String(format: "%.1fs: %@ (voice %@, sending silence: %@, real mic open: %@)", Date().timeIntervalSince(started), "\(test.phase)",
-                     "\(voice.state)", "\(silent)", "\(voice.chain != nil)"))
+        print(String(format: "%.1fs: %@ (voice %@, sending silence: %@, real mic open: %@, voice changer %@)", Date().timeIntervalSince(started),
+                     "\(test.phase)", "\(voice.state)", "\(silent)", "\(voice.chain != nil)", "\(voice.changerState)"))
         if test.phase == .idle { voice.stop(); exit(0) }
     }
     voice.start()
     print("mic: \(voice.currentMic.map(deviceName) ?? "none")")
-    test.click()
-    DispatchQueue.main.asyncAfter(deadline: .now() + 15) { print("timed out"); exit(1) }
+    // Realistic: the AI voice loads in the background (up to a minute the first time); Test is pressed once it's ready.
+    func press(waited: Double) {
+        if voice.changer.realistic && voice.changerState == .loading && waited < 90 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { press(waited: waited + 0.25) }
+            return
+        }
+        if voice.changer.on { print(String(format: "pressing Test after %.1f s (voice changer %@)", waited, "\(voice.changerState)")) }
+        test.click()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 15) { print("timed out"); exit(1) }
+    }
+    press(waited: 0)
     dispatchMain()
 }
 
