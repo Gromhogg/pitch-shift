@@ -88,27 +88,38 @@ struct SoundPlay: @unchecked Sendable {
 // the one sent into Pitch Shift Mic (VoiceChain) and the owner's own (Soundboard), so both stop and switch the same
 // way. A sound that is stopped or replaced fades out over 10 ms (stopping at once would click); a new one starts
 // from its beginning. A new volume for the playing sound glides there in about 20 ms (a jump would click too).
+// A sound also fades in over its first 5 ms and out over its last 10 ms: many files start or end in the middle of a
+// loud wave, which clicks (a jump of 50-80 dB within 1 ms) and makes call apps' noise and level controls jump too.
+// (5 ms keeps the punch of a sound that starts with a hit.)
 struct SoundMix {
     private(set) var take: Int
     private let rate: Double
     private let fadeStep: Float  // 10 ms from full to nothing
+    private let fadeLength: Int  // 10 ms
+    private let riseStep: Float  // 5 ms from nothing to full
+    private let ends: Bool       // fade in and out at the sound's own start and end
     private let volumeGlide: Float  // the part of the way to a new volume taken each sample (20 ms smoothing)
     private var sound: UnsafePointer<Float>?  // the one playing
     private var count = 0
     private var at = 0
     private var gain: Float = 1    // its volume now
     private var volume: Float = 1  // its volume as set (`gain` glides there)
+    private var rise: Float = 1    // its fade-in
     private var fading: UnsafePointer<Float>?  // one that was stopped or replaced
     private var fadingCount = 0
     private var fadingAt = 0
     private var fadingGain: Float = 0
     private var fadingVolume: Float = 1
 
-    // `take`: the SoundPlay's take now (a sound already playing isn't picked up).
-    init(rate: Double, take: Int) {
+    // `take`: the SoundPlay's take now (a sound already playing isn't picked up). `ends: false`: no fades at a
+    // sound's own start and end, as in 2.0.2 (--render-sounds --sound-preset old).
+    init(rate: Double, take: Int, ends: Bool = true) {
         self.rate = rate
         self.take = take
+        self.ends = ends
         fadeStep = Float(1 / (0.01 * rate))
+        fadeLength = max(1, Int(0.01 * rate))
+        riseStep = Float(1 / (0.005 * rate))
         volumeGlide = Float(1 - exp(-1 / (0.02 * rate)))
     }
 
@@ -123,7 +134,7 @@ struct SoundMix {
             fading = playing
             fadingCount = count
             fadingAt = at
-            fadingGain = 1
+            fadingGain = rise  // from where its fade-in had got to
             fadingVolume = gain
         }
         sound = nil
@@ -133,6 +144,7 @@ struct SoundMix {
         at = 0
         gain = play.volume
         volume = play.volume
+        rise = ends ? 0 : 1
         return cut
     }
 
@@ -148,6 +160,14 @@ struct SoundMix {
                 if abs(volume - gain) < 1e-4 { gain = volume }
             }
             value = playing[at] * gain
+            if ends {
+                if rise < 1 {
+                    rise = min(1, rise + riseStep)
+                    value *= rise
+                }
+                let left = count - at
+                if left < fadeLength { value *= Float(left) / Float(fadeLength) }
+            }
             at += 1
             if at >= count {
                 sound = nil
@@ -157,7 +177,10 @@ struct SoundMix {
         if let old = fading {
             fadingGain -= fadeStep
             if fadingGain > 0 && fadingAt < fadingCount {
-                value += old[fadingAt] * fadingGain * fadingVolume
+                var faded = old[fadingAt] * fadingGain * fadingVolume
+                let left = fadingCount - fadingAt
+                if ends && left < fadeLength { faded *= Float(left) / Float(fadeLength) }
+                value += faded
                 fadingAt += 1
             } else {
                 fading = nil
@@ -180,6 +203,13 @@ struct SoundMix {
 // What Pitch Shift Mic sends after the voice: the Soundboard's sound mixed in, and the mic muted while a sound plays
 // on the Mac's own speakers. Used on the voice chain's sound thread (VoiceChain) and by the offline check
 // (--render-sounds), so both do exactly the same. Makes no memory and never waits.
+//
+// While a sound plays, voice + sound go through a limiter that keeps them at or under -3 dBFS: turned down at once
+// when they'd pass it, held 15 ms, then back up over about 150 ms (after the sound it only comes back up, which
+// takes up to about a second, so the voice never jumps). Before, the sum was only eased sample by sample from 0.7
+// up to 0.95 (just under full scale): a loud sound at 150% sat in that bend half the time, and its points between
+// samples went past full scale (up to +3.4 dBFS), which the clock matching into Pitch Shift Mic and the call app
+// turn into clipped samples. With no sound playing nothing changes.
 struct CallMix {
     private(set) var mix: SoundMix
     private var muteMic = false   // the playing sound is on the Mac's speakers
@@ -187,12 +217,22 @@ struct CallMix {
     private var micGain: Float = 1
     private let fadeStep: Float   // 10 ms from full to nothing
     private let muteAfter: Int    // 150 ms
+    private let limits: Bool      // the limiter is used (not as in 2.0.2)
+    static let ceiling: Float = 0.707946  // -3 dBFS
+    private var limitGain: Float = 1
+    private var holdLeft = 0
+    private let hold: Int         // 15 ms: longer than half a wave of the lowest bass, so the gain doesn't wobble with it
+    private let release: Float    // the part of the way back up taken each sample (150 ms)
 
-    // `take`: the SoundPlay's take now (a sound already playing isn't picked up).
-    init(rate: Double, take: Int) {
-        mix = SoundMix(rate: rate, take: take)
+    // `take`: the SoundPlay's take now (a sound already playing isn't picked up). `limits: false` (and `ends: false`
+    // for the sound's fades): as in 2.0.2, for --render-sounds --sound-preset old.
+    init(rate: Double, take: Int, limits: Bool = true, ends: Bool = true) {
+        mix = SoundMix(rate: rate, take: take, ends: ends)
         fadeStep = Float(1 / (0.01 * rate))
         muteAfter = Int(rate * 0.15)
+        self.limits = limits
+        hold = Int(rate * 0.015)
+        release = Float(1 - exp(-1 / (0.15 * rate)))
     }
 
     // The Soundboard's latest state (read once per callback): a new sound, Stop, or a new volume.
@@ -221,11 +261,28 @@ struct CallMix {
 
     // One sample out: the voice (`shifting`: it went through the pitch change) with the sound mixed in.
     @inline(__always) mutating func out(_ voice: Float, shifting: Bool) -> Float {
-        if mix.active {
-            var ended = false
-            let value = softLimit(voice + mix.next(&ended))
-            if ended && muteMic { muteLeft = muteAfter }  // played to the end
-            return value
+        let playing = mix.active
+        if playing || limitGain < 1 {
+            var value = voice
+            if playing {
+                var ended = false
+                value += mix.next(&ended)
+                if ended && muteMic { muteLeft = muteAfter }  // played to the end
+            }
+            if limits {
+                let size = abs(value)
+                if playing && size * limitGain > Self.ceiling {  // after the sound it only lets go
+                    limitGain = Self.ceiling / size
+                    holdLeft = hold
+                } else if holdLeft > 0 {
+                    holdLeft -= 1
+                } else if limitGain < 1 {
+                    limitGain += (1 - limitGain) * release
+                    if limitGain > 0.9999 { limitGain = 1 }
+                }
+                value *= limitGain
+            }
+            return softLimit(value)
         } else if shifting {
             // The shifted voice can peak a few dB above the mic: ease its loudest moments instead of cutting them
             // off at full scale (a hard cut sounds harsh and buzzy).

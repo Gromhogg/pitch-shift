@@ -24,10 +24,12 @@
 //                                              --cartoon-at "1:1,2:0" moves the style to 1 at 1 s and back to 0 at 2 s;
 //                                              --voice-preset old: as before the Natural level fix, for comparing)
 //   --render-sounds VOICE OUT --sound FILE [--at 5,20] [--sound-volume 1] [--speakers] [--voice-db 0] [--shifted]
-//                [--buffer 128]                Soundboard, offline (no devices): VOICE as the mic, FILE clicked at each
+//                [--buffer 128] [--sound-preset old]
+//                                              Soundboard, offline (no devices): VOICE as the mic, FILE clicked at each
 //                                              --at second, OUT = what Pitch Shift Mic would send (the chain's own
 //                                              mixing); prints the highest sample, how many samples are near full
-//                                              scale, and how long the mixing takes per callback
+//                                              scale, and how long the mixing takes per callback (--sound-preset old:
+//                                              as in 2.0.2, before the limiter, fades and loudness cap)
 //   --test-button [--mic NAME] [--volume 0.03] presses Test with a quiet tone as the voice (record 5 s, play back)
 //   --test-sounds FILE [--speakers] [--seconds S] [--out F.caf] [--mic NAME] [--steps 3] [--volume 0.05] [--hear 0.02]
 //                [--sound-volume 0.5] [--voice-off]
@@ -260,21 +262,24 @@ if let input = arg("--render-voice") {
 if let input = arg("--render-sounds") {
     let i = args.firstIndex(of: "--render-sounds")!
     guard i + 2 < args.count, let path = arg("--sound") else {
-        print("usage: --render-sounds VOICE OUT --sound FILE [--at 5,20] [--sound-volume 1] [--speakers] [--voice-db 0] [--shifted] [--buffer 128]")
+        print("usage: --render-sounds VOICE OUT --sound FILE [--at 5,20] [--sound-volume 1] [--speakers] [--voice-db 0] [--shifted] [--buffer 128] [--sound-preset old]")
         exit(1)
     }
+    let preset = arg("--sound-preset") ?? "current"
+    guard preset == "current" || preset == "old" else { print("--sound-preset: old or current"); exit(1) }
     guard let file = try? AVAudioFile(forReading: URL(fileURLWithPath: input)),
           let source = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(file.length)),
           (try? file.read(into: source)) != nil else { print("Can't read \(input)"); exit(1) }
     let rate = file.processingFormat.sampleRate
     let clip: SoundClip
-    do { clip = try SoundClip(url: URL(fileURLWithPath: path), rate: rate) } catch { print("Can't read \(path)"); exit(1) }
+    do { clip = try SoundClip(url: URL(fileURLWithPath: path), rate: rate, levelFix: preset != "old") } catch { print("Can't read \(path)"); exit(1) }
     let gain = Float(pow(10, (arg("--voice-db").flatMap(Double.init) ?? 0) / 20))
     let voice = Array(UnsafeBufferPointer(start: source.floatChannelData![0], count: Int(source.frameLength))).map { $0 * gain }
     let starts = (arg("--at") ?? "1").split(separator: ",").compactMap { Double($0) }
     let volume = arg("--sound-volume").flatMap(Float.init).map { max(0, min(SoundEntry.loudest, $0)) } ?? 1
     let made = renderSounds(voice: voice, rate: rate, shifted: args.contains("--shifted"), clip: clip, starts: starts,
-                            volume: volume, speakers: args.contains("--speakers"), buffer: arg("--buffer").flatMap(Int.init) ?? 128)
+                            volume: volume, speakers: args.contains("--speakers"), buffer: arg("--buffer").flatMap(Int.init) ?? 128,
+                            old: preset == "old")
     guard let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1),
           let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(max(1, made.out.count))) else { exit(1) }
     buffer.frameLength = AVAudioFrameCount(made.out.count)
