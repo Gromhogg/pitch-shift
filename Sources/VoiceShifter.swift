@@ -248,14 +248,18 @@ func voiceLevelGain(shapeMove: Float) -> Float {
 // While the voice changer is on, its pitch and voice shape (set every callback from voicechanger_analyse) replace
 // the set amount and style; turning it on or off blends from one to the other over 0.15 s. With the changer off
 // nothing here changes (the same Rubber Band calls as before).
-// The voice changer's Natural mode uses the pulse shifter (Sources/Voice/PulseShifter.h) instead of Rubber Band:
-// Rubber Band smears the voice's pulses into a steady buzz at the changer's big moves (8 to 10 half-steps), the
-// pulse shifter keeps them whole. It takes over (and hands back) at once when the changer is turned on or off,
-// starting fresh like a shift leaving 0. `--changer-tune naturalEngine=0` keeps Rubber Band for it (as before).
+// The voice changer's Natural mode, and the plain shift from 6 half-steps up or down, use the pulse shifter
+// (Sources/Voice/PulseShifter.h) instead of Rubber Band: Rubber Band smears the voice's pulses into a steady buzz at
+// big moves (the changer moves 8 to 10 half-steps), the pulse shifter keeps them whole, with less delay. It takes
+// over (and hands back) at once, starting fresh like a shift leaving 0, when the changer is turned on or off or the
+// set amount crosses 6 ("Deeper when slow" doesn't count, so it never switches in the middle of a word). Below 6
+// with the changer off nothing changes (the same Rubber Band calls as before). `--changer-tune naturalEngine=0`
+// keeps Rubber Band for everything.
 final class VoiceStretcher {
     let state: RubberBandState
-    private let pulse: OpaquePointer?  // the pulse shifter (nil: the changer uses Rubber Band)
-    private(set) var pulseOn = false   // the voice changer is using the pulse shifter now
+    private let pulse: OpaquePointer?  // the pulse shifter (nil: Rubber Band only)
+    private(set) var pulseOn = false   // the pulse shifter is in use now
+    private let pulsePlainFrom: Float  // the plain shift uses it from this many half-steps (set amount, up or down)
     // The changer's voice shape move is made this much bigger (in log terms) for the pulse shifter: moving whole
     // pulses keeps more of the speaker's own voice than Rubber Band, so the same shape scale sounded less changed
     // (VCTK men -> Woman: judged a woman 88 % at 1.21 vs Rubber Band's 95 %; at 1.21^1.4 100 %).
@@ -294,6 +298,7 @@ final class VoiceStretcher {
             pulse = nil
         }
         pulseShapePower = Double(tune.last { $0.0 == "pulseShapePow" }?.1 ?? 1.4)
+        pulsePlainFrom = levelFix ? 6 : .infinity  // `--voice-preset old` renders as before: Rubber Band only
         self.halfSteps = halfSteps
         self.cartoon = max(0, min(1, cartoon))
         cartoonNow = self.cartoon
@@ -310,6 +315,9 @@ final class VoiceStretcher {
             pulseOn = pulse != nil
             blend = 1
             applyChanger()
+        } else if plainWantsPulse {
+            pulseOn = true
+            applyPlain(repitch: true)
         } else {
             aimGain()
         }
@@ -330,6 +338,23 @@ final class VoiceStretcher {
     // False when the voice goes through untouched (at 0, unless "Deeper when slow" or the voice changer is on).
     var running: Bool { halfSteps != 0 || slowDeeper || changerActive }
 
+    // The plain shift's set amount is big enough for the pulse shifter.
+    private var plainWantsPulse: Bool { pulse != nil && abs(halfSteps) >= pulsePlainFrom }
+
+    // Gives the set amount and style to the shifter in use (not while the changer sets them). For Rubber Band these
+    // are the same calls as before the pulse shifter; it gets the pitch only when `repitch`.
+    private func applyPlain(repitch: Bool) {
+        if pulseOn, let pulse {  // the pulse shifter keeps the loudness itself
+            let scale = pow(2, Double(pitch) / 12)
+            pulseshifter_set(pulse, scale, pow(scale, Double(min(max(cartoonNow, 0), 1))))  // the shape moves pitch^style
+            gainTarget = 1
+            return
+        }
+        if repitch { rubberband_set_pitch_scale(state, pow(2, Double(pitch) / 12)) }
+        rubberband_set_formant_scale(state, voiceFormantScale(halfSteps: pitch, cartoon: cartoonNow))
+        aimGain()
+    }
+
     // Returns true when the shifter started fresh (coming back from normal pitch), so old sound should be dropped.
     func set(halfSteps new: Float) -> Bool {
         guard new != halfSteps else { return false }
@@ -338,6 +363,17 @@ final class VoiceStretcher {
         halfSteps = new
         if changerActive {  // the changer sets Rubber Band (the amount only counts while blending)
             applyChanger()
+            return fresh
+        }
+        if let pulse, plainWantsPulse != pulseOn {  // the amount crossed 6: the other shifter takes over, fresh
+            pulseOn = !pulseOn
+            if pulseOn { pulseshifter_reset(pulse) } else { rubberband_reset(state) }
+            applyPlain(repitch: true)
+            gain = gainTarget
+            return true
+        }
+        if pulseOn {
+            applyPlain(repitch: true)
             return fresh
         }
         if running { rubberband_set_pitch_scale(state, pow(2, Double(pitch) / 12)) }
@@ -351,19 +387,12 @@ final class VoiceStretcher {
     // fresh (it wasn't in use at 0), so old sound should be dropped.
     func set(changer on: Bool) -> Bool {
         guard on != changerOn else { return false }
-        if let pulse {  // the pulse shifter takes over, or hands back to Rubber Band, at once
+        if let pulse {  // the pulse shifter takes over, or hands back to the plain shift, at once
             changerOn = on
-            pulseOn = on
             blend = on ? 1 : 0
-            if on {
-                pulseshifter_reset(pulse)
-                applyChanger()
-            } else {
-                rubberband_reset(state)
-                rubberband_set_pitch_scale(state, pow(2, Double(pitch) / 12))
-                rubberband_set_formant_scale(state, voiceFormantScale(halfSteps: pitch, cartoon: cartoonNow))
-                aimGain()
-            }
+            pulseOn = on || plainWantsPulse
+            if pulseOn { pulseshifter_reset(pulse) } else { rubberband_reset(state) }
+            if on { applyChanger() } else { applyPlain(repitch: true) }
             gain = gainTarget
             return true
         }
@@ -420,9 +449,7 @@ final class VoiceStretcher {
             applyChanger()
             return fresh
         }
-        rubberband_set_pitch_scale(state, pow(2, Double(pitch) / 12))
-        rubberband_set_formant_scale(state, voiceFormantScale(halfSteps: pitch, cartoon: cartoonNow))
-        aimGain()
+        applyPlain(repitch: true)
         if fresh { gain = gainTarget }
         return fresh
     }
@@ -444,11 +471,7 @@ final class VoiceStretcher {
             extra = abs(extraTarget - extra) <= extraStep * step ? extraTarget : extra + (extraTarget > extra ? extraStep : -extraStep) * step
             let goal: Float = changerOn ? 1 : 0
             blend = abs(goal - blend) <= blendStep * step ? goal : blend + (goal > blend ? blendStep : -blendStep) * step
-            if !changerActive {  // fully blended out: back to the set amount and style, as without the changer
-                rubberband_set_pitch_scale(state, pow(2, Double(pitch) / 12))
-                rubberband_set_formant_scale(state, voiceFormantScale(halfSteps: pitch, cartoon: cartoonNow))
-                aimGain()
-            }
+            if !changerActive { applyPlain(repitch: true) }  // fully blended out: back to the set amount and style
             return
         }
         let restyle = cartoonNow != cartoon, repitch = extra != extraTarget
@@ -460,14 +483,16 @@ final class VoiceStretcher {
         if repitch {
             let step = extraStep * Float(frames)
             extra = abs(extraTarget - extra) <= step ? extraTarget : extra + (extraTarget > extra ? step : -step)
-            rubberband_set_pitch_scale(state, pow(2, Double(pitch) / 12))
         }
-        rubberband_set_formant_scale(state, voiceFormantScale(halfSteps: pitch, cartoon: cartoonNow))
-        aimGain()
+        applyPlain(repitch: repitch)
     }
 
     private func aimGain() {
         guard !changerActive else { return }  // the changer's level is set in applyChanger
+        if pulseOn {  // the pulse shifter keeps the loudness itself
+            gainTarget = 1
+            return
+        }
         gainTarget = levelFix ? voiceLevelGain(halfSteps: pitch, cartoon: cartoonNow) : 1
     }
 
@@ -508,7 +533,7 @@ final class VoiceStretcher {
 
     // For --test-voice --watch.
     var delayNote: String {
-        if pulseOn { return "pulse shifter (voice changer), fixed delay \(pulseshifter_latency(pulse)) samples" }
+        if pulseOn { return "pulse shifter, fixed delay \(pulseshifter_latency(pulse)) samples" }
         return "Rubber Band: start delay \(rubberband_get_start_delay(state)) samples, start pad \(rubberband_get_preferred_start_pad(state)) samples"
     }
 }
