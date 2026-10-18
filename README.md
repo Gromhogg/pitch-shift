@@ -54,6 +54,7 @@ More help: [windows/README.md](windows/README.md).
 
 - Pick your mic, turn it on, and slide from **Natural** (sounds like a different person) to **Cartoon** (chipmunk or monster). On Windows, choose Natural or Cartoon.
 - Turn on **Deeper when slow** and your voice goes lower while you talk slowly, then back when you talk normally (Mac).
+- With it on, **Higher when fast** makes your voice go higher while you talk fast: the slider sets how much, from **Off** to **+8** half-steps (starts at +4).
 - In Discord, Zoom or any other app, choose **Pitch Shift Mic** as your microphone.
 - Press **Test** to record 5 seconds of your shifted voice and hear it back. With the AI voice changer on, Test waits for the AI voice's delay before it stops, so you hear all 5 seconds in the AI voice.
 - Press **Sounds** for the Soundboard (Mac): add sound files with **+**, then click one to play it into your call. You hear it too; on your Mac's own speakers your voice is muted while it plays, so it can't echo.
@@ -75,7 +76,7 @@ All of them can be on at the same time. Closing the window keeps Pitch Shift run
 **Pitch Shift Pro ($5, Mac)**
 
 - Free: **What you hear** with Advanced processing, and **Your voice** in the Cartoon style, with **Test**.
-- Pro adds the **Voice changer** (with your own voices), the **Natural ↔ Cartoon** and **Bass ↔ Treble** sliders, **Auto EQ**, **Deeper when slow** and the **Soundboard**. They show a small lock until you unlock them.
+- Pro adds the **Voice changer** (with your own voices), the **Natural ↔ Cartoon** and **Bass ↔ Treble** sliders, **Auto EQ**, **Deeper when slow** (with **Higher when fast**) and the **Soundboard**. They show a small lock until you unlock them.
 - To get a key, click **Unlock Pro** at the top right, then **Email for a key** (or email cbsweetland@gmail.com). Paste the key you get back and click **Unlock**. It works on all your Macs, for good, with no internet needed.
 
 ## Your own voices (Mac)
