@@ -33,7 +33,9 @@
 //     moves with a gradual fall or rise (not below 0.62 x median, mapped) and holds through a sudden drop or rough
 //     frames; an aperiodic moment up to 80 ms after voice holds it (never starts it); then it is eased into 9 (at
 //     most 11) half-steps above and 6 (at most 9) below the voice's own median, and moves at most 2 half-steps per
-//     10 ms while it sings (gaps up to 30 ms count as singing); the AI voice maps from its own median (aiMedianMode
+//     10 ms while it sings (gaps up to 30 ms count as singing); 3.2: the AI pitch has no +-15 half-step limit (that
+//     pinned a third of a deep man's voice to one pitch for Woman), only the band and 60-880 Hz (aiClampMode 0 = the
+//     old limit; Natural keeps it either way); the AI voice maps from its own median (aiMedianMode
 //     1): the same frames teach it (held notes left out), and once it knows the speaker (300 frames) it moves at
 //     most 0.01 half-steps per frame, so a long note is not pulled back toward the voice's pitch while it is held,
 //   - voice shape (formants): formant ^ (strength * |off| / |12 log2(target / assumedInputHz)|, limited to 1),
@@ -55,7 +57,7 @@
 // sibilanceHz, breathAttackMs, breathReleaseMs, octUpCost, octDownCost, jumpCost, rangeSt, rangeCost, contFrames,
 // gapFrames, warmFrames, medianGlideSt, aiBandSt, aiMaxSt, aiBandLowSt, aiMinSt, aiHoldFrames, aiSlewSt, aiMedianMode,
 // aiSteadyFrames, aiSteadySt, aiMedianGlideSt, aiMedianWarmFrames, heldMode, heldFrames, heldSt, heldLineFrames,
-// heldGapFrames, learnDelayFrames, medianSlowSt.
+// heldGapFrames, learnDelayFrames, medianSlowSt, aiClampMode (+ "ai32" 0 = aiClampMode 0, as 3.1.1).
 #include "VoiceChanger.h"
 
 #include <algorithm>
@@ -159,6 +161,8 @@ struct Tuning {
     float aiMinSt = 9;
     float aiHoldFrames = 8;          // an aperiodic moment this soon after voice keeps the AI voice singing
     float aiSlewSt = 2;              // the most it moves per frame inside voiced sound
+    float aiClampMode = 1;           // 3.2: 1 = no +-15 half-step limit on the AI pitch (the band and 60-880 Hz only),
+                                     // 0 = the limit as before (only the AI stream reads it: Natural is unchanged)
     // the AI voice's own idea of the speaker's median (Natural keeps the one above): a held note doesn't teach it,
     // and once it knows the speaker it moves slowly, so a long note stays where it was sung
     float aiMedianMode = 1;          // 0 = the same median as Natural (before 3.1), 1 = the AI's own
@@ -203,7 +207,7 @@ const TuneKey kTuneKeys[] = {
     {"aiMedianWarmFrames", &Tuning::aiMedianWarmFrames}, {"heldMode", &Tuning::heldMode},
     {"heldFrames", &Tuning::heldFrames}, {"heldSt", &Tuning::heldSt}, {"heldLineFrames", &Tuning::heldLineFrames},
     {"heldGapFrames", &Tuning::heldGapFrames}, {"learnDelayFrames", &Tuning::learnDelayFrames},
-    {"medianSlowSt", &Tuning::medianSlowSt},
+    {"medianSlowSt", &Tuning::medianSlowSt}, {"aiClampMode", &Tuning::aiClampMode},
 };
 
 struct VoiceKey {
@@ -534,6 +538,7 @@ struct VoiceChanger {
             else if (s < -down) s = -down - downRoom * std::tanh((-down - s) / downRoom);
             hz = (float)(bandCentre * std::exp2(s / 12));
         }
+        if (tuning.aiClampMode >= 0.5f) hz = std::clamp(hz, 60.0f, 880.0f);  // 3.2: (no +-15 half-step limit)
         if (aiHz > 0 && aiAge <= (int)tuning.contFrames && tuning.aiSlewSt > 0) {
             const float d = std::clamp(semitones(hz / aiHz), -tuning.aiSlewSt, tuning.aiSlewSt);
             hz = (float)(aiHz * std::exp2(d / 12));
@@ -746,9 +751,10 @@ struct VoiceChanger {
         const bool aiOwn = tuning.aiMedianMode >= 0.5f;
         const float aiMedian = aiOwn ? aiMedianNow() : median;  // the median the AI voice's pitch is mapped from
         // the AI's pitch change for a frame this far from its median (half-steps; aiOwn only)
+        const bool aiFree = tuning.aiClampMode >= 0.5f;  // 3.2: no +-15 half-step limit on the AI pitch
         auto aiTotal = [&](float dev) {
-            return std::clamp(strength * (semitones(voice.targetHz / aiMedian) + (voice.intonation - 1) * dev) + extra,
-                              -tuning.maxSemitones, tuning.maxSemitones);
+            const float total = strength * (semitones(voice.targetHz / aiMedian) + (voice.intonation - 1) * dev) + extra;
+            return aiFree ? total : std::clamp(total, -tuning.maxSemitones, tuning.maxSemitones);
         };
         bool creak = false, rough = false;
         if (voiced) {
@@ -827,8 +833,8 @@ struct VoiceChanger {
             }
         }
         // Realistic mode's pitch: the band's centre is where the speaker's median lands.
-        const float bandCentre = shiftKnown ? aiMedian * std::exp2(std::clamp(strength * semitones(voice.targetHz / aiMedian) + extra,
-                                                                                 -tuning.maxSemitones, tuning.maxSemitones) / 12) : 0;
+        const float centreSt = strength * semitones(voice.targetHz / aiMedian) + extra;
+        const float bandCentre = shiftKnown ? aiMedian * std::exp2((aiFree ? centreSt : std::clamp(centreSt, -tuning.maxSemitones, tuning.maxSemitones)) / 12) : 0;
         const float aiTarget = aiPitch(aiWant, bandCentre);
         const int64_t index = ++flagLatest;
         flagRing[index % kFlagFrames] = (uint8_t)(voiced || creak);
@@ -1202,6 +1208,10 @@ void voicechanger_post(VoiceChanger *c, float *io, int frames, int delayFrames) 
 
 int voicechanger_tune(VoiceChanger *c, const char *key, float value) {
     if (!c || !key || !std::isfinite(value)) return 0;
+    if (std::strcmp(key, "ai32") == 0) {  // 0: every 3.2 change off (here: the AI pitch's +-15 half-step limit back)
+        c->tuning.aiClampMode = value != 0 ? 1.0f : 0.0f;
+        return 1;
+    }
     for (int k = 0; k < kVoiceKeyCount; ++k) {
         if (std::strcmp(key, kVoiceKeys[k].name) == 0) {
             c->overridden[k] = true;

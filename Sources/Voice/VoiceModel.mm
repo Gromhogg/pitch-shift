@@ -26,6 +26,18 @@
 // point, and the AI voice takes over with its first piece (10 ms crossfade), or as soon as its models are given.
 // (3.1.0 played Natural with no delay until a quiet moment: in a noisy room the AI voice then never came in.)
 //
+// 3.2 (each behind a voicestream_tune key, see VoiceModel.h; "ai32=0" gives 3.1.1 exactly):
+//   - the time kept in hand for a slow piece (reserve) grows with the slider: above 150 ms of look-ahead asked for,
+//     part of it is kept as reserve instead (at most 450 ms is real look-ahead); the total delay stays the same. The
+//     read point then moves with the look-ahead switch (crossfaded, at the same quiet moment);
+//   - a warm CPU copy of the voice generator: when pieces run late on the GPU (a game), the next ones are made on
+//     the CPU; back to the GPU only after 30 s and only if the CPU runs late too;
+//   - a late piece plays on into the last piece's tail for up to 20 ms before Natural fills in;
+//   - joins: the crossfade keeps the loudness when the two pieces differ, and each piece keeps its own loudness;
+//     loudness windows reach before a piece's start;
+//   - no sung tone on noise or hiss; the loudness match lifts the AI voice only as far as the mic is above the
+//     room's noise; a peak limiter (0.6) on each finished piece, so the app's soft limiter never bends it.
+//
 // Model files (made by research/voicechanger/pack_voices.sh, look-ahead shape by convert_generator.py --ahead):
 //   encoder  in "audio" Float32 [1, T*160] (16 kHz) -> out "features" Float32 [1, T/2, 768]
 //   voice    in "features" [1, T/2, 768], "pitch" Int32 [1, T], "source" Float32 [1, 1, DEC*upp],
@@ -51,6 +63,8 @@ void say(char *err, int errSize, const char *text) {
 #include <Accelerate/Accelerate.h>
 #include <dispatch/dispatch.h>
 #include <mach/mach_time.h>
+#include <mach/thread_act.h>
+#include <mach/thread_policy.h>
 #include <pthread.h>
 #include <samplerate.h>
 #include <time.h>
@@ -258,6 +272,8 @@ struct Buffer {
 struct VoiceModel {
     MLModel *encoder = nil;
     MLModel *voice = nil;
+    MLModel *voiceCPU = nil;       // 3.2: a warm CPU-only copy of the voice generator (when `voice` runs elsewhere)
+    double cpuProbeHopMs = 0;      // ... its time per hop at load
     int unitsEncoder = 0, unitsVoice = 0;
     bool cpuOnly = false;          // fell back to the CPU (or asked for it): needs the bigger reserve
     int encoderSamples = 0;        // the encoder's window * 160 (T * 160, or more: then the voice gets the newest part)
@@ -289,6 +305,8 @@ struct Runner {
     std::vector<uint8_t> known;       // T values: 1 = the pitch tracker has decided this frame
     std::vector<float> y, block, tail, sola, fadeIn, fadeOut, gains;
     std::vector<float> prevTail;      // research trace only
+    std::vector<float> limH, limHist; // 3.2 peak limiter: the gain each sample needs (min over 5 ms ahead), last ones
+    std::vector<int> limQ;            // ... its sliding-minimum queue
 };
 
 bool predict(MLModel *m, id<MLFeatureProvider> in, MLPredictionOptions *opt, NSString *outName, Buffer &out) {
@@ -387,6 +405,7 @@ struct VoiceStream {
     // `junctionLatency` behind the mic (Natural's fill-in must line up with that from there on).
     std::atomic<int64_t> junctionAt{INT64_MIN};
     std::atomic<int> junctionLatency{0};
+    std::atomic<int> junctionBack{0};  // 3.2: ... and the sound thread reads converted index (now - this)
 
     // any thread -> worker
     std::atomic<int> laWant{0};    // look-ahead asked for (10 ms frames)
@@ -406,6 +425,12 @@ struct VoiceStream {
     float lastGain = 0;
     int lastO = 0;                 // the last piece's crossfade offset (samples)
     int laNow = 0;                 // look-ahead the pieces are made with now (10 ms frames)
+    int exNow = 0;                 // 3.2: extra reserve in use (10 ms frames; part of the look-ahead asked for)
+    bool onCPU = false;            // 3.2: the voice generator runs on the model's CPU copy
+    double chipSinceMs = 0;        // ... since (or since the start)
+    uint32_t lateBits = 0, tightBits = 0;  // ... the last 10 pieces: late / ready less than 15 ms before needed
+    bool rtSet = false;            // 3.2: real-time thread policy set
+    float limG = 1;                // 3.2: the peak limiter's gain at the end of the last piece
     bool started = false;          // the AI voice has been switched in (live: at a quiet moment)
     int64_t askedAtHop = -1;       // hop when the look-ahead asked for first differed from the one in use
     static constexpr double kSwitchWaitS = 1.2;  // a look-ahead switch waits this long for a quiet moment at most
@@ -428,6 +453,14 @@ struct VoiceStream {
     bool lateNow = false;
     int playLatency = 0;           // Natural's fill-in lines up with this delay
     int64_t junctionSeen = INT64_MIN;
+    int64_t jumpFrom = 0;          // 3.2: the read point moved (a reserve change): crossfade from the old one ...
+    int jumpLeft = 0;              // ... for this many more samples
+    bool graceRead = false;        // 3.2: the last callback played on into the provisional tail (a late piece)
+    int64_t graceFin = 0;          // ... which ended at this converted index
+    int landLeft = 0;              // ... the late piece landed: crossfade from its tail into it for this many samples
+    Ring tailRing;                 // 3.2: a copy of each provisional tail (the final block overwrites it in `out`)
+    std::atomic<int64_t> pulledA{0};  // 3.2: sound thread -> worker: `pulled` ...
+    std::atomic<int> baseBackA{0};    // ... and `baseBack` (where the sound thread reads), for the late-piece rule
 
     // tuning (tests)
     std::atomic<int> slowMs{0}, slowEvery{1};
@@ -435,25 +468,77 @@ struct VoiceStream {
     std::atomic<int> smoothFrames{1};   // pitch smoothing half-width (frames on each side)
     std::atomic<int> slowFrames{7};     // the melody line's half-width (frames on each side)
     std::atomic<float> intonation{0};   // the voice's intonation in use (0 = don't reshape the pitch line)
-    std::atomic<int> gapFrames{8};      // short unvoiced gaps bridged inside a loud sound (a voiced consonant, a flicker)
+    std::atomic<int> gapFrames{5};      // short unvoiced gaps bridged inside a loud sound (a voiced consonant, a flicker;
+                                        // 8 before 3.2)
     std::atomic<int> onsetFrames{3};    // unvoiced frames just before a vowel that take its first pitch
     std::atomic<int> solaMode{-1};      // -1 = by look-ahead: with it the pieces line up already, so the crossfade keeps
                                         // the timing (a search would skip or repeat bits of sound); without, it searches
                                         // 0 = search the whole range, 1 = keep the timing, 2 = search near the last one
     std::atomic<int> gainMs{50};        // loudness match window (ms; 20 before 3.1: it pumped the AI voice's own loudness)
     std::atomic<float> quietDb{-45};    // a frame this quiet (dBFS) counts as a pause (for look-ahead switches)
+    // 3.2 (the value in brackets gives 3.1.1's sound; see VoiceModel.h)
+    std::atomic<int> split{1};          // [0] above 150 ms part of the look-ahead becomes extra reserve ...
+    std::atomic<int> aheadMax{450};     // ... so that at most this much is real look-ahead (ms)
+    std::atomic<int> autoChip{1};       // [0] switch the voice generator to its CPU copy when pieces run late
+    std::atomic<int> startChip{0};      // 1 = start on the CPU copy
+    std::atomic<int> graceMs{20};       // [0] a late piece plays on into the last tail this long before Natural
+    std::atomic<int> realtime{0};       // real-time thread policy for the worker
+    std::atomic<int> leftMs{-1};        // the decoder's left margin (ms; -1 = the model's own, 60)
+    std::atomic<int> fadeAdapt{1};      // [0] crossfade by how alike the pieces are (equal gain ... equal power)
+    std::atomic<int> joinGains{1};      // [0] each piece keeps its own loudness gains across the crossfade
+    std::atomic<int> gainTwoSided{1};   // [0] loudness windows reach before a piece's start
+    std::atomic<float> nearMs{1.5f};    // aiSolaMode 3: search this far around a fixed point (ms)
+    std::atomic<int> bridgeStrict{1};   // [0] bridge gaps only over smooth sound 12 dB above the room's noise
+    std::atomic<int> shortRunMs{40};    // [0] voiced bits shorter than this, alone in a pause, get no tone
+    std::atomic<float> hissCross{0.3f}; // [0] frames whose zero crossings per sample exceed this get no tone
+    std::atomic<int> gainCap{1};        // [0] the loudness match lifts the AI voice only as far as the mic is above the noise
+    std::atomic<float> limitAt{0.6f};   // [0] peak limiter on each finished piece (5 ms look-ahead, 80 ms release)
     FILE *trace = nullptr;              // research: per-piece trace (offline only, PITCHSHIFT_AI_TRACE)
 
     // stats
     std::atomic<int> loaded{0};
     std::atomic<int> aiNow{0};     // sound thread: 1 = the AI voice is what played in the last callback
     std::atomic<int64_t> hops{0}, misses{0}, fallbackFrames{0}, skipped{0}, switches{0};
+    std::atomic<int64_t> chipSwitches{0}, lateHops{0}, tightHops{0}, graceSaves{0}, loudSamples{0}, samplesOut{0};
+    std::atomic<int> onCPUShown{0}, exShown{0};
     std::atomic<double> sumHopMs{0}, worstHopMs{0}, cpuShare{0};
 
     int maxAhead() const { return run ? run->model->maxAheadMs / 10 : 0; }
 
-    int latencyFor(int la) const {
-        return latencyFrames(rate, maxFrames, offline, H * 10, X * 10, S * 10, reserveMs, la * 10, inLag16, outLag);
+    int latencyFor(int la, int ex = 0) const {  // la: look-ahead, ex: extra reserve (10 ms frames)
+        return latencyFrames(rate, maxFrames, offline, H * 10, X * 10, S * 10, reserveMs + ex * 10, la * 10, inLag16, outLag);
+    }
+
+    // Where the sound thread reads (chain samples back from now) with this much extra reserve.
+    int backFor(int ex) const { return latencyFor(0, ex) - (int)std::llround((X + S) * rate / 100); }
+
+    // 3.2: the look-ahead asked for (L, 10 ms frames) as real look-ahead + extra reserve (same total): nothing changes
+    // up to 150 ms; above, k = (700 - aheadMax) / 550 of the rest is kept in hand (aheadMax 450: L 700 -> 450 + 250).
+    void splitFor(int L, int &la, int &ex) const {
+        la = L;
+        ex = 0;
+        if (!split.load()) return;
+        const int most = std::clamp(aheadMax.load() / 10, 15, 70);
+        if (most >= 70) return;
+        ex = (int)std::lround((70.0 - most) / 55.0 * std::max(0, L - 15));
+        la = L - ex;
+    }
+
+    // The split for the look-ahead asked for now, as the stream would use it (before a model: up to 1 s).
+    void splitWanted(int &la, int &ex) const {
+        const VoiceModel *m = run ? run->model : pending.load();
+        const int L = std::clamp(laWant.load(), 0, m ? m->maxAheadMs / 10 : 100);
+        splitFor(L, la, ex);
+    }
+
+    // Before any sound (tune keys come right after voicestream_new): the read point and the fill-in's delay again.
+    void resplit() {
+        if (inEnd.load() != 0) return;
+        int la = 0, ex = 0;
+        splitWanted(la, ex);
+        baseBack = backFor(ex);
+        baseBackA.store(baseBack, std::memory_order_relaxed);
+        playLatency = latencyFor(la, ex);
     }
 
     // ------------------------------------------------------------------------------------------- worker side
@@ -558,7 +643,26 @@ struct VoiceStream {
             r.known[(size_t)t] = j < 0 || k;
             r.st[(size_t)t] = f > 0 ? (float)(12 * std::log2(f / 100.0)) + 1000 : 0;  // + 1000: 0 stays "not voiced"
         }
+        // 3.2: a voiced bit too short for speech with a pause on both sides (the tracker hearing a voice in noise):
+        // no tone (known frames only)
+        const int shortRun = shapeIt ? (shortRunMs.load() + 9) / 10 : 0;
+        if (shortRun > 0) {
+            const int side = 10;  // 100 ms unvoiced on each side
+            for (int t = 0; t < T;) {
+                if (r.st[(size_t)t] == 0) { t++; continue; }
+                int e = t;
+                while (e < T && r.st[(size_t)e] != 0) e++;
+                if (e - t < shortRun && t >= side && e + side <= T) {
+                    bool alone = true;
+                    for (int u = t - side; u < e + side && alone; u++)
+                        if (!r.known[(size_t)u] || (r.st[(size_t)u] != 0 && (u < t || u >= e))) alone = false;
+                    if (alone) for (int u = t; u < e; u++) { r.st[(size_t)u] = 0; r.f0[(size_t)u] = 0; }
+                }
+                t = e;
+            }
+        }
         const int gap = shapeIt ? gapFrames.load() : 0;
+        const bool strict = bridgeStrict.load() != 0;
         if (gap > 0) {
             for (int t = 0; t < T; t++) r.level[(size_t)t] = levelAt(E - T + t);
             for (int t = 1; t < T; t++) {
@@ -570,6 +674,12 @@ struct VoiceStream {
                 bool loud = true;
                 for (int u = t; u < e; u++) if (r.level[(size_t)u] < edge - 9) loud = false;  // a stop or a pause: keep it
                 if (!loud) continue;
+                if (strict) {  // 3.2: only over smooth sound well above the room's noise (not over an "s" or noise)
+                    bool smooth = true;
+                    for (int u = t; u < e; u++)
+                        if (crossingsAt(E - T + u) >= 0.15f || r.level[(size_t)u] < floorDb + 12) smooth = false;
+                    if (!smooth) continue;
+                }
                 const float a = r.st[(size_t)(t - 1)], b = r.st[(size_t)e];
                 for (int u = t; u < e; u++) r.st[(size_t)u] = a + (b - a) * (float)(u - t + 1) / (float)(e - t + 1);
                 t = e;
@@ -589,6 +699,11 @@ struct VoiceStream {
                 }
             }
         }
+        // 3.2: hissy frames ("s", "sh", "f", noise) never get a tone, whatever the tracker or the hold said
+        const float hiss = hissCross.load();
+        if (hiss > 0)
+            for (int t = 0; t < T; t++)
+                if (r.st[(size_t)t] != 0 && crossingsAt(E - T + t) > hiss) { r.st[(size_t)t] = 0; r.f0[(size_t)t] = 0; }
         // Two smoothed lines over the voiced, known frames: a light one (±w frames: tracker noise out) and a slow one
         // (±ws: the speaker's melody). The voice's intonation made every move `into` times bigger, small fast ones
         // too (the wobble of a held note, the little dips at consonants); those go back to the speaker's own size.
@@ -630,10 +745,18 @@ struct VoiceStream {
         const int T = m.T, upp = m.upp, DEC = m.decFrames, FLOW = m.flowFrames;
         const int LA = laNow;
         const int64_t A = E - LA - H - X - S;
-        int64_t d0 = A - (m.picks ? m.marginMs / 10 : DEC - H - X - S);  // first decoded frame
+        const int left = leftMs.load() >= 0 ? std::clamp(leftMs.load() / 10, 0, DEC - H - X - S) : m.marginMs / 10;
+        int64_t d0 = A - (m.picks ? left : DEC - H - X - S);              // first decoded frame
         if (d0 + DEC > E) d0 = E - DEC;                                   // (look-ahead shorter than the right frames)
         const int M = (int)(A - d0);                                      // this hop's sound starts here in the block
         double t0 = nowMs();
+        // 3.2: how much AI sound is ready ahead of where the sound thread reads (for the late-piece rule)
+        double readyMs = 1e9;
+        if (!offline) {
+            const int64_t readAt = pulledA.load(std::memory_order_acquire) - baseBackA.load(std::memory_order_relaxed);
+            if (readAt >= outStart.load(std::memory_order_relaxed)) readyMs = (double)(written - readAt) * 1000 / rate;
+        }
+        if (gainCap.load() || bridgeStrict.load()) noteLevels();  // 3.2: the room's noise level, every piece
         // 1. the window at 16 kHz (the encoder's: T frames, or more for a voice made for a shorter window)
         const int64_t encFrames = m.encoderSamples / kFrame16;
         in16.get((E - encFrames) * kFrame16, r.audio16.f(), (int)encFrames * kFrame16, 0);
@@ -673,7 +796,7 @@ struct VoiceStream {
             const size_t keep = r.voiceFeatures.count, skip = r.features.count - keep;
             std::memcpy(r.voiceFeatures.f(), r.features.f() + skip, sizeof(float) * keep);
         }
-        if (!predict(m.voice, r.voiceIn, r.voiceOptions, @"audio", r.audioOut)) return false;
+        if (!predict(onCPU && m.voiceCPU ? m.voiceCPU : m.voice, r.voiceIn, r.voiceOptions, @"audio", r.audioOut)) return false;
         const int slow = slowMs.load();
         if (slow > 0 && slowEvery.load() > 0 && (hop % slowEvery.load()) == 0) usleep((useconds_t)slow * 1000);
         // 6. drop the left margin; SOLA: the best offset o in [0, S*upp] against the last tail, crossfade X*upp
@@ -681,11 +804,13 @@ struct VoiceStream {
         const int hopN = H * upp, xN = X * upp, sN = S * upp;
         int o = 0;
         const int mode = solaMode.load() >= 0 ? solaMode.load() : (atEdge ? 0 : 1);
+        const int nearN = std::clamp((int)std::lround(nearMs.load() * modelRate / 1000), 0, sN / 2);  // (mode 3)
         if (hops.load() > 0 && xN > 0 && sN > 0) {
             if (mode == 1) {
                 o = std::clamp(lastO, 0, sN);  // the pieces line up already: keep the timing
             } else {
-                const int lo = mode == 2 ? std::max(0, lastO - upp / 10) : 0, hi = mode == 2 ? std::min(sN, lastO + upp / 10) : sN;
+                int lo = mode == 2 ? std::max(0, lastO - upp / 10) : 0, hi = mode == 2 ? std::min(sN, lastO + upp / 10) : sN;
+                if (mode == 3) { lo = 0; hi = 2 * nearN; }  // 3.2: near a fixed point (no drift)
                 double best = -1e30;
                 float energy = 0;
                 vDSP_svesq(y + lo, 1, &energy, (vDSP_Length)xN);
@@ -699,17 +824,16 @@ struct VoiceStream {
                 }
             }
         }
+        if (mode == 3 && hops.load() == 0) o = nearN;  // (the first piece starts at the fixed point)
         lastO = o;
-        float *blk = r.block.data();
-        std::memcpy(blk, y + o, sizeof(float) * (size_t)hopN);
-        for (int i = 0; i < xN; i++) blk[i] = blk[i] * r.fadeIn[(size_t)i] + r.sola[(size_t)i] * r.fadeOut[(size_t)i];
-        if (trace && hops.load() > 0) r.prevTail = r.sola;
-        std::memcpy(r.sola.data(), y + o + hopN, sizeof(float) * (size_t)xN);
-        std::memcpy(r.tail.data(), r.sola.data(), sizeof(float) * (size_t)xN);
-        // 7. loudness: follow the mic's own loudness, 10 ms by 10 ms (RVC's "rms mix" at 0), up to +gainMaxDb
+        // 7. loudness: follow the mic's own loudness, 10 ms by 10 ms (RVC's "rms mix" at 0), up to +gainMaxDb (3.2:
+        // at most as far as the mic is above the room's noise: 0 dB at 6 dB above it, the full lift from 20 dB above,
+        // and -10 dB below 3 dB above it, so the model's own hum in a pause is never lifted)
         const float gmax = std::pow(10.0f, gainMaxDb.load() / 20);
+        const bool cap = gainCap.load() != 0;
         const int frames = H + X;
         const int hw16 = gainMs.load() * kRate16 / 2000, hwOut = gainMs.load() * modelRate / 2000;  // half windows
+        const int lowest = gainTwoSided.load() ? -M * upp : 0;  // 3.2: the decoded left margin is there before o
         for (int f = 0; f < frames; f++) {
             const int64_t a = A + f;  // the 16 kHz frame this output frame came from
             double ein = 0;
@@ -723,18 +847,66 @@ struct VoiceStream {
             int cnt = 0;
             for (int i = upp / 2 - hwOut; i < upp / 2 + hwOut; i++) {
                 int p = o + f * upp + i;
-                if (p < 0 || p >= (int)(r.audioOut.count - (size_t)M * upp)) continue;
+                if (p < lowest || p >= (int)(r.audioOut.count - (size_t)M * upp)) continue;
                 eout += (double)y[p] * y[p];
                 cnt++;
             }
             double rout = std::max(1e-3, std::sqrt(eout / std::max(1, cnt)));
-            r.gains[(size_t)f] = (float)std::min<double>(gmax, rin / rout);
+            float gm = gmax;
+            if (cap) {
+                const float lv = (float)(20 * std::log10(rin + 1e-9));
+                float capDb = gainMaxDb.load() * std::clamp((lv - floorDb - 6) / 14, 0.0f, 1.0f);
+                if (lv < floorDb + 3) capDb = -10;
+                gm = std::min(gm, std::pow(10.0f, capDb / 20));
+            }
+            r.gains[(size_t)f] = (float)std::min<double>(gm, rin / rout);
         }
+        float *blk = r.block.data();
         float g0 = lastGain;
-        for (int f = 0; f < H; f++) {  // ramp from the last frame's gain to this frame's, sample by sample
-            float g1 = r.gains[(size_t)f];
-            for (int i = 0; i < upp; i++) blk[f * upp + i] *= g0 + (g1 - g0) * (i + 1) / upp;
-            g0 = g1;
+        if (!fadeAdapt.load() && !joinGains.load()) {  // (3.1.1) crossfade the raw pieces, then this piece's gains on all
+            std::memcpy(blk, y + o, sizeof(float) * (size_t)hopN);
+            for (int i = 0; i < xN; i++) blk[i] = blk[i] * r.fadeIn[(size_t)i] + r.sola[(size_t)i] * r.fadeOut[(size_t)i];
+            if (trace && hops.load() > 0) r.prevTail = r.sola;
+            std::memcpy(r.sola.data(), y + o + hopN, sizeof(float) * (size_t)xN);
+            std::memcpy(r.tail.data(), r.sola.data(), sizeof(float) * (size_t)xN);
+            for (int f = 0; f < H; f++) {  // ramp from the last frame's gain to this frame's, sample by sample
+                float g1 = r.gains[(size_t)f];
+                for (int i = 0; i < upp; i++) blk[f * upp + i] *= g0 + (g1 - g0) * (i + 1) / upp;
+                g0 = g1;
+            }
+        } else {
+            // 3.2: how alike the two pieces are where they meet (1 = the same sound): alike -> equal gain (the old
+            // fades), unlike -> equal power, so the join doesn't dip; each piece keeps its own gains (the old tail
+            // already has its piece's gains in r.tail)
+            double like = 1;
+            if (fadeAdapt.load() && hops.load() > 0 && xN > 0) {
+                float d = 0, e1 = 0, e2 = 0;
+                vDSP_dotpr(y + o, 1, r.sola.data(), 1, &d, (vDSP_Length)xN);
+                vDSP_svesq(y + o, 1, &e1, (vDSP_Length)xN);
+                vDSP_svesq(r.sola.data(), 1, &e2, (vDSP_Length)xN);
+                like = e1 > 1e-9f && e2 > 1e-9f ? std::clamp(d / std::sqrt((double)e1 * e2), 0.0, 1.0) : 1.0;
+            }
+            const bool own = joinGains.load() != 0;
+            if (trace && hops.load() > 0) r.prevTail = r.sola;
+            for (int f = 0; f < H; f++) {
+                const float g1 = r.gains[(size_t)f];
+                for (int i = 0; i < upp; i++) {
+                    const int k = f * upp + i;
+                    const float g = g0 + (g1 - g0) * (i + 1) / upp;
+                    float v = y[o + k] * g;
+                    if (k < xN) {
+                        const double w = r.fadeIn[(size_t)k];
+                        const double den = like >= 1 ? 1.0 : std::sqrt(w * w + (1 - w) * (1 - w) + 2 * like * w * (1 - w));
+                        const float a = (float)(w / den), b = (float)((1 - w) / den);
+                        const float old = own ? r.tail[(size_t)k] : r.sola[(size_t)k] * g;
+                        v = v * a + old * b;
+                    }
+                    blk[k] = v;
+                }
+                g0 = g1;
+            }
+            std::memcpy(r.sola.data(), y + o + hopN, sizeof(float) * (size_t)xN);
+            std::memcpy(r.tail.data(), r.sola.data(), sizeof(float) * (size_t)xN);
         }
         const float gEnd = g0;
         for (int f = 0; f < X; f++) {
@@ -743,6 +915,9 @@ struct VoiceStream {
             g0 = g1;
         }
         lastGain = gEnd;
+        // 3.2: headroom: a peak limiter on the finished piece (it is ready before it plays, so it can look 5 ms ahead,
+        // into the tail the next piece crossfades from); the app's soft limiter then never bends the AI voice
+        if (limitAt.load() > 0) limit(r, blk, hopN, xN, limitAt.load());
         if (trace) {  // research: how alike the two pieces are where they are crossfaded (1 = the same sound)
             float ey = 0, et = 0;
             vDSP_svesq(y + o, 1, &ey, (vDSP_Length)xN);
@@ -770,6 +945,7 @@ struct VoiceStream {
         int64_t prov = written;
         toChain.runCopy(r.tail.data(), xN, [&](const float *p, int n) {
             out.put(prov, p, n);
+            tailRing.put(prov, p, n);  // (3.2: a copy the final block won't overwrite, for a late piece's grace)
             prov += n;
         });
         outFinal.store(written, std::memory_order_release);
@@ -781,7 +957,69 @@ struct VoiceStream {
         if (ms > worstHopMs.load()) worstHopMs.store(ms);
         double wall = nowMs() - attachWallMs;
         if (wall > 0) cpuShare.store((threadCpuMs() - attachCpuMs) / wall);
+        if (readyMs < 1e8) chooseChip(readyMs - ms);
         return true;
+    }
+
+    // 3.2: margin = how long before the sound thread needed it this piece was ready (ms; < 0: late). On the GPU, 2
+    // late or 4 tight (< 15 ms) pieces of the last 10 move the voice generator to its warm CPU copy (a game is using
+    // the GPU); back to the GPU only after 30 s, and only if the CPU runs late or tight too (no blind tries).
+    void chooseChip(double margin) {
+        const bool late = margin < 0, tight = margin < 15;
+        if (late) lateHops.fetch_add(1);
+        if (tight) tightHops.fetch_add(1);
+        if (!autoChip.load() || !run->model->voiceCPU) return;
+        lateBits = ((lateBits << 1) | (late ? 1u : 0u)) & 0x3FFu;
+        tightBits = ((tightBits << 1) | (tight ? 1u : 0u)) & 0x3FFu;
+        if (__builtin_popcount(lateBits) < 2 && __builtin_popcount(tightBits) < 4) return;
+        if (onCPU && nowMs() - chipSinceMs < 30000) return;
+        onCPU = !onCPU;
+        chipSinceMs = nowMs();
+        lateBits = tightBits = 0;
+        chipSwitches.fetch_add(1);
+        onCPUShown.store(onCPU ? 1 : 0, std::memory_order_relaxed);
+    }
+
+    // 3.2: peak limiter, threshold thr: each sample's gain is the smallest any sample in the next 5 ms needs, averaged
+    // over 5 ms (so it is never above what that sample needs and turns down smoothly before a peak), coming back up
+    // over 80 ms. Works at the model's rate on the final block and gives the tail the gain it ended with.
+    void limit(Runner &r, float *blk, int n, int nt, float thr) {
+        const int L = std::max(1, modelRate / 200);
+        const int ext = n + std::min(L, nt);
+        auto need = [&](int j) -> float {
+            const float v = std::fabs(j < n ? blk[j] : r.tail[(size_t)(j - n)]);
+            return v > thr ? thr / v : 1.0f;
+        };
+        if ((int)r.limHist.size() != L - 1) r.limHist.assign((size_t)(L - 1), 1.0f);
+        r.limH.resize((size_t)n);
+        r.limQ.resize((size_t)ext + 1);
+        int qh = 0, qt = 0;  // queue of indices with rising needs (sliding minimum over [i, i + L))
+        int next = 0;
+        for (int i = 0; i < n; i++) {
+            const int until = std::min(ext, i + L);
+            for (; next < until; next++) {
+                const float v = need(next);
+                while (qt > qh && need(r.limQ[(size_t)(qt - 1)]) >= v) qt--;
+                r.limQ[(size_t)qt++] = next;
+            }
+            while (r.limQ[(size_t)qh] < i) qh++;
+            r.limH[(size_t)i] = need(r.limQ[(size_t)qh]);
+        }
+        const double rel = 1 - std::exp(-1.0 / (0.08 * modelRate));
+        double sum = 0;
+        for (float v : r.limHist) sum += v;
+        auto hAt = [&](int k) -> float { return k < 0 ? r.limHist[(size_t)(k + L - 1)] : r.limH[(size_t)k]; };
+        float g = limG;
+        for (int i = 0; i < n; i++) {
+            sum += r.limH[(size_t)i];
+            const float avg = (float)(sum / L);
+            sum -= hAt(i - L + 1);
+            g = std::min(avg, (float)(g + (1 - g) * rel));
+            if (g < 1) blk[i] *= g;
+        }
+        for (int k = 0; k < L - 1; k++) r.limHist[(size_t)k] = hAt(n - (L - 1) + k);
+        limG = g;
+        if (g < 1) for (int j = 0; j < nt; j++) r.tail[(size_t)j] *= g;
     }
 
     // Before hop `next` (E = (next + 1) * H): starts the AI voice (at once: the stream has played at its fixed
@@ -790,27 +1028,32 @@ struct VoiceStream {
     // anyway: the crossfade then joins the two). The converted index of the hop's block stays next * H either way;
     // only what it holds moves.
     void junction(int64_t next) {
-        const int want = std::clamp(laWant.load(), 0, maxAhead());
+        int want = 0, ex = 0;
+        splitFor(std::clamp(laWant.load(), 0, maxAhead()), want, ex);
         const int64_t E = (next + 1) * H;
         const int64_t step = (int64_t)H * kFrame16;
         bool go = false;
         if (!started) {
             go = true;
-        } else if (want != laNow) {
+        } else if (want != laNow || ex != exNow) {
+            // (a reserve change also moves the read point, by the change: that much more sound must be quiet)
             const int64_t A0 = E - laNow - H - X - S, A1 = E - want - H - X - S;
             if (askedAtHop < 0) askedAtHop = next;
-            go = offline || quiet(std::min(A0, A1) - 2, std::max(A0, A1) + X + 2) ||
+            go = offline || quiet(std::min(A0, A1) - 2, std::max(A0, A1) + X + 2 + std::abs(ex - exNow)) ||
                  (double)((next - askedAtHop) * step) > kSwitchWaitS * kRate16;
         }
         if (!go) return;
         laNow = want;
+        exNow = ex;
         laShown.store(laNow, std::memory_order_relaxed);
+        exShown.store(exNow, std::memory_order_relaxed);
         askedAtHop = -1;
         if (started) switches.fetch_add(1);
         started = true;
         // the pull side lines Natural's fill-in up with the new delay from this block on
         const int64_t at = (int64_t)std::llround(next * (double)H * run->model->upp * rate / run->model->rate);
-        junctionLatency.store(latencyFor(laNow), std::memory_order_relaxed);
+        junctionLatency.store(latencyFor(laNow, exNow), std::memory_order_relaxed);
+        junctionBack.store(backFor(exNow), std::memory_order_relaxed);
         junctionAt.store(at, std::memory_order_release);
     }
 
@@ -830,6 +1073,8 @@ struct VoiceStream {
             r->fadeOut[(size_t)i] = 1 - r->fadeIn[(size_t)i];
         }
         r->gains.assign((size_t)(H + X), 0.0f);
+        r->limH.assign((size_t)hopN, 1.0f);
+        r->limQ.assign((size_t)(hopN + xN + 1), 0);
         delete run;
         run = r;
         modelRate = m->rate;
@@ -844,8 +1089,13 @@ struct VoiceStream {
         outStart.store(written, std::memory_order_release);
         lastGain = 0;
         lastO = 0;
+        limG = 1;
         phaseAt = INT64_MIN;
         laNow = std::clamp(laNow, 0, maxAhead());
+        onCPU = startChip.load() && m->voiceCPU;
+        onCPUShown.store(onCPU ? 1 : 0, std::memory_order_relaxed);
+        chipSinceMs = nowMs();
+        lateBits = tightBits = 0;
         attachWallMs = nowMs();
         attachCpuMs = threadCpuMs();
         loaded.store(1);
@@ -870,6 +1120,7 @@ struct VoiceStream {
             toChain.reset();
             written = (int64_t)std::llround(m0 * rate / run->model->rate);
             std::fill(run->sola.begin(), run->sola.end(), 0.0f);
+            std::fill(run->tail.begin(), run->tail.end(), 0.0f);
             lastGain = 0;
             outFinal.store(written, std::memory_order_release);
             outProv.store(written, std::memory_order_release);
@@ -890,9 +1141,25 @@ struct VoiceStream {
         while (!s->quit.load()) {
             dispatch_semaphore_wait(s->wake, dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_MSEC));
             if (s->quit.load()) break;
+            if (s->realtime.load() && !s->rtSet) s->setRealtime();
             @autoreleasepool { s->work(); }
         }
         return nullptr;
+    }
+
+    // 3.2 (aiRealtime): the worker as a real-time thread: one piece per hop, up to half a hop of work.
+    void setRealtime() {
+        rtSet = true;
+        mach_timebase_info_data_t tb;
+        mach_timebase_info(&tb);
+        auto ticks = [&](double ms) { return (uint32_t)(ms * 1e6 * tb.denom / tb.numer); };
+        thread_time_constraint_policy_data_t pol;
+        pol.period = ticks(H * 10.0);
+        pol.computation = ticks(std::min(H * 5.0, 50.0));
+        pol.constraint = ticks(H * 9.0);
+        pol.preemptible = 1;
+        thread_policy_set(pthread_mach_thread_np(pthread_self()), THREAD_TIME_CONSTRAINT_POLICY, (thread_policy_t)&pol,
+                          THREAD_TIME_CONSTRAINT_POLICY_COUNT);
     }
 
     // -------------------------------------------------------------------------------------- sound thread side
@@ -922,26 +1189,51 @@ struct VoiceStream {
         const int64_t fin = outFinal.load(std::memory_order_acquire);
         const int64_t prov = outProv.load(std::memory_order_acquire);
         const int64_t first = outStart.load(std::memory_order_acquire);
+        // A look-ahead switch (or the AI's first start) reached: Natural's fill-in moves to the new delay with it, and
+        // (3.2) the read point moves by a reserve change, once both the old and the new one have reached it.
+        const int64_t jAt = junctionAt.load(std::memory_order_acquire);
+        if (jAt != junctionSeen) {
+            const int back = junctionBack.load(std::memory_order_relaxed);
+            if (P - std::max(baseBack, back) >= jAt) {
+                junctionSeen = jAt;
+                playLatency = junctionLatency.load(std::memory_order_relaxed);
+                if (back != baseBack) {
+                    jumpFrom = baseBack;
+                    jumpLeft = rampLen;
+                    baseBack = back;
+                    baseBackA.store(back, std::memory_order_relaxed);
+                }
+            }
+        }
         const int64_t q0 = P - baseBack;          // converted index for this callback's first sample
         const int64_t qEnd = q0 + frames;         // one past the last
-        // A look-ahead switch (or the AI's first start) reached: Natural's fill-in moves to the new delay with it.
-        const int64_t jAt = junctionAt.load(std::memory_order_acquire);
-        if (jAt != junctionSeen && q0 >= jAt) {
-            junctionSeen = jAt;
-            playLatency = junctionLatency.load(std::memory_order_relaxed);
-        }
         const int64_t natBack = std::max<int64_t>(0, playLatency - std::max(0, naturalDelay));
+        // 3.2: a late piece: play on into the provisional tail for up to graceMs before Natural fills in
+        const int graceN = graceMs.load() > 0
+            ? std::max(0, std::min((int)std::lround(graceMs.load() * rate / 1000), (int)std::lround(X * rate / 100) - 2 * rampLen)) : 0;
         // Decide for the whole callback: play the AI voice when all of it is final and (when coming back) a ramp's
         // worth more is ready too; fall back when it is not final (a late hop: the provisional tail carries the fade).
         float target;
-        if (loaded.load(std::memory_order_relaxed) && q0 >= first && qEnd <= fin && (mix > 0 || qEnd + rampLen <= fin)) {
+        bool grace = false;
+        const bool isLoaded = loaded.load(std::memory_order_relaxed);
+        if (isLoaded && q0 >= first && qEnd <= fin && (mix > 0 || qEnd + rampLen <= fin)) {
             target = 1;
+            if (graceRead) { landLeft = rampLen; graceSaves.fetch_add(1); }  // landed while its tail played: ramp in
+            graceRead = false;
+        } else if (graceN > 0 && isLoaded && mix >= 1 && q0 >= first && qEnd <= prov &&
+                   qEnd <= (graceRead ? graceFin : fin) + graceN) {
+            target = 1;
+            grace = true;
+            if (!graceRead) { graceRead = true; graceFin = fin; }
         } else {
             target = 0;
+            graceRead = false;
+            landLeft = 0;
             if (playing && mix > 0 && !lateNow) { misses.fetch_add(1); lateNow = true; }
         }
-        if (target == 1) lateNow = false;
+        if (target == 1 && !grace) lateNow = false;
         const float step = 1.0f / (float)rampLen;
+        int64_t loud = 0;
         for (int i = 0; i < frames; i++) {
             const int64_t pos = P + i;
             const int64_t np = pos - natBack;
@@ -949,15 +1241,31 @@ struct VoiceStream {
             const int64_t q = q0 + i;
             float ai = 0;
             bool have = q >= first && q < prov;
-            if (have) ai = out.at(q);
+            if (have) ai = graceN > 0 && q >= fin ? tailRing.at(q) : out.at(q);
+            if (landLeft > 0) {  // 3.2: the late piece landed: from its tail (as it played) into it
+                const float b = 1.0f - (float)landLeft / (float)rampLen;
+                ai = b * ai + (1 - b) * tailRing.at(q);
+                landLeft--;
+            }
+            if (jumpLeft > 0) {  // 3.2: the read point moved (a reserve change): from the old one into the new
+                const int64_t qo = pos - jumpFrom;
+                const float was = qo >= first && qo < prov ? out.at(qo) : 0.0f;
+                const float b = 1.0f - (float)jumpLeft / (float)rampLen;
+                ai = b * ai + (1 - b) * was;
+                jumpLeft--;
+            }
             if (target > mix) mix = std::min(1.0f, mix + step);
             else if (target < mix) mix = std::max(0.0f, mix - (have ? step : 4 * step));  // out of AI sound: hurry
             outBuf[i] = mix * ai + (1 - mix) * nat;
+            if (std::fabs(outBuf[i]) > 0.7f) loud++;
         }
+        if (loud) loudSamples.fetch_add(loud, std::memory_order_relaxed);
+        samplesOut.fetch_add(frames, std::memory_order_relaxed);
         if (mix >= 1) playing = true;
         if (playing && mix < 1) fallbackFrames.fetch_add(frames);
         aiNow.store(mix >= 1 ? 1 : 0, std::memory_order_relaxed);
         pulled = P + frames;
+        pulledA.store(pulled, std::memory_order_release);
     }
 };
 
@@ -993,6 +1301,9 @@ VoiceModel *voicemodel_load(const char *encoderPath, const char *voicePath, int 
         m->unitsEncoder = ue;
         m->unitsVoice = uv;
         m->cpuOnly = ue == VOICEMODEL_COMPUTE_CPU && uv == VOICEMODEL_COMPUTE_CPU;
+        // 3.2: a CPU-only copy of the voice generator, warmed below, for when the GPU is busy (a game): the stream
+        // switches to it when pieces run late (~50 MB more)
+        if (uv != VOICEMODEL_COMPUTE_CPU) m->voiceCPU = open(voiceURL, VOICEMODEL_COMPUTE_CPU);
         // shapes and names
         MLModelDescription *ed = m->encoder.modelDescription, *vd = m->voice.modelDescription;
         NSArray<NSNumber *> *ein = ed.inputDescriptionsByName[@"audio"].multiArrayConstraint.shape;
@@ -1079,6 +1390,17 @@ VoiceModel *voicemodel_load(const char *encoderPath, const char *voicePath, int 
             predict(m->voice, r.voiceIn, r.voiceOptions, @"audio", r.audioOut);
         }
         m->probeHopMs = (nowMs() - tp) / 3;
+        if (m->voiceCPU) {  // warm the CPU copy too (the first calls prepare it), then time it
+            bool ok = true;
+            for (int k = 0; k < 2 && ok; k++) ok = predict(m->voiceCPU, r.voiceIn, r.voiceOptions, @"audio", r.audioOut);
+            if (ok) {
+                double tc = nowMs();
+                for (int k = 0; k < 2; k++) predict(m->voiceCPU, r.voiceIn, r.voiceOptions, @"audio", r.audioOut);
+                m->cpuProbeHopMs = (nowMs() - tc) / 2;
+            } else {
+                m->voiceCPU = nil;  // (it doesn't run: keep the one chip)
+            }
+        }
         char buf[256];
         std::snprintf(buf, sizeof buf, "encoder on %s, voice on %s; hop %d ms, past sound %d ms; one hop %.0f ms; ready in %.1f s",
                       unitsName(ue), unitsName(uv), m->hopMs, m->contextMs, m->probeHopMs, (nowMs() - t0) / 1000);
@@ -1088,6 +1410,7 @@ VoiceModel *voicemodel_load(const char *encoderPath, const char *voicePath, int 
         }
         m->describe = buf;
         if (m->picks) m->describe += "; look-ahead up to " + std::to_string(m->maxAheadMs) + " ms";
+        if (m->voiceCPU) m->describe += "; CPU copy of the voice ready (" + std::to_string((int)std::lround(m->cpuProbeHopMs)) + " ms)";
         return m;
     }
 }
@@ -1127,13 +1450,15 @@ VoiceStream *voicestream_new(VoiceModel *model, double chainRate, int maxFrames,
     s->outLag = Resampler::lag(chainRate / s->outRate);
     // fixed delay = hop + crossfade + search + reserve + look-ahead + what the resamplers hold back + one callback;
     // the sound thread reads converted index (now - baseBack), whatever the look-ahead
-    s->baseBack = s->latencyFor(0) - (int)std::llround((s->X + s->S) * chainRate / 100);
+    // (3.2: with part of the look-ahead kept in hand as extra reserve, the read point is that much further back)
     s->laWant.store(std::clamp(c.lookaheadMs, 0, 1000) / 10);
-    const int la = model ? std::clamp(s->laWant.load(), 0, model->maxAheadMs / 10) : s->laWant.load();
-    s->playLatency = s->latencyFor(la);
+    if (model) s->pending.store(model);
+    s->resplit();
+    s->pending.store(nullptr);
     const int64_t ringSize = (int64_t)(chainRate * 4) + maxFrames;
     s->in.init(ringSize);
     s->out.init(ringSize);
+    s->tailRing.init(ringSize);
     s->natural.init(s->latencyFor(100) + 4 * (int64_t)maxFrames + 64);  // room for any look-ahead (up to 1 s)
     if (s->offline) {
         if (const char *path = getenv("PITCHSHIFT_AI_TRACE")) s->trace = std::fopen(path, "w");
@@ -1185,9 +1510,9 @@ void voicestream_delete(VoiceStream *stream) {
 
 int voicestream_latency_frames(const VoiceStream *stream) {
     if (!stream) return 0;
-    const VoiceModel *m = stream->run ? stream->run->model : stream->pending.load();
-    const int most = m ? m->maxAheadMs / 10 : 100;
-    return stream->latencyFor(std::clamp(stream->laWant.load(), 0, most));
+    int la = 0, ex = 0;
+    stream->splitWanted(la, ex);
+    return stream->latencyFor(la, ex);
 }
 
 void voicestream_set_lookahead(VoiceStream *stream, int lookaheadMs) {
@@ -1224,10 +1549,38 @@ int voicestream_tune(VoiceStream *stream, const char *key, float value) {
     if (k == "aiSlowFrames") { stream->slowFrames.store(std::clamp((int)value, 0, 20)); return 1; }
     if (k == "aiOnsetFrames") { stream->onsetFrames.store(std::clamp((int)value, 0, 10)); return 1; }
     if (k == "aiIntonation") { stream->intonation.store(value); return 1; }
-    if (k == "aiSolaMode") { stream->solaMode.store(std::clamp((int)value, -1, 2)); return 1; }
+    if (k == "aiSolaMode") { stream->solaMode.store(std::clamp((int)value, -1, 3)); return 1; }
     if (k == "aiGainMs") { stream->gainMs.store(std::clamp((int)value, 10, 200)); return 1; }
     if (k == "aiQuietDb") { stream->quietDb.store(value); return 1; }
     if (k == "aiLookaheadMs") { voicestream_set_lookahead(stream, (int)value); return 1; }
+    // 3.2
+    if (k == "ai32") {  // 0: every 3.2 change off (3.1.1's sound exactly); 1: the 3.2 defaults
+        const bool on = value != 0;
+        stream->split.store(on); stream->aheadMax.store(450); stream->autoChip.store(on); stream->startChip.store(0);
+        stream->graceMs.store(on ? 20 : 0); stream->realtime.store(0); stream->leftMs.store(-1);
+        stream->fadeAdapt.store(on); stream->joinGains.store(on); stream->gainTwoSided.store(on);
+        stream->solaMode.store(-1); stream->nearMs.store(1.5f); stream->bridgeStrict.store(on);
+        stream->gapFrames.store(on ? 5 : 8); stream->shortRunMs.store(on ? 40 : 0); stream->hissCross.store(on ? 0.3f : 0);
+        stream->gainCap.store(on); stream->gainMs.store(50); stream->limitAt.store(on ? 0.6f : 0);
+        stream->resplit();
+        return 1;
+    }
+    if (k == "aiSplit") { stream->split.store(value != 0); stream->resplit(); return 1; }
+    if (k == "aiAheadMax") { stream->aheadMax.store(std::clamp((int)value, 150, 700)); stream->resplit(); return 1; }
+    if (k == "aiAutoChip") { stream->autoChip.store(value != 0); return 1; }
+    if (k == "aiStartChip") { stream->startChip.store(value != 0); return 1; }
+    if (k == "aiGraceMs") { stream->graceMs.store(std::clamp((int)value, 0, 30)); return 1; }
+    if (k == "aiRealtime") { stream->realtime.store(value != 0); return 1; }
+    if (k == "aiLeftMs") { stream->leftMs.store((int)value < 0 ? -1 : (int)value / 10 * 10); return 1; }
+    if (k == "aiFadeAdapt") { stream->fadeAdapt.store(value != 0); return 1; }
+    if (k == "aiJoinGains") { stream->joinGains.store(value != 0); return 1; }
+    if (k == "aiGainTwoSided") { stream->gainTwoSided.store(value != 0); return 1; }
+    if (k == "aiNearMs") { stream->nearMs.store(std::clamp(value, 0.0f, 5.0f)); return 1; }
+    if (k == "aiBridgeStrict") { stream->bridgeStrict.store(value != 0); return 1; }
+    if (k == "aiShortRunMs") { stream->shortRunMs.store(std::clamp((int)value, 0, 100)); return 1; }
+    if (k == "aiHissCross") { stream->hissCross.store(std::clamp(value, 0.0f, 1.0f)); return 1; }
+    if (k == "aiGainCap") { stream->gainCap.store(value != 0); return 1; }
+    if (k == "aiLimit") { stream->limitAt.store(std::clamp(value, 0.0f, 1.0f)); return 1; }
     return 0;
 }
 
@@ -1245,6 +1598,14 @@ void voicestream_get_stats(const VoiceStream *stream, VoiceStreamStats *out) {
     out->lookaheadMs = stream->laShown.load(std::memory_order_relaxed) * 10;
     out->switches = stream->switches.load();
     out->aiNow = stream->aiNow.load(std::memory_order_relaxed);
+    out->reserveMs = stream->reserveMs + stream->exShown.load(std::memory_order_relaxed) * 10;
+    out->onCPU = stream->onCPUShown.load(std::memory_order_relaxed);
+    out->chipSwitches = stream->chipSwitches.load();
+    out->lateHops = stream->lateHops.load();
+    out->tightHops = stream->tightHops.load();
+    out->graceSaves = stream->graceSaves.load();
+    out->loudSamples = stream->loudSamples.load(std::memory_order_relaxed);
+    out->samplesOut = stream->samplesOut.load(std::memory_order_relaxed);
 }
 
 }  // extern "C"

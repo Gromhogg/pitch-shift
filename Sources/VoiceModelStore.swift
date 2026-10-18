@@ -151,6 +151,10 @@ func aiStatsLine(_ s: VoiceStreamStats, latencyMs: Double, seconds: Double) -> S
     String(format: "%4.0fs  AI voice: %@ | delay %.0f ms (fixed; look-ahead %d ms, %lld switches) | pieces %lld, late %lld, Natural filled in %.2f s | piece %.1f ms average, %.1f ms worst | AI thread %.0f%% of a core",
            seconds, s.loaded != 0 ? "playing" : "not yet", latencyMs, s.lookaheadMs, s.switches, s.hops, s.misses, s.fallbackSeconds,
            s.averageHopMs, s.worstHopMs, s.cpuShare * 100)
+        // (3.2) the time kept in hand, which chip makes the voice, pieces that came late or close, grace saves, loud samples
+        + String(format: " | reserve %d ms, voice on %@ (%lld switches), late by the clock %lld, tight %lld, tail saves %lld | above 0.7: %lld of %lld",
+                 s.reserveMs, s.onCPU != 0 ? "the CPU copy" : "its chip", s.chipSwitches, s.lateHops, s.tightHops, s.graceSaves,
+                 s.loudSamples, s.samplesOut)
 }
 
 // --render-voice ... --voice X --quality realistic: runs the AI voice inline over a file (it never comes late) after
