@@ -108,7 +108,8 @@ void voicestream_set_lookahead(VoiceStream *stream, int lookaheadMs);
 void voicestream_set_intonation(VoiceStream *stream, float intonation);
 
 // Test settings (--changer-tune): "aiSlowMs" = extra time added to each piece (forces late pieces),
-// "aiSlowEvery" = only every Nth piece, "aiGainMaxDb" = the most the loudness match may lift (default 18),
+// "aiSlowEvery" = only every Nth piece ("aiSlowChip" 1: only while the voice generator is not on its CPU copy, as
+// with a busy GPU), "aiGainMaxDb" = the most the loudness match may lift (default 18),
 // "aiGainMs" = its window (50); the pitch the AI voice follows (with look-ahead): "aiSmoothFrames" (light smoothing,
 // frames on each side, 1), "aiSlowFrames" (the melody line, 7), "aiIntonation" (as voicestream_set_intonation),
 // "aiGapFrames" (unvoiced gaps up to this long inside a loud sound are bridged, 8), "aiOnsetFrames" (a vowel's
@@ -118,16 +119,16 @@ void voicestream_set_intonation(VoiceStream *stream, float intonation);
 // 3.2 keys (the value after "=" is the default; the one in brackets gives 3.1.1's sound exactly):
 //   "ai32" 1 [0]: 0 turns every 3.2 change below off at once (later keys still apply);
 //   stutters: "aiSplit" 1 [0]: above 150 ms, part of the look-ahead asked for becomes extra reserve so that at most
-//   "aiAheadMax" 450 ms is real look-ahead (the total delay stays the same); "aiAutoChip" 1 [0]: the voice generator
+//   "aiAheadMax" 400 ms is real look-ahead (the total delay stays the same); "aiAutoChip" 1 [0]: the voice generator
 //   switches to a warm CPU copy when pieces run late on the GPU (2 late or 4 tight in the last 10) and back only
 //   after 30 s if the CPU is tight too; "aiStartChip" 0: 1 = start on the CPU copy; "aiGraceMs" 20 [0]: a late piece
 //   plays on into the last piece's tail this long before Natural fills in; "aiRealtime" 0: real-time thread policy;
-//   joins: "aiLeftMs" 60: the decoder's left margin (the right one gets the rest); "aiFadeAdapt" 1 [0]: the crossfade
+//   joins: "aiLeftMs" 50 [-1 = the model's 60]: the decoder's left margin (the right one gets the rest); "aiFadeAdapt" 1 [0]: the crossfade
 //   keeps the loudness when the two pieces differ (equal power) and when alike (equal gain); "aiJoinGains" 1 [0]: each
 //   piece keeps its own loudness across the crossfade; "aiGainTwoSided" 1 [0]: loudness windows reach before a
 //   piece's start; "aiSolaMode" 3 = search "aiNearMs" (1.5) around a fixed point;
 //   buzz: "aiBridgeStrict" 1 [0]: gaps are bridged only over smooth sound well above the room's noise;
-//   "aiGapFrames" 5 [8]; "aiShortRunMs" 40 [0]: voiced bits shorter than this in a pause get no tone;
+//   "aiGapFrames" 5 [8]; "aiOnsetFrames" 1 [3]; "aiShortRunMs" 40 [0]: voiced bits shorter than this in a pause get no tone;
 //   "aiHissCross" 0.3 [0]: hissy frames (zero crossings per sample above this) get no tone; "aiGainCap" 1 [0]: the
 //   loudness match lifts the AI voice only as far as the mic is above the room's noise (never in pauses);
 //   "aiLimit" 0.6 [0]: a peak limiter on each finished piece (5 ms look-ahead, 80 ms release).

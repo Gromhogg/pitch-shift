@@ -28,7 +28,7 @@
 //
 // 3.2 (each behind a voicestream_tune key, see VoiceModel.h; "ai32=0" gives 3.1.1 exactly):
 //   - the time kept in hand for a slow piece (reserve) grows with the slider: above 150 ms of look-ahead asked for,
-//     part of it is kept as reserve instead (at most 450 ms is real look-ahead); the total delay stays the same. The
+//     part of it is kept as reserve instead (at most 400 ms is real look-ahead); the total delay stays the same. The
 //     read point then moves with the look-ahead switch (crossfaded, at the same quiet moment);
 //   - a warm CPU copy of the voice generator: when pieces run late on the GPU (a game), the next ones are made on
 //     the CPU; back to the GPU only after 30 s and only if the CPU runs late too;
@@ -464,13 +464,15 @@ struct VoiceStream {
 
     // tuning (tests)
     std::atomic<int> slowMs{0}, slowEvery{1};
+    std::atomic<int> slowChip{0};       // 3.2 test: aiSlowMs only while the generator runs on its own chip (a busy GPU)
     std::atomic<float> gainMaxDb{18};
     std::atomic<int> smoothFrames{1};   // pitch smoothing half-width (frames on each side)
     std::atomic<int> slowFrames{7};     // the melody line's half-width (frames on each side)
     std::atomic<float> intonation{0};   // the voice's intonation in use (0 = don't reshape the pitch line)
     std::atomic<int> gapFrames{5};      // short unvoiced gaps bridged inside a loud sound (a voiced consonant, a flicker;
                                         // 8 before 3.2)
-    std::atomic<int> onsetFrames{3};    // unvoiced frames just before a vowel that take its first pitch
+    std::atomic<int> onsetFrames{1};    // unvoiced frames just before a vowel that take its first pitch (3 before
+                                        // 3.2: 1 puts less tone over consonants with no more voice breaks)
     std::atomic<int> solaMode{-1};      // -1 = by look-ahead: with it the pieces line up already, so the crossfade keeps
                                         // the timing (a search would skip or repeat bits of sound); without, it searches
                                         // 0 = search the whole range, 1 = keep the timing, 2 = search near the last one
@@ -478,12 +480,14 @@ struct VoiceStream {
     std::atomic<float> quietDb{-45};    // a frame this quiet (dBFS) counts as a pause (for look-ahead switches)
     // 3.2 (the value in brackets gives 3.1.1's sound; see VoiceModel.h)
     std::atomic<int> split{1};          // [0] above 150 ms part of the look-ahead becomes extra reserve ...
-    std::atomic<int> aheadMax{450};     // ... so that at most this much is real look-ahead (ms)
+    std::atomic<int> aheadMax{400};     // ... so that at most this much is real look-ahead (ms; picked by measurement:
+                                        // 400-600 ms all within noise of 700 in words, quality and joins)
     std::atomic<int> autoChip{1};       // [0] switch the voice generator to its CPU copy when pieces run late
     std::atomic<int> startChip{0};      // 1 = start on the CPU copy
     std::atomic<int> graceMs{20};       // [0] a late piece plays on into the last tail this long before Natural
     std::atomic<int> realtime{0};       // real-time thread policy for the worker
-    std::atomic<int> leftMs{-1};        // the decoder's left margin (ms; -1 = the model's own, 60)
+    std::atomic<int> leftMs{50};        // [-1] the decoder's left margin (ms; -1 = the model's own, 60): 50 ms (the
+                                        // right one gets 50 too) made the joins most alike (40 and 60 less so)
     std::atomic<int> fadeAdapt{1};      // [0] crossfade by how alike the pieces are (equal gain ... equal power)
     std::atomic<int> joinGains{1};      // [0] each piece keeps its own loudness gains across the crossfade
     std::atomic<int> gainTwoSided{1};   // [0] loudness windows reach before a piece's start
@@ -513,7 +517,7 @@ struct VoiceStream {
     int backFor(int ex) const { return latencyFor(0, ex) - (int)std::llround((X + S) * rate / 100); }
 
     // 3.2: the look-ahead asked for (L, 10 ms frames) as real look-ahead + extra reserve (same total): nothing changes
-    // up to 150 ms; above, k = (700 - aheadMax) / 550 of the rest is kept in hand (aheadMax 450: L 700 -> 450 + 250).
+    // up to 150 ms; above, k = (700 - aheadMax) / 550 of the rest is kept in hand (aheadMax 400: L 700 -> 400 + 300).
     void splitFor(int L, int &la, int &ex) const {
         la = L;
         ex = 0;
@@ -798,7 +802,8 @@ struct VoiceStream {
         }
         if (!predict(onCPU && m.voiceCPU ? m.voiceCPU : m.voice, r.voiceIn, r.voiceOptions, @"audio", r.audioOut)) return false;
         const int slow = slowMs.load();
-        if (slow > 0 && slowEvery.load() > 0 && (hop % slowEvery.load()) == 0) usleep((useconds_t)slow * 1000);
+        if (slow > 0 && slowEvery.load() > 0 && (hop % slowEvery.load()) == 0 && !(slowChip.load() && onCPU))
+            usleep((useconds_t)slow * 1000);
         // 6. drop the left margin; SOLA: the best offset o in [0, S*upp] against the last tail, crossfade X*upp
         const float *y = r.audioOut.f() + (size_t)M * upp;
         const int hopN = H * upp, xN = X * upp, sN = S * upp;
@@ -1543,6 +1548,7 @@ int voicestream_tune(VoiceStream *stream, const char *key, float value) {
     std::string k(key);
     if (k == "aiSlowMs") { stream->slowMs.store((int)value); return 1; }
     if (k == "aiSlowEvery") { stream->slowEvery.store(std::max(1, (int)value)); return 1; }
+    if (k == "aiSlowChip") { stream->slowChip.store(value != 0); return 1; }
     if (k == "aiGainMaxDb") { stream->gainMaxDb.store(value); return 1; }
     if (k == "aiSmoothFrames") { stream->smoothFrames.store(std::clamp((int)value, 0, 10)); return 1; }
     if (k == "aiGapFrames") { stream->gapFrames.store(std::clamp((int)value, 0, 10)); return 1; }
@@ -1556,8 +1562,9 @@ int voicestream_tune(VoiceStream *stream, const char *key, float value) {
     // 3.2
     if (k == "ai32") {  // 0: every 3.2 change off (3.1.1's sound exactly); 1: the 3.2 defaults
         const bool on = value != 0;
-        stream->split.store(on); stream->aheadMax.store(450); stream->autoChip.store(on); stream->startChip.store(0);
-        stream->graceMs.store(on ? 20 : 0); stream->realtime.store(0); stream->leftMs.store(-1);
+        stream->split.store(on); stream->aheadMax.store(400); stream->autoChip.store(on); stream->startChip.store(0);
+        stream->graceMs.store(on ? 20 : 0); stream->realtime.store(0); stream->leftMs.store(on ? 50 : -1);
+        stream->onsetFrames.store(on ? 1 : 3);
         stream->fadeAdapt.store(on); stream->joinGains.store(on); stream->gainTwoSided.store(on);
         stream->solaMode.store(-1); stream->nearMs.store(1.5f); stream->bridgeStrict.store(on);
         stream->gapFrames.store(on ? 5 : 8); stream->shortRunMs.store(on ? 40 : 0); stream->hissCross.store(on ? 0.3f : 0);

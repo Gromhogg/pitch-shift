@@ -204,7 +204,7 @@ let changerArg: ChangerOptions? = {
                       // 3.2 (VoiceModel.h): "ai32=0" = 3.1.1's AI voice
                       "aiSplit", "aiAheadMax", "aiAutoChip", "aiStartChip", "aiGraceMs", "aiRealtime", "aiLeftMs",
                       "aiFadeAdapt", "aiJoinGains", "aiGainTwoSided", "aiNearMs", "aiBridgeStrict", "aiShortRunMs",
-                      "aiHissCross", "aiGainCap", "aiLimit"]  // Realistic mode's test keys (voicestream_tune)
+                      "aiHissCross", "aiGainCap", "aiLimit", "aiSlowChip"]  // Realistic mode's test keys (voicestream_tune)
         let unknown = changerTuneArg.filter { voicechanger_tune(probe, $0.0, $0.1) == 0 && !aiKeys.contains($0.0) && !isVoiceShifterTuneKey($0.0) }.map(\.0)
         voicechanger_delete(probe)
         if !unknown.isEmpty { print("--changer-tune: unknown keys \(unknown.joined(separator: ", "))"); exit(1) }
