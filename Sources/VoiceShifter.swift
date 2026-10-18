@@ -83,6 +83,7 @@ struct VoiceParams: @unchecked Sendable {
     var halfSteps: Float
     var cartoon: Float      // voice style: 0 = Natural, 1 = Cartoon, in between = a blend
     var slowDeeper = false  // "Deeper when slow": talking slowly makes the voice lower
+    var fastHigher: Float = 0  // ...and "Higher when fast": half-steps higher when talking fast (0 = off; only with slowDeeper)
     var silent: Bool        // during Test playback, so the replay isn't sent into a live call
     var changer: UnsafePointer<VoiceChangerVoice>? = nil  // the voice changer's voice (nil = off)
     var strength: Float = 1                               // the voice changer's strength, 0 ... 1
@@ -413,7 +414,7 @@ final class VoiceStretcher {
     private var cartoonNow: Float   // the style in use (glides toward `cartoon`)
     private let glideStep: Float    // how much the style may move per sample
     private(set) var slowDeeper: Bool
-    private(set) var extra: Float = 0    // "Deeper when slow": half-steps added now (glides toward `extraTarget`)
+    private(set) var extra: Float = 0    // "Deeper when slow" / "Higher when fast": half-steps added now (glides toward `extraTarget`)
     private var extraTarget: Float = 0
     private var extraStep: Float = 0     // how much `extra` moves per sample on its way
     private let extraGlide: Float        // each move of `extra` takes this many samples (0.3 s)
@@ -598,8 +599,10 @@ final class VoiceStretcher {
         return fresh
     }
 
-    // Where the extra shift should go (0 or lower). It glides there in 0.3 s.
+    // Where the extra shift should go: lower when talking slowly, higher when talking fast (but never above +24 half-steps
+    // with the set amount). It glides there in 0.3 s.
     func set(extra target: Float) {
+        let target = target > 0 ? min(target, max(0, 24 - halfSteps)) : target
         guard slowDeeper, target != extraTarget else { return }
         extraTarget = target
         extraStep = abs(target - extra) / extraGlide
@@ -698,16 +701,29 @@ func isVoiceShifterTuneKey(_ key: String) -> Bool {
 // talking, so the rate stays where it was while it's quiet. The voice only moves once the rate has clearly changed
 // (by more than one syllable in those 1.2 s, for more than a quarter of a second), so normal talking doesn't
 // wobble. Going from normal to slow talking moves the voice all the way down in about 2 seconds.
+// "Higher when fast" works the same way the other way up: once the rate is clearly faster than normal talking
+// (`fastStart`), the voice goes up, by all of `up` at `fastFull` or faster. Measured on read speech (10 Mac voices at
+// 175 words a minute and 8 VCTK readers, 15 minutes): 90 % of the time the rate is 5.0 or less, so `fastStart` is
+// 5.0 + 0.3. The rate counts whole bumps in 1.2 s (steps of 0.83) and tops out early: even at 350 words a minute
+// (twice normal) it reads 5.0-6.7, rarely 7.5, so all of `up` comes at 6.3 (8 bumps in 1.2 s), not 2 higher.
 // `listen` runs on the sound thread: it makes no memory and never waits.
 final class SpeakingRate {
     static let depth: Float = 8         // half-steps lower when talking slowly
     static let slowRate: Float = 1.5    // syllables per second: this slow or slower gets all of `depth`
     static let normalRate: Float = 3    // this fast or faster: no change (in between: part of `depth`)
+    static let fastStart: Float = 5.3   // "Higher when fast": faster than this goes up...
+    static let fastFull: Float = 6.3    // ...and this fast or faster gets all of `up`
+    static let maxUp: Float = 8         // the most `up` can be (the slider's right end)
 
     private(set) var rate = SpeakingRate.normalRate  // syllables per second, as measured
     private(set) var used = SpeakingRate.normalRate  // the rate the voice follows (moves only after a clear change)
-    var extra: Float {  // half-steps to add: 0 down to -depth
-        -Self.depth * max(0, min(1, (Self.normalRate - used) / (Self.normalRate - Self.slowRate)))
+    var up: Float = 0  // "Higher when fast": half-steps higher when talking fast (0 = off)
+    // How slow (0 ... 1, all of `depth` at 1) and how fast (0 ... 1, all of `up` at 1) the talking is now.
+    var slowPart: Float { max(0, min(1, (Self.normalRate - used) / (Self.normalRate - Self.slowRate))) }
+    var fastPart: Float { max(0, min(1, (used - Self.fastStart) / (Self.fastFull - Self.fastStart))) }
+    var extra: Float {  // half-steps to add: from -depth (slow) through 0 (normal) up to `up` (fast)
+        let down = -Self.depth * slowPart
+        return up > 0 ? down + up * fastPart : down
     }
 
     // Everything below counts in steps of 10 ms.
@@ -854,10 +870,28 @@ final class SpeakingRate {
     }
 }
 
-// What "Deeper when slow" is doing, for the command-line test.
+// What "Deeper when slow" (and "Higher when fast") is doing, for the command-line test: the rate measured and the
+// rate in use, the extra shift now, and where its two parts are heading.
 struct SlowReading {
     var rate: Float = SpeakingRate.normalRate
     var extra: Float = 0
+    var used: Float = SpeakingRate.normalRate
+    var deeper: Float = 0  // half-steps, 0 or lower
+    var higher: Float = 0  // half-steps, 0 or higher
+
+    init() {}
+    init(_ speaking: SpeakingRate, extra: Float) {
+        rate = speaking.rate
+        self.extra = extra
+        used = speaking.used
+        deeper = -SpeakingRate.depth * speaking.slowPart + 0  // + 0: no "-0.0" when printed
+        higher = speaking.up * speaking.fastPart
+    }
+
+    // e.g. "rate 5.2 syllables/s  extra +2.1 half-steps (in use 5.3: deeper +0.0, higher +3.2)"
+    var line: String {
+        String(format: "rate %.1f syllables/s  extra %+.1f half-steps (in use %.1f: deeper %+.1f, higher %+.1f)", rate, extra, used, deeper, higher)
+    }
 }
 
 // One running voice chain: a private combined device of [real mic + hidden side of Pitch Shift Mic] with one
@@ -1071,9 +1105,10 @@ final class VoiceChain {
         callMix.muteIfNeeded(source, frames)
 
         if applied.slowDeeper {
+            speaking.up = applied.fastHigher
             speaking.listen(source, frames)
             stretcher.set(extra: speaking.extra)
-            let reading = SlowReading(rate: speaking.rate, extra: stretcher.extra)
+            let reading = SlowReading(speaking, extra: stretcher.extra)
             slowReading.withLockIfAvailable { $0 = reading }
         }
 
@@ -1295,6 +1330,7 @@ final class VoiceShifter {
     var halfSteps: Float { didSet { pushParams() } }
     var cartoon: Float { didSet { pushParams() } }  // voice style: 0 = Natural, 1 = Cartoon
     var slowDeeper: Bool { didSet { pushParams() } }  // "Deeper when slow"
+    var fastHigher: Float { didSet { pushParams() } }  // "Higher when fast": 0 (off) ... 8 half-steps, used while slowDeeper is on
     // The voice changer card. Used only while "Your voice" is on (never in the Soundboard-only pass-through).
     var changer = ChangerSettings() { didSet { if changer != oldValue { pushParams() } } }
     private(set) var changerState: ChangerState = .off
@@ -1330,12 +1366,14 @@ final class VoiceShifter {
     // from it instead of the voice's guess (Realistic remakes the chain when the voice changes).
     private var lastSpeaker: (hz: Float, frames: Float)?
 
-    init(halfSteps: Float, cartoon: Float, slowDeeper: Bool = false, micUID: String?) {
+    init(halfSteps: Float, cartoon: Float, slowDeeper: Bool = false, fastHigher: Float = 0, micUID: String?) {
         self.halfSteps = halfSteps
         self.cartoon = cartoon
         self.slowDeeper = slowDeeper
+        self.fastHigher = fastHigher
         self.micUID = micUID
-        params = OSAllocatedUnfairLock(initialState: VoiceParams(halfSteps: halfSteps, cartoon: cartoon, slowDeeper: slowDeeper, silent: false))
+        params = OSAllocatedUnfairLock(initialState: VoiceParams(halfSteps: halfSteps, cartoon: cartoon, slowDeeper: slowDeeper,
+                                                                 fastHigher: slowDeeper ? Self.cleanFastHigher(fastHigher) : 0, silent: false))
         models.onChange = { [weak self] in self?.modelsChanged() }
     }
 
@@ -1425,14 +1463,18 @@ final class VoiceShifter {
         // amount and "Deeper when slow" are not sent (the window also sets them to 0 / off).
         let steps = voiceSwitch && voice == nil ? halfSteps : 0, cartoon = cartoon
         let slowDeeper = voiceSwitch && voice == nil && slowDeeper
-        let new = VoiceParams(halfSteps: steps, cartoon: cartoon, slowDeeper: slowDeeper, silent: false, changer: voice,
+        let new = VoiceParams(halfSteps: steps, cartoon: cartoon, slowDeeper: slowDeeper,
+                              fastHigher: slowDeeper ? Self.cleanFastHigher(fastHigher) : 0, silent: false, changer: voice,
                               strength: max(0, min(1, changer.strength)))
         params.withLock {
             $0.halfSteps = new.halfSteps; $0.cartoon = new.cartoon; $0.slowDeeper = new.slowDeeper
-            $0.changer = new.changer; $0.strength = new.strength
+            $0.fastHigher = new.fastHigher; $0.changer = new.changer; $0.strength = new.strength
         }
         updateChangerState(voiceFound: voice != nil)
     }
+
+    // "Higher when fast" as the sound thread may use it: 0 ... SpeakingRate.maxUp half-steps.
+    static func cleanFastHigher(_ value: Float) -> Float { value.isFinite ? max(0, min(SpeakingRate.maxUp, value)) : 0 }
 
     // Natural mode plays whenever the changer is on. Realistic (AI): loading (Natural plays), realistic, fallback
     // (some pieces came late in the last 10 s; Natural filled in), or unavailable (why; Natural plays).
@@ -1827,12 +1869,13 @@ final class VoiceTest {
 // Offline check (--render-voice): shifts a sound file with the voice's own Rubber Band settings, in 512-sample
 // pieces like the live chain, and writes one channel. `changes` moves the style part way through
 // ((seconds, style) pairs), to check that it changes smoothly. With `slowDeeper` it prints the speaking rate and
-// the extra shift once per second of sound. `levelFix: false` renders it as before the level fix
+// the extra shift once per second of sound, and at the end how long the voice was lower and higher (`fastHigher`:
+// "Higher when fast", half-steps; 0 = off). `levelFix: false` renders it as before the level fix
 // (`--voice-preset old`, see voiceLevelGain), so old and new can be compared. `changer`: the voice changer
 // (--voice), with the same classes and order as the live chain (analyse before Rubber Band, post after); with
 // `stats` it prints what the changer is doing once per second of sound.
 func renderVoiceFile(input: String, output: String, halfSteps: Float, cartoon: Float, changes: [(Double, Float)],
-                     slowDeeper: Bool = false, levelFix: Bool = true, changer: ChangerOptions? = nil) throws {
+                     slowDeeper: Bool = false, fastHigher: Float = 0, levelFix: Bool = true, changer: ChangerOptions? = nil) throws {
     let file = try AVAudioFile(forReading: URL(fileURLWithPath: input))
     let rate = file.processingFormat.sampleRate
     let length = Int(file.length)
@@ -1867,7 +1910,9 @@ func renderVoiceFile(input: String, output: String, halfSteps: Float, cartoon: F
         var analysis = VoiceChangerPitch()
         var nextStats = 1
         let speaking = SpeakingRate(sampleRate: rate)
+        speaking.up = VoiceShifter.cleanFastHigher(fastHigher)
         var nextReport = 1
+        var slowBlocks = 0, fastBlocks = 0, rises = 0, wasFast = false  // for the summary at the end
         let block = 512
         var skip = stretcher.startSkip  // so the output lines up with the input
         var chunk = [Float](repeating: 0, count: block)
@@ -1883,8 +1928,15 @@ func renderVoiceFile(input: String, output: String, halfSteps: Float, cartoon: F
                 chunk.withUnsafeBufferPointer { speaking.listen($0.baseAddress!, block) }
                 stretcher.set(extra: speaking.extra)
                 if position + block >= nextReport * Int(rate) && position + block <= length {
-                    print(String(format: "%3ds  rate %.1f syllables/s  extra %+.1f half-steps", nextReport, speaking.rate, stretcher.extra))
+                    print(String(format: "%3ds  ", nextReport) + SlowReading(speaking, extra: stretcher.extra).line)
                     nextReport += 1
+                }
+                if position + block <= length {  // "fast" counts even with Higher when fast off: when it would go up
+                    let fast = speaking.fastPart > 0
+                    if speaking.slowPart > 0 { slowBlocks += 1 }
+                    if fast { fastBlocks += 1 }
+                    if fast && !wasFast { rises += 1 }
+                    wasFast = fast
                 }
             }
             if let voiceChanger {
@@ -1915,6 +1967,11 @@ func renderVoiceFile(input: String, output: String, halfSteps: Float, cartoon: F
             }
         }
         if result.count > length { result.removeLast(result.count - length) }
+        if slowDeeper {
+            let seconds = { (blocks: Int) in Double(blocks * block) / rate }
+            print(String(format: "speaking rate: slow %.1f s, fast (above %.1f) %.1f s in %d stretches, of %.1f s",
+                         seconds(slowBlocks), SpeakingRate.fastStart, seconds(fastBlocks), rises, Double(length) / rate))
+        }
     }
     guard let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1),
           let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(max(1, result.count))) else {
@@ -1938,7 +1995,7 @@ func changerStatsLine(_ s: VoiceChangerStats, seconds: Double) -> String {
 // changer's analyse and post), and the result is written as the chain would send it (late by the chain's delay).
 // Prints the Rubber Band + waiting-sound delay (the part of the mic-to-Pitch-Shift-Mic delay this code adds) and
 // the ring's dry-outs, trims and replays. No devices are used.
-func simulateVoiceChain(input: String, output: String, halfSteps: Float, cartoon: Float, slowDeeper: Bool,
+func simulateVoiceChain(input: String, output: String, halfSteps: Float, cartoon: Float, slowDeeper: Bool, fastHigher: Float = 0,
                         changer: ChangerOptions?, blockFrames: Int) throws {
     let file = try AVAudioFile(forReading: URL(fileURLWithPath: input))
     let rate = file.processingFormat.sampleRate
@@ -1963,6 +2020,7 @@ func simulateVoiceChain(input: String, output: String, halfSteps: Float, cartoon
     }
     let ring = VoiceRing(rate: rate)
     let speaking = SpeakingRate(sampleRate: rate)
+    speaking.up = VoiceShifter.cleanFastHigher(fastHigher)
     var block = [Float](repeating: 0, count: blockFrames)
     var piece = [Float](repeating: 0, count: 4096)
     var analysis = VoiceChangerPitch()
