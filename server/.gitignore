@@ -1,0 +1,7 @@
+node_modules/
+.wrangler/
+# Local test secrets for "wrangler dev" (never commit these)
+.dev.vars*
+.env*
+*.secret
+secrets*.json

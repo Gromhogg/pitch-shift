@@ -52,6 +52,22 @@ extern "C" {
 //                    boost is trimmed 0.5 dB per period (back 0.05 dB per period), at most this many dB; 0 = off
 // Bass / treble setting (advanced_set_tone):
 //   "tonelohz" 150, "tonehihz" 5000   corner of the low shelf and of the high shelf (Hz)
+// Auto EQ (advanced_set_auto_eq):
+//   "aeqrange" 8     largest automatic gain, up or down (dB, 0..15)
+//   "aeqattack" 300, "aeqrelease" 1500   time constants (ms) of a cut (a section too loud is pulled down) and of a
+//                    lift (a section too quiet is brought up)
+//   "aeqwindow" 1000 how much sound each level is measured over (ms, 1 block .. 5000). The first plan was 400 / 80 /
+//                    600 ms; on the test songs it matched worse and wobbled more. Tuned on 6 songs x 8 amounts (and
+//                    checked on 2 more): range 8 / 300 / 1500 ms match as well as 6 / 200 / 1000 and move 20 % less
+//                    (notes, "Auto EQ")
+//   "aeqf1" 80, "aeqf2" 250, "aeqf3" 2000, "aeqf4" 8000   the crossovers between the five sections (Hz; kept
+//                    rising by at least a third of an octave and under 0.45 x the sample rate)
+//   "aeqfloor" -60   a section quieter than this (dBFS) in both the original and the sound is left at 0 dB
+//   "aeqlowhz" 20    Sub is measured from here up (a 2nd-order high-pass on the measuring only; 0 = from 0 Hz)
+//   "aeqweight" 1    the totals that keep the overall level are weighted like a loudness meter (K-weighting at each
+//                    section's middle); 0 = plain power (a bass cut then lifts the other sections more)
+//   "aeqkeep" 1      take back out the level change the smoothing makes (cuts are faster than lifts, so the gains
+//                    alone drift down); 0 = leave it
 // Returns 0 if the key is unknown.
 int advanced_tune(AdvancedChain *chain, const char *key, double value);
 

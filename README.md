@@ -48,6 +48,7 @@ More help: [windows/README.md](windows/README.md).
 - Click the big number to type an exact amount, like `2.5` or `-1.25`. 12 is one octave. Or use **−**, **0** and **+**.
 - Turn on **Advanced processing** for music at bigger amounts: going up, the bass stays deep; going down, the top stays bright. A new amount takes a moment longer to kick in.
 - With Advanced processing on, slide from **Bass** to **Treble** to suit your headphones (Mac). Pitch Shift remembers it for each pair of headphones or speakers.
+- Turn on **Auto EQ** (Mac, with Advanced processing on) to keep the deep bass, mids and highs balanced like the original song. Its five small sliders move by themselves; drag one to nudge it, and double-click it or press **Auto** to go back. It's remembered for each pair of headphones or speakers too.
 
 **Your voice**
 
@@ -70,6 +71,12 @@ More help: [windows/README.md](windows/README.md).
 - Add your own voices with the **⋯** button next to the voice menu (see [Your own voices](#your-own-voices)).
 
 All of them can be on at the same time. Closing the window keeps Pitch Shift running. Quit it with ⌘Q.
+
+**Pitch Shift Pro ($5, Mac)**
+
+- Free: **What you hear** with Advanced processing, and **Your voice** in the Cartoon style, with **Test**.
+- Pro adds the **Voice changer** (with your own voices), the **Natural ↔ Cartoon** and **Bass ↔ Treble** sliders, **Auto EQ**, **Deeper when slow** and the **Soundboard**. They show a small lock until you unlock them.
+- To get a key, click **Unlock Pro** at the top right, then **Email for a key** (or email cbsweetland@gmail.com). Paste the key you get back and click **Unlock**. It works on all your Macs, for good, with no internet needed.
 
 ## Your own voices (Mac)
 
@@ -109,6 +116,8 @@ brew install rubberband
 ```
 
 `build.sh` builds `Pitch Shift.app` for Apple silicon and Intel (with Pitch Shift Mic inside), puts it in Applications and puts a shortcut on your Desktop. The first time, it downloads the source of Rubber Band and libsamplerate to build the Intel part (`libs/build.sh`), and the Realistic voice changer's AI model files (about 130 MB, listed in `voices/models.txt`; without them the app still builds and only the Natural voice changer works). `packaging/make-pkg.sh` makes the installer, and `./release.sh 1.2.3` posts a new version.
+
+Pitch Shift Pro: the app's side is `Sources/Pro.swift` and `Sources/ProConfig.swift`, and keys are made with `tools/pro-keys.sh`. `build.sh` builds in the key secret from `~/Library/Application Support/Pitch Shift Keys/secret.txt` (or `PRO_KEY_SECRET`) when it's there; a build without it has nothing locked. The [server/](server/README.md) folder isn't used yet.
 
 ## How it works
 

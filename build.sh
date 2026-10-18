@@ -15,6 +15,26 @@ ditto build/PitchShiftMic.driver "$app/Contents/PlugIns/PitchShiftMic.driver"
 # The app is built twice, for Apple silicon (arm64) and Intel (x86_64), both for macOS 14.4 or newer,
 # and joined into one file.
 rm -rf build/obj
+# Pitch Shift Pro: the secret the app checks keys with. It is never in git: it comes from PRO_KEY_SECRET, or else from
+# ~/Library/Application Support/Pitch Shift Keys/secret.txt (made by tools/pro-keys.sh on the owner's Mac). With no
+# secret (or PRO_KEY_SECRET= set to nothing) the app has nothing locked. The copy of ProConfig.swift with the secret in
+# it is made in build/obj and deleted right after the app is built.
+swift_sources=(Sources/*.swift)
+if [[ -z ${PRO_KEY_SECRET+x} ]]; then
+  secret_file="$HOME/Library/Application Support/Pitch Shift Keys/secret.txt"
+  PRO_KEY_SECRET=$( [[ -f $secret_file ]] && tr -d ' \t\r\n' < "$secret_file" || true )
+fi
+PRO_KEY_SECRET=${PRO_KEY_SECRET//[[:space:]]/}
+if [[ -n $PRO_KEY_SECRET ]]; then
+  [[ $PRO_KEY_SECRET =~ ^[0-9A-Za-z_-]+$ ]] || { echo "PRO_KEY_SECRET: letters, digits, - and _ only"; exit 1; }
+  mkdir -p build/obj
+  sed "s|static let keySecret = \"[^\"]*\"|static let keySecret = \"$PRO_KEY_SECRET\"|" Sources/ProConfig.swift > build/obj/ProConfig.swift
+  grep -q "keySecret = \"$PRO_KEY_SECRET\"" build/obj/ProConfig.swift || { echo "Couldn't put the key secret into ProConfig.swift"; exit 1; }
+  swift_sources=(${swift_sources:#Sources/ProConfig.swift} build/obj/ProConfig.swift)
+  echo "Pitch Shift Pro: the paid parts are locked until a key is entered (key secret built in)"
+else
+  echo "Pitch Shift Pro: no key secret, so nothing is locked in this build"
+fi
 for arch in arm64 x86_64; do
   obj=build/obj/$arch
   mkdir -p $obj
@@ -32,12 +52,13 @@ for arch in arm64 x86_64; do
       -c "$f" -o "$obj/${f:t:r}.o"
   done
   # Rubber Band is built into the app, so the app works on its own.
-  swiftc -target $arch-apple-macos14.4 -O -swift-version 5 Sources/*.swift $obj/*.o -o $obj/PitchShift \
+  swiftc -target $arch-apple-macos14.4 -O -swift-version 5 $swift_sources $obj/*.o -o $obj/PitchShift \
     -import-objc-header Sources/Bridging.h -Ibuild/libs/include \
     -Xlinker build/libs/lib/librubberband.a -Xlinker build/libs/lib/libsamplerate.a -lc++ -framework Accelerate \
     -framework CoreML
 done
 lipo -create build/obj/arm64/PitchShift build/obj/x86_64/PitchShift -output "$app/Contents/MacOS/PitchShift"
+rm -f build/obj/ProConfig.swift  # the copy with the key secret in it
 
 if [[ ! -f AppIcon.icns ]]; then
   swift make-icon.swift build/AppIcon.iconset && iconutil -c icns build/AppIcon.iconset -o AppIcon.icns
