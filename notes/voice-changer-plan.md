@@ -459,3 +459,138 @@ WindowServer, kernel_task), 0 in the quieter runs; Intel half says "needs Apple 
 silicon within 0.00011); 36 compiler warnings (as main); hidden previews of loading / backup voice / AI at 870×369,
 588×581, 306×850 (dark and light) fine. Live microphone tests skipped (the owner's app was open). Tools:
 `research/voicechanger/r311/` (git-ignored).
+
+## 3.2: fewer stutters, cleaner joins, less buzz (Stage A of `notes/realism-3.2-plan.md`, 2026-10-18)
+
+**What the owner heard in 3.1.1:** the AI voice still stutters at the most-real end (about 1 s of delay) and sounds
+buzzy at every position; Discord, a game and a browser usually run at the same time. The card did not say "backup
+voice" when it stuttered, so the joins between pieces and the pitch feed were part of it, and late pieces too.
+
+**What changed** (all in `Sources/Voice/VoiceModel.mm`, the ±15 limit in `VoiceChanger.cpp`; every change has a
+`--changer-tune` key, and `ai32=0` turns all of them off: the AI voice is then byte for byte 3.1.1's):
+1. *Time in hand grows with the slider, delay unchanged* (`aiSplit`, `aiAheadMax` 400): up to 150 ms of look-ahead
+   nothing changes; above, part of the look-ahead the slider asks for is kept in hand for a slow piece instead. Slider
+   1: 400 ms look-ahead + 370 ms in hand (3.1.1: 700 + 70); 0.86: 350 + 320; 0.59: 260 + 210; 0.32: 170 + 100; 0.25 and
+   below as before. The read point moves with the existing quiet-moment switch (both read points must have reached it;
+   10 ms crossfade). The fixed delay is the same at every position (0.05 / 0.25 / 0.59 / 1: 285.5 / 435.5 / 685.5 /
+   985.5 ms in both versions, so the card's number is unchanged).
+2. *Warm CPU copy of the voice generator* (`aiAutoChip`): when the generator runs on the GPU, a CPU-only copy is
+   loaded and warmed too (~50 MB, part of the load). Per piece the worker sees how long before the sound thread
+   needed it the piece was ready; 2 late or 4 tight (< 15 ms) of the last 10 move the generator to the CPU copy. Back
+   to the GPU only after 30 s and only if the CPU runs late too (2 late or 8 tight of 10); a failed try goes straight
+   back on its first late piece and doubles the wait (up to 4 min). `--changer-stats` shows the chip.
+3. *Grace before Natural* (`aiGraceMs` 20): a late piece plays on into the last piece's tail (a copy kept apart, so
+   the final block can't change it mid-way) for up to 20 ms; if the piece lands, a 10 ms ramp goes from the tail into
+   it, else Natural fills in as before.
+4. *Joins:* decoder margins 50 / 50 ms instead of 60 / 40 (`aiLeftMs`); the crossfade adapts to how alike the two
+   pieces are (equal gain when alike, equal power when not, `aiFadeAdapt`); each piece keeps its own loudness gains
+   across the crossfade (`aiJoinGains`); loudness windows reach before a piece's start (`aiGainTwoSided`).
+5. *Buzz:* gaps are bridged only over smooth sound 12 dB above the room's noise, and only up to 5 frames
+   (`aiBridgeStrict`, `aiGapFrames`); voiced bits shorter than 40 ms alone in a pause get no tone (`aiShortRunMs`);
+   hissy frames (> 0.3 zero crossings per sample) never get a tone (`aiHissCross`, covers the hold after a vowel);
+   the loudness match looks at 120 ms instead of 50 (`aiGainMs`) and lifts the AI voice only as far as the mic is
+   above the room's noise: 0 dB at 6 dB above it, the full +18 dB from 20 dB above, down to -10 dB at 3 dB above
+   and below (`aiGainCap`, `aiPauseDb`; a ramp, not the plan's step, which pumped); no ±15 half-step limit on the AI
+   pitch, only its band and 60-880 Hz (`aiClampMode`; Natural keeps the limit, byte-identical); a peak limiter at 0.6
+   on each finished piece, 5 ms look-ahead into the tail, 80 ms release (`aiLimit`).
+6. Tried and not kept: near search around a fixed point (`aiSolaMode=3`: fewer poor joins, 61 vs 75 of 1706, but
+   214 timing moves of 1 ms or more and more sudden changes, 26 vs 21); one vowel lead-in frame instead of three
+   (`aiOnsetFrames=1`: 0.6 s per 100 s less tone over consonants, but 1-2 points more word errors); a lower AI band
+   top (`aiBandSt=8,aiMaxSt=10`: share above 400 Hz 5.6 -> 5.3 % only); a deeper pause cap (-20 dB: hum 3-4 %
+   but quality in noise -0.15 to -0.3); the real-time thread policy (`aiRealtime`, built, off: it could only be
+   judged under CPU load, which was not run, see below). Starting on the CPU copy (`aiStartChip`) was not measured
+   (needs a GPU run).
+
+**How it was measured** (all offline renders with the app's own `--render-voice --compute cpu`, the owner's app was
+open; 3.1.1 = a build of `git archive` of main f7757c3; tools in `research/voicechanger/`, scratch in the session):
+- 75 clips: the 70 men's clips of `meas70` (VCTK p258 p285 p304 p363 ×10, p311 p334 ×5, p345 p360 ×10, fetched
+  again with `woman_us/fetch_clips.py`: same clips, same sentences) + `say` Daniel ×5, each after ~8 s of the same
+  speaker (`smooth/mkwarm.py`), Woman at 235 Hz / 1.7. Words (Whisper base.en) and quality (Distill-MOS) on the 70
+  (`regression31/measure31.py`, which also gives the buzz number); joins (`smooth/seams.py`, traces); on the
+  regression31 set of 20 (p311 p334 p258 Daniel ×5): sudden changes / pitch jumps / voice breaks (`smooth/disc.py`),
+  tone over consonants (`regression31/addvoice.py`), pitch mapping (`regression31/pitchmap.py`).
+- Noise: `regression31/mknoisy.py` (pink room noise at -35 and -25 dBFS on p311 p334 Daniel, 15 clips each),
+  `regression31/noisem.py` (hum = share of noise-only moments the output is voiced).
+- Held notes: VocalSet (CC BY 4.0; the zip's offsets read 4 GiB too far by Python, corrected), 16 real notes warm +
+  cold (`r311/tools/makeheld.py`, `heldaudio.py`).
+- A louder mic: the 20 clips +10 dB (clipped at full scale like a real mic); samples above 0.7 counted.
+- Real time: the stream code paced in real time (`smooth/bench/stream_test.mm`, 128-sample callbacks, models in
+  memory, CPU compute), speech with 0.6 s pauses, 75 s. The Mac was busy the whole time with other work (pieces 52-75
+  ms on average instead of 49, worst 75-160 ms), which is about the "busy Mac" case. A busy GPU was simulated by making
+  every piece 60 ms slower while the generator is on its own chip (`aiSlowMs=60,aiSlowChip=1`, generator on CPU +
+  Neural Engine so no GPU was used); the real GPU-load test (`gpuload.swift`) and the 8-busy-threads test were not
+  run: the owner's Pitch Shift was recording from the G522 headset mic every time it was checked.
+
+**Look-ahead at the most-real end, picked first** (3.2 changes off, 75 clips; "within noise of 700": words ≤ +0.6
+points, MOS ≥ -0.02, poor joins ≤ +0.5 points):
+
+| real look-ahead | words (70) | MOS (70) | poor / bad joins (75 clips) | pitch jumps (20) |
+|---|---|---|---|---|
+| 700 ms (3.1.1) | 7.66 % | 3.627 | 6.2 % / 1.04 % | 12 |
+| 600 | 7.44 % | 3.629 | 4.5 % / 1.48 % | 15 |
+| 500 | 7.22 % | 3.631 | 6.6 % / 2.22 % | 14 |
+| 450 | 8.10 % | 3.630 | 5.8 % / 1.31 % | 14 |
+| **400** | 7.44 % | 3.639 | 5.5 % / 1.05 % | 16 |
+
+All four are within noise of 700 on the plan's three tests, so the smallest, 400 ms, is used: 370 ms in hand at the
+right end instead of 70. (Pitch jumps were not one of the tests; 12 vs 16 on 20 clips is about noise, √14 ≈ 4.)
+
+**Before → after, against the plan's pass marks** (3.1.1 → 3.2; slider 1 unless it says 0.25; ✓ met, ✗ missed):
+
+| pass mark | 3.1.1 | 3.2 | |
+|---|---|---|---|
+| late pieces, idle (busy Mac, CPU), slider 0.25 / 1, 75 s | 14 / 81 (Natural 0.07 / 1.71 s) | **0 / 0** | ✓ |
+| late pieces, busy GPU simulated (+60 ms per piece), 0.25 / 1 | 467 / 467 per 75 s (Natural 31 / 34 s) | **2-3 per 75-120 s / 0** | ✗ at 0.25 (1-2.4 a minute vs ≤ 1: 2 late pieces to notice the busy GPU, then 1 per try back to it, the tries 30 s, then 1, 2, 4 min apart; the CPU copy itself ran late now and then on this busy Mac), ✓ at 1 |
+| late pieces, GPU 80 % busy (real) / 8 busy CPU threads | 228 per 75 s in 3.1 | not measured (owner's mic in use) | – |
+| Natural ≤ 0.5 s a minute | see above | 0.04-0.10 s a minute (simulated busy GPU, 0.25), 0 elsewhere | ✓ |
+| delay at 0.05 / 0.25 / 0.59 / 1 within 2 ms | 285.5 / 435.5 / 685.5 / 985.5 ms | the same | ✓ |
+| slider moves 150 → 700 → 0 → 150 | made 1.29 / 1.29 / 0.49 s after the ask, 7 late | the same times, **0 late**, 0 Natural | ✓ late, ✗ "nothing lost or doubled": two of the three moves found no pause within 1.2 s in either version and were crossfaded |
+| Test button: AI seconds in the 5 s clip (6 inputs × 0.05 / 0.25 / 1) | 5.00 (talking), 4.73 (0.6 s pauses: 0.27 s silence before the first word) | the same | ✓ (the 4.73 is silence, as in 3.1.1) |
+| poor / bad joins, slider 1 (20-clip set) | 5.4 % / 0.91 % | **3.0 % / 0.18 %** | ✗ poor (≤ 2 %), ✓ bad |
+| poor joins at 0.25 (20-clip set) | 7.0 % (bad 0.83 %) | 4.3 % (bad 0.24 %) | ✗ (≤ 3 %) |
+| poor / bad joins, all 75 clips, slider 1 / 0.25 | 6.2 / 1.04 %, 9.7 / 1.05 % | 4.6 / 0.73 %, 6.4 / 0.77 % | – |
+| sudden changes (20 clips), 1 / 0.25 | 21 / 11 | **12** / 11 | ✓ (≤ 15) |
+| pitch jumps, 1 / 0.25 | 12 / 16 | 15 / 17 | ✗ (≤ 13; from the shorter look-ahead and the freed pitch rises) |
+| voice breaks, 1 / 0.25 | 7 / 6 | 7 / 7 | ✓ (≤ 8) |
+| timing jumps ≥ 1 ms | 0 | 0 | ✓ |
+| hum in noise-only moments, -35 dBFS, 1 / 0.25 | 32 % / 40 % | **7 % / 3 %** | ✓ (≤ 10 %) |
+| hum, -25 dBFS, 1 / 0.25 | 42 % / 70 % | 11 % / 16 % | ✗ (≤ 10 %) |
+| tone over consonants (s per 100 s), 1 / 0.25 | 5.09 / 5.29 | 4.70 / 4.78 | ✗ (≤ 3.0; about half of what is left the model voices by itself with no pitch in its feed) |
+| AI pitch frames held at the ±15 limit (p311 / p334 / Daniel) | 16 / 23 / 15 % | **0 %** | ✓ (≤ 2 %) |
+| share of the voice above 400 Hz, 1 / 0.25 | 3.3 % / 3.4 % | 4.3 % / 5.6 % | ✗ (≤ +1 point; all of it from the freed rises: with the old limit kept it is 2.6 %) |
+| octave flips on the held notes (32) | 0 | 0 (slide 0.07 vs 0.09 half-steps, jitter ratio 1.06-1.14 vs 1.14-1.28) | ✓ |
+| samples above 0.7, normal mic / 10 dB louder | 0 / 0.91 % (peaks up to 2.0) | **0 / 0** (peak 0.600) | ✓ |
+| words (70 clips), 1 / 0.25 | 7.66 % / 8.53 % | 8.10 % / 8.32 % | ✗ at 1 (+0.44, bar +0.4: 3 words of ~680), ✓ at 0.25 |
+| quality (Distill-MOS, 70 clips), 1 / 0.25 | 3.627 / 3.645 | 3.635 / 3.644 | ✓ (≥ -0.02) |
+| buzz number (pulse clarity, 20 clips; real voices 63-100) | 75.8 / 75.8 | 76.0 / 74.5 | – |
+| 3-8 kHz flatness, 1 / 0.25 | 0.031 / 0.033 | 0.031 / 0.034 | – |
+
+In noise: the voice stands 4-13 dB further above the room's noise (-35 dBFS: 14.5 → 19.0 dB; -25: 5.8 → 17.1 dB),
+words at -25 dBFS 80 → 70 % (slider 1) and 88 → 74 % (0.25); quality at -35 dBFS 3.62 / 3.68 → 3.65 / 3.66, at -25
+dBFS 2.85 / 2.80 → 2.74 / 2.68 (lower: the voice is turned down where it is barely above the noise).
+
+**What each part did** (slider 1, 20-clip set unless noted): margins 50 / 50: poor joins 4.4 → 3.0 %, bad 0.64 →
+0.18 %; the joins' crossfade and gains changes: no measurable change (sudden changes 19 vs 21, quality and words
+equal; also at 0.25); 120 ms loudness window: sudden changes 20 → 12, quality -0.017, and in noise quality +0.1
+to +0.24; pause cap (with 120 ms): hum at -35 dBFS 37 % (no cap) → 7 %; no ±15 limit: pitch jumps +2, share above
+400 Hz 2.6 → 4.2 %; hiss rule, short-run rule, stricter bridging, limiter: each within noise on words and quality.
+The time in hand alone took idle late pieces at the right end from 81 to 0 and the forced-late test (+200 ms every
+8th piece) from 299 late to 0; the CPU switch took the simulated busy GPU at 0.25 from 467 late to 2-3; the grace
+halved the time Natural played when pieces came a little late (2.66 → 1.41 s in 75 s).
+
+**Report only: Woman at 235 Hz / 1.7 (the owner's pick) vs 220 / 1.5**, 3.2, 20 clips: buzz number 74.5 → 80.8
+(0.25) and 76.0 → 82.7 (1) (clearer pulses, less buzz; it follows the pitch); share above 400 Hz 5.6 → 4.6 % and
+4.3 → 3.1 %; words 10.5 → 8.6 % and 9.3 → 9.9 %; quality 3.80 → 3.81 and 3.77 → 3.78; median pitch 233 → 219 Hz.
+Not changed (the owner's choice).
+
+**Checks:** with `--changer-tune ai32=0` the AI voice is byte-identical to 3.1.1 (5/5: Woman 0.05 / 0.25 / 0.59 /
+1, Man 0.25, CPU); Natural 15/15 identical (with and without the key, half strength, `--live-sim`); changer off 14/14
+identical; 36 compiler warnings (as main); the Intel half says "Realistic mode: needs Apple silicon". Not run: live
+microphone tests, the real GPU-load test, the 8-busy-threads test and the GPU-vs-CPU start comparison (the owner's
+Pitch Shift was recording from their headset mic each time it was checked); hidden previews (no window code changed).
+
+**Left / not sure:** nobody has listened (`~/Downloads/Pitch Shift 3.2 compare/`); the pass marks missed above
+(poor joins 3.0 / 4.3 % vs 2 / 3 %, pitch jumps 15 vs 13, tone over consonants 4.7 vs 3.0, hum at -25 dBFS 11-16 %,
+share above 400 Hz +1.0 / +2.2 points, words +0.44 at slider 1); the CPU copy adds ~50 MB and part of a second to
+the load; `aiClampMode=0` puts the old pitch limit back if high notes sound strained; slider moves in a room that is
+never quiet still crossfade, as in 3.1.1.
