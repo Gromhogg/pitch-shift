@@ -10,6 +10,7 @@ import CryptoKit
 enum Free {
     static let cartoon: Float = 1  // the voice style stays at Cartoon
     static let slowDeeper = false  // Deeper when slow stays off
+    static let fastHigher: Float = 0  // and so does Higher when fast
     static let tone: Float = 0     // Bass ↔ Treble stays in the middle
     // Auto EQ and the Voice changer stay off.
 }

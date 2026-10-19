@@ -30,6 +30,8 @@
 //                [--voice-preset old]          shifts a sound file with the voice's own settings (offline, no devices;
 //                                              --cartoon-at "1:1,2:0" moves the style to 1 at 1 s and back to 0 at 2 s;
 //                                              --voice-preset old: as before the Natural level fix, for comparing)
+//                [--fast-higher N]             with --slow-deeper (here and in --test-voice): "Higher when fast", up
+//                                              to N half-steps higher when talking fast (0 ... 8; left out = 0, off)
 //                [--voice Woman [--strength 1] [--realism R] [--changer-tune "k=v,..."] [--changer-stats]]
 //                                              with the voice changer (the amount, style and --slow-deeper are then
 //                                              ignored: only one at a time;
@@ -214,6 +216,8 @@ if changerArg != nil && (arg("--steps") != nil || slowDeeperAsked) {
     print("Note: with --voice the voice changer sets the pitch, so --steps and --slow-deeper are ignored (only one at a time).")
 }
 let slowDeeperArg = slowDeeperAsked && changerArg == nil
+// "Higher when fast" with --slow-deeper: --fast-higher N half-steps (0 ... 8; left out = 0, off, as before).
+let fastHigherArg: Float = slowDeeperArg ? VoiceShifter.cleanFastHigher(arg("--fast-higher").flatMap(Float.init) ?? 0) : 0
 // The amount for the voice: --steps (or `fallback`), except with --voice, where it is not used (the changer sets the
 // pitch; the fallback keeps the renders as they were).
 func voiceStepsArg(_ fallback: Float) -> Float { changerArg != nil ? fallback : arg("--steps").flatMap(Float.init) ?? fallback }
@@ -541,7 +545,7 @@ if let input = arg("--render-voice") {
     if args.contains("--live-sim") {  // the live chain's timing, offline (see simulateVoiceChain; Natural mode only)
         do {
             try simulateVoiceChain(input: input, output: args[i + 2], halfSteps: voiceStepsArg(3),
-                                   cartoon: cartoonArg ?? 0, slowDeeper: slowDeeperArg, changer: changerArg,
+                                   cartoon: cartoonArg ?? 0, slowDeeper: slowDeeperArg, fastHigher: fastHigherArg, changer: changerArg,
                                    blockFrames: arg("--buffer").flatMap(Int.init) ?? 128)
             print("wrote \(args[i + 2])")
             exit(0)
@@ -554,7 +558,8 @@ if let input = arg("--render-voice") {
         // --as-free: the style stays at Cartoon, Deeper when slow off and no voice changer, as in the free version.
         try renderVoiceFile(input: input, output: args[i + 2], halfSteps: voiceStepsArg(3),
                             cartoon: asFree ? Free.cartoon : cartoonArg ?? 0, changes: asFree ? [] : changes,
-                            slowDeeper: asFree ? Free.slowDeeper : slowDeeperArg, levelFix: preset != "old",
+                            slowDeeper: asFree ? Free.slowDeeper : slowDeeperArg, fastHigher: asFree ? Free.fastHigher : fastHigherArg,
+                            levelFix: preset != "old",
                             changer: changerArg)
         // Realistic: the AI voice over the same file, inline (it never comes late), with the Natural render as its
         // fallback sound (only used before the first piece is ready).
@@ -663,7 +668,7 @@ if args.contains("--test") {
 if args.contains("--test-voice") {
     let steps = voiceStepsArg(3)
     let micUID = arg("--mic").flatMap { name in Mics.list().first { $0.name == name }?.uid }
-    let voice = VoiceShifter(halfSteps: steps, cartoon: cartoonArg ?? 0, slowDeeper: slowDeeperArg, micUID: micUID)
+    let voice = VoiceShifter(halfSteps: steps, cartoon: cartoonArg ?? 0, slowDeeper: slowDeeperArg, fastHigher: fastHigherArg, micUID: micUID)
     if let changerArg, let entry = arg("--voice").flatMap({ VoiceLibrary.shared.voice($0) }) {  // --voice: the voice changer on
         voice.changerTune = changerArg.tune
         voice.changer = ChangerSettings(on: true, voiceID: entry.id, strength: changerArg.strength, realism: realismArg)
@@ -799,7 +804,7 @@ if args.contains("--test-voice") {
         let started = Date()
         func report() {
             let reading = chain.slowReading.withLock { $0 }
-            print(String(format: "%4.1fs  rate %.1f syllables/s  extra %+.1f half-steps", Date().timeIntervalSince(started), reading.rate, reading.extra))
+            print(String(format: "%4.1fs  ", Date().timeIntervalSince(started)) + reading.line)
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { report() }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { report() }
