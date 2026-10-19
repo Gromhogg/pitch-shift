@@ -121,7 +121,7 @@ void voicestream_set_intonation(VoiceStream *stream, float intonation);
 //   stutters: "aiSplit" 1 [0]: above 150 ms, part of the look-ahead asked for becomes extra reserve so that at most
 //   "aiAheadMax" 400 ms is real look-ahead (the total delay stays the same); "aiAutoChip" 1 [0]: the voice generator
 //   switches to a warm CPU copy when pieces run late on the GPU (2 late or 4 tight in the last 10) and back only
-//   after 30 s if the CPU is tight too; "aiStartChip" 0: 1 = start on the CPU copy; "aiGraceMs" 20 [0]: a late piece
+//   after 30 s if the CPU runs late too (a failed try doubles the wait, up to 4 min); "aiStartChip" 0: 1 = start on the CPU copy; "aiGraceMs" 20 [0]: a late piece
 //   plays on into the last piece's tail this long before Natural fills in; "aiRealtime" 0: real-time thread policy;
 //   joins: "aiLeftMs" 50 [-1 = the model's 60]: the decoder's left margin (the right one gets the rest); "aiFadeAdapt" 1 [0]: the crossfade
 //   keeps the loudness when the two pieces differ (equal power) and when alike (equal gain); "aiJoinGains" 1 [0]: each

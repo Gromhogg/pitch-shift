@@ -428,6 +428,7 @@ struct VoiceStream {
     int exNow = 0;                 // 3.2: extra reserve in use (10 ms frames; part of the look-ahead asked for)
     bool onCPU = false;            // 3.2: the voice generator runs on the model's CPU copy
     double chipSinceMs = 0;        // ... since (or since the start)
+    double cpuHoldMs = 30000;      // ... stays on the CPU at least this long (doubles after a failed try, up to 4 min)
     uint32_t lateBits = 0, tightBits = 0;  // ... the last 10 pieces: late / ready less than 15 ms before needed
     bool rtSet = false;            // 3.2: real-time thread policy set
     float limG = 1;                // 3.2: the peak limiter's gain at the end of the last piece
@@ -971,7 +972,9 @@ struct VoiceStream {
 
     // 3.2: margin = how long before the sound thread needed it this piece was ready (ms; < 0: late). On the GPU, 2
     // late or 4 tight (< 15 ms) pieces of the last 10 move the voice generator to its warm CPU copy (a game is using
-    // the GPU); back to the GPU only after 30 s, and only if the CPU runs late or tight too (no blind tries).
+    // the GPU); back to the GPU only after 30 s, and only if the CPU runs late too (2 late or 8 tight of the last 10:
+    // no blind tries). A try that fails (a late piece on the GPU within 10 s) goes straight back and doubles the wait,
+    // up to 4 minutes.
     void chooseChip(double margin) {
         const bool late = margin < 0, tight = margin < 15;
         if (late) lateHops.fetch_add(1);
@@ -979,10 +982,19 @@ struct VoiceStream {
         if (!autoChip.load() || !run->model->voiceCPU) return;
         lateBits = ((lateBits << 1) | (late ? 1u : 0u)) & 0x3FFu;
         tightBits = ((tightBits << 1) | (tight ? 1u : 0u)) & 0x3FFu;
-        if (__builtin_popcount(lateBits) < 2 && __builtin_popcount(tightBits) < 4) return;
-        if (onCPU && nowMs() - chipSinceMs < 30000) return;
+        const int nLate = __builtin_popcount(lateBits), nTight = __builtin_popcount(tightBits);
+        const double now = nowMs();
+        if (onCPU) {
+            if (now - chipSinceMs < cpuHoldMs || (nLate < 2 && nTight < 8)) return;
+        } else {
+            // (just back from the CPU: one late piece is enough to say the GPU is still busy)
+            const bool trying = chipSwitches.load() > 0 && now - chipSinceMs < 10000;
+            if (nLate < (trying ? 1 : 2) && nTight < 4) return;
+            // back on the GPU for less than 10 s: that try failed, wait longer next time
+            cpuHoldMs = now - chipSinceMs < 10000 && chipSwitches.load() > 0 ? std::min(cpuHoldMs * 2, 240000.0) : 30000.0;
+        }
         onCPU = !onCPU;
-        chipSinceMs = nowMs();
+        chipSinceMs = now;
         lateBits = tightBits = 0;
         chipSwitches.fetch_add(1);
         onCPUShown.store(onCPU ? 1 : 0, std::memory_order_relaxed);
