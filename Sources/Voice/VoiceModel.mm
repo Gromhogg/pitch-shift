@@ -471,12 +471,13 @@ struct VoiceStream {
     std::atomic<float> intonation{0};   // the voice's intonation in use (0 = don't reshape the pitch line)
     std::atomic<int> gapFrames{5};      // short unvoiced gaps bridged inside a loud sound (a voiced consonant, a flicker;
                                         // 8 before 3.2)
-    std::atomic<int> onsetFrames{1};    // unvoiced frames just before a vowel that take its first pitch (3 before
-                                        // 3.2: 1 puts less tone over consonants with no more voice breaks)
+    std::atomic<int> onsetFrames{3};    // unvoiced frames just before a vowel that take its first pitch (1 put less
+                                        // tone over consonants but cost 1-2 points of words: kept at 3)
     std::atomic<int> solaMode{-1};      // -1 = by look-ahead: with it the pieces line up already, so the crossfade keeps
                                         // the timing (a search would skip or repeat bits of sound); without, it searches
                                         // 0 = search the whole range, 1 = keep the timing, 2 = search near the last one
-    std::atomic<int> gainMs{50};        // loudness match window (ms; 20 before 3.1: it pumped the AI voice's own loudness)
+    std::atomic<int> gainMs{120};       // loudness match window (ms; 20 before 3.1: it pumped the AI voice's own loudness;
+                                        // 50 in 3.1: 120 halves the sudden sound changes and is steadier in a noisy room)
     std::atomic<float> quietDb{-45};    // a frame this quiet (dBFS) counts as a pause (for look-ahead switches)
     // 3.2 (the value in brackets gives 3.1.1's sound; see VoiceModel.h)
     std::atomic<int> split{1};          // [0] above 150 ms part of the look-ahead becomes extra reserve ...
@@ -496,6 +497,7 @@ struct VoiceStream {
     std::atomic<int> shortRunMs{40};    // [0] voiced bits shorter than this, alone in a pause, get no tone
     std::atomic<float> hissCross{0.3f}; // [0] frames whose zero crossings per sample exceed this get no tone
     std::atomic<int> gainCap{1};        // [0] the loudness match lifts the AI voice only as far as the mic is above the noise
+    std::atomic<float> pauseDb{-10};    // ... and in a pause (the mic within 3 dB of the room's noise) at most this
     std::atomic<float> limitAt{0.6f};   // [0] peak limiter on each finished piece (5 ms look-ahead, 80 ms release)
     FILE *trace = nullptr;              // research: per-piece trace (offline only, PITCHSHIFT_AI_TRACE)
 
@@ -833,7 +835,7 @@ struct VoiceStream {
         lastO = o;
         // 7. loudness: follow the mic's own loudness, 10 ms by 10 ms (RVC's "rms mix" at 0), up to +gainMaxDb (3.2:
         // at most as far as the mic is above the room's noise: 0 dB at 6 dB above it, the full lift from 20 dB above,
-        // and -10 dB below 3 dB above it, so the model's own hum in a pause is never lifted)
+        // and down to aiPauseDb (-10) at 3 dB above it and below, so the model's own hum in a pause is never lifted)
         const float gmax = std::pow(10.0f, gainMaxDb.load() / 20);
         const bool cap = gainCap.load() != 0;
         const int frames = H + X;
@@ -861,7 +863,8 @@ struct VoiceStream {
             if (cap) {
                 const float lv = (float)(20 * std::log10(rin + 1e-9));
                 float capDb = gainMaxDb.load() * std::clamp((lv - floorDb - 6) / 14, 0.0f, 1.0f);
-                if (lv < floorDb + 3) capDb = -10;
+                if (lv < floorDb + 6)  // (a ramp, not a step: a step pumped the voice in a noisy room)
+                    capDb = pauseDb.load() * std::clamp((floorDb + 6 - lv) / 3, 0.0f, 1.0f);
                 gm = std::min(gm, std::pow(10.0f, capDb / 20));
             }
             r.gains[(size_t)f] = (float)std::min<double>(gm, rin / rout);
@@ -1564,11 +1567,11 @@ int voicestream_tune(VoiceStream *stream, const char *key, float value) {
         const bool on = value != 0;
         stream->split.store(on); stream->aheadMax.store(400); stream->autoChip.store(on); stream->startChip.store(0);
         stream->graceMs.store(on ? 20 : 0); stream->realtime.store(0); stream->leftMs.store(on ? 50 : -1);
-        stream->onsetFrames.store(on ? 1 : 3);
+        stream->onsetFrames.store(3);
         stream->fadeAdapt.store(on); stream->joinGains.store(on); stream->gainTwoSided.store(on);
         stream->solaMode.store(-1); stream->nearMs.store(1.5f); stream->bridgeStrict.store(on);
         stream->gapFrames.store(on ? 5 : 8); stream->shortRunMs.store(on ? 40 : 0); stream->hissCross.store(on ? 0.3f : 0);
-        stream->gainCap.store(on); stream->gainMs.store(50); stream->limitAt.store(on ? 0.6f : 0);
+        stream->gainCap.store(on); stream->gainMs.store(on ? 120 : 50); stream->limitAt.store(on ? 0.6f : 0);
         stream->resplit();
         return 1;
     }
@@ -1587,6 +1590,7 @@ int voicestream_tune(VoiceStream *stream, const char *key, float value) {
     if (k == "aiShortRunMs") { stream->shortRunMs.store(std::clamp((int)value, 0, 100)); return 1; }
     if (k == "aiHissCross") { stream->hissCross.store(std::clamp(value, 0.0f, 1.0f)); return 1; }
     if (k == "aiGainCap") { stream->gainCap.store(value != 0); return 1; }
+    if (k == "aiPauseDb") { stream->pauseDb.store(std::clamp(value, -60.0f, 0.0f)); return 1; }
     if (k == "aiLimit") { stream->limitAt.store(std::clamp(value, 0.0f, 1.0f)); return 1; }
     return 0;
 }

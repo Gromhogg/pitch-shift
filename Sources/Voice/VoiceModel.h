@@ -110,7 +110,7 @@ void voicestream_set_intonation(VoiceStream *stream, float intonation);
 // Test settings (--changer-tune): "aiSlowMs" = extra time added to each piece (forces late pieces),
 // "aiSlowEvery" = only every Nth piece ("aiSlowChip" 1: only while the voice generator is not on its CPU copy, as
 // with a busy GPU), "aiGainMaxDb" = the most the loudness match may lift (default 18),
-// "aiGainMs" = its window (50); the pitch the AI voice follows (with look-ahead): "aiSmoothFrames" (light smoothing,
+// "aiGainMs" = its window (120 in 3.2, 50 in 3.1); the pitch the AI voice follows (with look-ahead): "aiSmoothFrames" (light smoothing,
 // frames on each side, 1), "aiSlowFrames" (the melody line, 7), "aiIntonation" (as voicestream_set_intonation),
 // "aiGapFrames" (unvoiced gaps up to this long inside a loud sound are bridged, 8), "aiOnsetFrames" (a vowel's
 // unvoiced lead-in frames that take its first pitch, 3); "aiSolaMode" (-1 by look-ahead,
@@ -128,9 +128,9 @@ void voicestream_set_intonation(VoiceStream *stream, float intonation);
 //   piece keeps its own loudness across the crossfade; "aiGainTwoSided" 1 [0]: loudness windows reach before a
 //   piece's start; "aiSolaMode" 3 = search "aiNearMs" (1.5) around a fixed point;
 //   buzz: "aiBridgeStrict" 1 [0]: gaps are bridged only over smooth sound well above the room's noise;
-//   "aiGapFrames" 5 [8]; "aiOnsetFrames" 1 [3]; "aiShortRunMs" 40 [0]: voiced bits shorter than this in a pause get no tone;
+//   "aiGapFrames" 5 [8]; "aiShortRunMs" 40 [0]: voiced bits shorter than this in a pause get no tone;
 //   "aiHissCross" 0.3 [0]: hissy frames (zero crossings per sample above this) get no tone; "aiGainCap" 1 [0]: the
-//   loudness match lifts the AI voice only as far as the mic is above the room's noise (never in pauses);
+//   loudness match lifts the AI voice only as far as the mic is above the room's noise (in pauses at most "aiPauseDb" -10 dB);
 //   "aiLimit" 0.6 [0]: a peak limiter on each finished piece (5 ms look-ahead, 80 ms release).
 // Returns 1 if the key is known.
 int voicestream_tune(VoiceStream *stream, const char *key, float value);
