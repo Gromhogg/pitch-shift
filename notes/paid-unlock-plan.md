@@ -20,12 +20,12 @@ are kept for later and are not what the app does today. Section 10 is done (bran
   locked) opens a small window: "Pitch Shift Pro: $5", what it adds, "Email cbsweetland@gmail.com for a key", an
   **Email for a key** button (a new email in Mail, subject "Pitch Shift Pro key"), the key box and **Unlock**. The
   owner makes a key and emails it back; the person pastes it and clicks Unlock. No internet is needed for that.
-- **The key:** still 25 characters in 5 groups from `23456789ABCDEFGHJKMNPQRSTUVWXYZ`. The first 5 are a random
+- **The key (until 2026-10-19; now "older keys", see "Signed keys" below):** still 25 characters in 5 groups from `23456789ABCDEFGHJKMNPQRSTUVWXYZ`. The first 5 are a random
   serial number, the next 16 come from HMAC-SHA-256 of `"PSPRO2:" + serial` with the owner's secret (each from two
   bytes of it, modulo 31; about 79 bits), the last 4 are the same typo check as before (SHA-256 of `"PSPRO1:"` + the
   first 21). Typing is forgiving as before. `Sources/Pro.swift` (`ProKey`) and `tools/pro-keys.sh` make keys the same
   way; `tools/pro-keys-test.txt` holds fixed test keys both check (`tools/pro-keys.sh test`, app `--pro-test`).
-- **The secret:** 32 random bytes as 64 hex characters in `~/Library/Application Support/Pitch Shift Keys/secret.txt`
+- **The secret (until 2026-10-19; no longer built in, see "Signed keys" below):** 32 random bytes as 64 hex characters in `~/Library/Application Support/Pitch Shift Keys/secret.txt`
   (folder 700, file 600), made by the key tool the first time. Never in git. `build.sh` builds it into the app from
   there (or from `PRO_KEY_SECRET`); a build without it has nothing locked, so builds from the public code just work.
   `release.sh` stops if there's no secret (`PRO_KEY_SECRET= ./release.sh X` releases with everything free). **Keep a
@@ -33,12 +33,12 @@ are kept for later and are not what the app does today. Section 10 is done (bran
   already sent out.
 - **What the app keeps:** `~/Library/Application Support/Pitch Shift/Pro.json` = the key and the date it was entered
   (no token, no Mac id). Checked again at every launch, with no internet.
-- **The owner's tool:** `tools/pro-keys.sh new "their email"` (prints the key, adds `date  name  key` to `issued.txt`
+- **The owner's tool (until 2026-10-19, see "Signed keys" below):** `tools/pro-keys.sh new "their email"` (prints the key, adds `date  name  key` to `issued.txt`
   next to the secret), `list`, `check KEY`. Plain Bash with the Mac's own `openssl` and `shasum`.
 - **Free and Pro** as in section 1, now with the Voice changer and Auto EQ locked too: free = What you hear with
   Advanced processing on/off, Your voice with the style at Cartoon, Test; Pro = the Voice changer (and adding voices),
   Natural ↔ Cartoon, Bass ↔ Treble, Auto EQ, Deeper when slow, the Soundboard.
-- **Honest limits (new):** an emailed key can't be turned off once sent (no server to ask), and the secret is inside
+- **Honest limits (new; the secret part is fixed by "Signed keys" below):** an emailed key can't be turned off once sent (no server to ask), and the secret is inside
   the app, so someone who digs it out of the app file could make keys (the same "pay for the ready-made build" limit
   as the public code in section 8). A key works on any number of Macs. If keys get passed around, the fix is a new
   secret in a later version (old keys then stop working, so the owner would re-send keys to people in `issued.txt`),
@@ -51,6 +51,41 @@ are kept for later and are not what the app does today. Section 10 is done (bran
   any copy. Two more ways around the lock were closed: `--pro-secret` (a test option) could unlock the window and the
   sound with a home-made key, so it now only works for checking keys; and the hidden picture mode (`--preview`, which
   shows Pro unlocked) no longer starts any sound if one of its switches is pressed.
+- **Signed keys (2026-10-19, the owner: "fix #2 with the longer keys"):** before, the secret that makes keys was
+  built into the app, so anyone who dug it out of the app file could make keys. Now keys are **signed**: the owner's
+  Mac holds a key pair, `signing-private.txt` (makes keys; never leaves the Pitch Shift Keys folder) and
+  `signing-public.txt` (checks keys; the only part built into the app). The app can check a key but can't make one.
+  - **A new key** is 115 characters, shown in 23 groups of 5, 6 groups per line (4 lines): "P2" (the kind of key),
+    a 5-character serial, 104 characters holding an Ed25519 signature of `"PSPRO3:P2" + serial`, and the same
+    4-character typo check as before (SHA-256 of `"PSPRO1:"` + the first 111). Same 31 easy-to-read characters.
+    The key box is 4 lines tall; pasting a key from an email with line breaks, spaces, dashes or small letters just
+    works (they're taken out as it comes in).
+  - **Keys sent out before** (25 characters) keep working without the old secret in the app: when it builds,
+    `build.sh` (through `tools/pro-config.sh`, which never prints a key) reads `issued.txt` and builds in only a
+    fingerprint of each older key (SHA-256 of `"PSPRO-OLD:"` + the key). The app accepts an older key only if its
+    fingerprint is on that list. So the owner's own key (saved in Pro.json) keeps working after the update, as long
+    as it's in `issued.txt` (the key tool put every key it made there). An older key made after the build, or never
+    listed, isn't accepted: make new keys the new way.
+  - **The owner's tool:** `tools/pro-keys.sh setup` (makes the key pair once; never replaces one that's there),
+    `new "name"` (a signed key, printed in 4 lines to paste into the email, and added to `issued.txt`), `list`,
+    `check KEY` (both kinds; the key can be pasted with its line breaks in quotes). It runs on the Mac's own Swift
+    (Command Line Tools), no installs: the Mac's `openssl` (LibreSSL 3.3.6) can't make Ed25519 signatures. The old
+    copy of `pro-keys.sh` in the Keys folder still makes the older keys: don't use it any more.
+  - **Back up the whole Pitch Shift Keys folder again** (secret.txt, signing-private.txt, signing-public.txt,
+    issued.txt): without `signing-private.txt` no more keys can be made for the app, and a new key pair would make
+    every signed key already sent out stop working. `secret.txt` is no longer built into anything, but keep it.
+  - **Builds:** `build.sh` reads `signing-public.txt` (or `PRO_PUBLIC_KEY`) and `issued.txt` (or `PRO_ISSUED`); with
+    no public key nothing is locked. `release.sh` stops without the public key (`PRO_PUBLIC_KEY= ./release.sh X` =
+    everything free) or without `issued.txt` (`PRO_ISSUED= ./release.sh X` = no older keys). `PRO_KEY_SECRET` is no
+    longer used.
+  - **Checks:** `tools/pro-keys.sh test` and the app's `--pro-test tools/pro-keys-test.txt` check the same fixed
+    examples (older keys from the test secret, signed keys from a test key pair whose private half is in that file on
+    purpose: it unlocks nothing in a real build). Test options `--pro-public-key HEX` and `--pro-old-keys ISSUED`
+    (replacing `--pro-secret`) work only for checking keys, never for the sound or the window.
+  - **What a determined person can still do:** build the app from the public code without the public key (nothing
+    locked), or edit the app file to skip the check (then the app's signature breaks and macOS warns again, but it can
+    be done); share a key (a key works on any number of Macs, and there's no server to turn one off). What they can't
+    do any more: make new keys from what's inside the app.
 - **Later, with Stripe:** sections 5, 6 and 9 still apply, but the server would have to make keys the new way (or
   the app learn both kinds) and the app would need its `/activate` call back. `server/README.md` says the folder is
   not used yet.

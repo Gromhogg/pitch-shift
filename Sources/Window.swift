@@ -2655,8 +2655,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     // For screenshots (--preview hear-on,voice-on,waiting,typing,recording,playing,listening,hover,menu,roll,
     // resize,no-driver,advanced-alert,sounds,rename,volume,drop,light,tone,slow,eq,changer,changer-man,
     // changer-realistic,changer-loading,changer-fallback,changer-slider-natural|fast|default|max|NN,changer-intel,
-    // pro-locked,pro-unlock,pro-typo,pro-done,pro-alone,pro-unlocked [--size 800x400]): shows a state, no sound. Any
-    // changer state also shows Your voice on.
+    // pro-locked,pro-unlock,pro-typo,pro-paste,pro-done,pro-alone,pro-unlocked [--size 800x400]): shows a state, no
+    // sound. Any changer state also shows Your voice on.
     func showPreview() {
         guard let preview else { return }
         // With Pitch Shift Pro locked (pro-locked, pro-unlock), the paid controls keep the free version's values.
@@ -2681,11 +2681,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             hear.setAutoEQ(on: preview.contains("eq") && pro, offsets: pro ? autoEQArg.offsets.map(Float.init) : [], for: outputUID)
         }
         refresh()
-        // The unlock window (with pro-typo: a key with a typo; pro-done: unlocked; pro-alone: as its own window).
+        // The unlock window (with pro-typo: a key with a typo; pro-paste: a key pasted from an email, line breaks and
+        // all; pro-done: unlocked; pro-alone: as its own window).
         if previewStates.contains("pro-unlock") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 ProSheet.shared.show(on: self.window, alone: previewStates.contains("pro-alone"))
                 if previewStates.contains("pro-typo") { ProSheet.shared.showTypo() }
+                if previewStates.contains("pro-paste") { ProSheet.shared.showPasted() }
                 if previewStates.contains("pro-done") { ProSheet.shared.showUnlockedMessage() }
             }
         }

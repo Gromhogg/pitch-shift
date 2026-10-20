@@ -15,25 +15,27 @@ ditto build/PitchShiftMic.driver "$app/Contents/PlugIns/PitchShiftMic.driver"
 # The app is built twice, for Apple silicon (arm64) and Intel (x86_64), both for macOS 14.4 or newer,
 # and joined into one file.
 rm -rf build/obj
-# Pitch Shift Pro: the secret the app checks keys with. It is never in git: it comes from PRO_KEY_SECRET, or else from
-# ~/Library/Application Support/Pitch Shift Keys/secret.txt (made by tools/pro-keys.sh on the owner's Mac). With no
-# secret (or PRO_KEY_SECRET= set to nothing) the app has nothing locked. The copy of ProConfig.swift with the secret in
-# it is made in build/obj and deleted right after the app is built.
+# Pitch Shift Pro: what the app checks keys with. Keys are signed with the owner's private key, which never leaves
+# ~/Library/Application Support/Pitch Shift Keys; the app gets only the public half (it can check keys, not make
+# them), from PRO_PUBLIC_KEY or else signing-public.txt in that folder (made by tools/pro-keys.sh setup), plus the
+# fingerprints of the older 25-character keys sent out before signed keys, from PRO_ISSUED or else issued.txt in the
+# same folder, so they keep working (tools/pro-config.sh; it never prints a key). With no public key (or
+# PRO_PUBLIC_KEY= set to nothing) the app has nothing locked. The filled-in copy of ProConfig.swift is made in
+# build/obj and deleted right after the app is built. (The old key secret, secret.txt, is no longer built in.)
 swift_sources=(Sources/*.swift)
-if [[ -z ${PRO_KEY_SECRET+x} ]]; then
-  secret_file="$HOME/Library/Application Support/Pitch Shift Keys/secret.txt"
-  PRO_KEY_SECRET=$( [[ -f $secret_file ]] && tr -d ' \t\r\n' < "$secret_file" || true )
+keys_dir="$HOME/Library/Application Support/Pitch Shift Keys"
+if [[ -z ${PRO_PUBLIC_KEY+x} ]]; then
+  PRO_PUBLIC_KEY=$( [[ -f $keys_dir/signing-public.txt ]] && tr -d ' \t\r\n' < "$keys_dir/signing-public.txt" || true )
 fi
-PRO_KEY_SECRET=${PRO_KEY_SECRET//[[:space:]]/}
-if [[ -n $PRO_KEY_SECRET ]]; then
-  [[ $PRO_KEY_SECRET =~ ^[0-9A-Za-z_-]+$ ]] || { echo "PRO_KEY_SECRET: letters, digits, - and _ only"; exit 1; }
+PRO_PUBLIC_KEY=${PRO_PUBLIC_KEY//[[:space:]]/}
+[[ -n ${PRO_ISSUED+x} ]] || PRO_ISSUED=$keys_dir/issued.txt
+if [[ -n $PRO_PUBLIC_KEY ]]; then
   mkdir -p build/obj
-  sed "s|static let keySecret = \"[^\"]*\"|static let keySecret = \"$PRO_KEY_SECRET\"|" Sources/ProConfig.swift > build/obj/ProConfig.swift
-  grep -q "keySecret = \"$PRO_KEY_SECRET\"" build/obj/ProConfig.swift || { echo "Couldn't put the key secret into ProConfig.swift"; exit 1; }
+  old_keys=$(tools/pro-config.sh "$PRO_PUBLIC_KEY" "$PRO_ISSUED" build/obj/ProConfig.swift) || exit 1
   swift_sources=(${swift_sources:#Sources/ProConfig.swift} build/obj/ProConfig.swift)
-  echo "Pitch Shift Pro: the paid parts are locked until a key is entered (key secret built in)"
+  echo "Pitch Shift Pro: the paid parts are locked until a key is entered (public key built in; older keys that still work: $old_keys)"
 else
-  echo "Pitch Shift Pro: no key secret, so nothing is locked in this build"
+  echo "Pitch Shift Pro: no public key, so nothing is locked in this build"
 fi
 for arch in arm64 x86_64; do
   obj=build/obj/$arch
@@ -58,7 +60,7 @@ for arch in arm64 x86_64; do
     -framework CoreML
 done
 lipo -create build/obj/arm64/PitchShift build/obj/x86_64/PitchShift -output "$app/Contents/MacOS/PitchShift"
-rm -f build/obj/ProConfig.swift  # the copy with the key secret in it
+rm -f build/obj/ProConfig.swift  # the filled-in copy (public key and older keys' fingerprints)
 
 if [[ ! -f AppIcon.icns ]]; then
   swift make-icon.swift build/AppIcon.iconset && iconutil -c icns build/AppIcon.iconset -o AppIcon.icns

@@ -1,8 +1,9 @@
 // Pitch Shift Pro: the $5 unlock (plan: notes/paid-unlock-plan.md). People email the owner for a key; the owner makes
 // it on their Mac with tools/pro-keys.sh and emails it back. The app checks a key on its own, with no internet: a key
-// is a serial number plus a part only the owner's secret can make (see ProKey). An accepted key is kept in
-// ~/Library/Application Support/Pitch Shift/Pro.json and checked again at every launch. While Pro is locked, the paid
-// settings use the free version's values (Free); what was saved is kept and comes back once Pro is unlocked.
+// is signed with the owner's private signing key, and the app holds only the public half, which can check a key but
+// can't make one (see ProKey). An accepted key is kept in ~/Library/Application Support/Pitch Shift/Pro.json and
+// checked again at every launch. While Pro is locked, the paid settings use the free version's values (Free); what
+// was saved is kept and comes back once Pro is unlocked.
 import AppKit
 import CryptoKit
 
@@ -15,33 +16,52 @@ enum Free {
     // Auto EQ and the Voice changer stay off.
 }
 
-// The key: 25 characters, XXXXX-XXXXX-XXXXX-XXXXX-XXXXX, from 31 characters that can't be read two ways
-// (no 0, 1, I, L or O). The first 5 are a serial number; the next 16 come from HMAC-SHA-256 of the serial with the
-// owner's secret, so nobody without the secret can make a key; the last 4 are a check part, so a typo is caught
-// right away. Must match tools/pro-keys.sh exactly (tools/pro-keys-test.txt has fixed examples both check).
+// The keys, from 31 characters that can't be read two ways (no 0, 1, I, L or O), shown in groups of 5. Typing is
+// forgiving: small letters, spaces, dashes and line breaks don't matter. Must match tools/pro-keys.swift exactly
+// (tools/pro-keys-test.txt has fixed examples both check).
+// - Signed keys (since 2026-10-19): 115 characters. "P2" (the kind of key), a 5-character serial number, 104
+//   characters holding an Ed25519 signature of "PSPRO3:P2" + serial made with the owner's private key, and a
+//   4-character check part, so a typo is caught right away.
+// - Older keys (sent out before): 25 characters, a serial, 16 characters made with a secret the app no longer has,
+//   and the same check part. The app accepts one only if its fingerprint (SHA-256 of "PSPRO-OLD:" + the key) is on
+//   the list build.sh makes from the owner's issued.txt (ProConfig.oldKeys).
 enum ProKey {
     static let alphabet = Array("23456789ABCDEFGHJKMNPQRSTUVWXYZ")
-    static let length = 25, bodyLength = 21, serialLength = 5
+    static let length = 25  // an older key
+    static let marker = "P2", serialLength = 5, signatureLength = 104, checkLength = 4
+    static let signedLength = marker.count + serialLength + signatureLength + checkLength  // 115
+    static let groupsPerLine = 6  // how a signed key is shown: 6 groups of 5 per line, 4 lines
 
     enum Problem: Error, Equatable { case length, characters, check }
+    enum Kind { case old, signed }
 
-    // What was typed or pasted, in capitals, with spaces, dashes and anything else that isn't a letter or digit gone.
+    // What was typed or pasted, in capitals, with spaces, dashes, line breaks and anything else that isn't a letter or
+    // digit gone.
     static func raw(_ text: String) -> String {
         String(text.uppercased().filter { $0.isASCII && ($0.isLetter || $0.isNumber) })
     }
 
-    // "ABCDEFGHJK…" → "ABCDE-FGHJK-…"
-    static func grouped(_ raw: String) -> String {
+    private static func groups(_ raw: String) -> [String] {
         var groups: [String] = []
         var rest = Substring(raw)
         while !rest.isEmpty {
             groups.append(String(rest.prefix(5)))
             rest = rest.dropFirst(5)
         }
-        return groups.joined(separator: "-")
+        return groups
     }
 
-    // The check part: the first 4 bytes of SHA-256("PSPRO1:" + the first 21 characters), as a number below 31^4, in
+    // "ABCDEFGHJK…" → "ABCDE-FGHJK-…" (one line: how a key is kept).
+    static func grouped(_ raw: String) -> String { groups(raw).joined(separator: "-") }
+
+    // For the key box: 6 groups per line (an older key fits on the first line).
+    static func shown(_ raw: String) -> String {
+        let all = groups(raw)
+        return stride(from: 0, to: all.count, by: groupsPerLine)
+            .map { all[$0..<min($0 + groupsPerLine, all.count)].joined(separator: "-") }.joined(separator: "\n")
+    }
+
+    // The check part: the first 4 bytes of SHA-256("PSPRO1:" + everything before it), as a number below 31^4, in
     // 4 characters.
     static func checkPart(_ body: String) -> String {
         let hash = Array(SHA256.hash(data: Data(("PSPRO1:" + body).utf8)))
@@ -54,47 +74,102 @@ enum ProKey {
         return out
     }
 
-    // The secret part: HMAC-SHA-256 of "PSPRO2:" + serial with the secret (its text as written), 16 characters,
-    // each from two of its bytes (a number below 65536, taken modulo 31).
-    static func secretPart(serial: String, secret: String) -> String {
-        let code = Array(HMAC<SHA256>.authenticationCode(for: Data(("PSPRO2:" + serial).utf8), using: SymmetricKey(data: Data(secret.utf8))))
-        return String((0..<16).map { alphabet[Int((UInt16(code[2 * $0]) << 8 | UInt16(code[2 * $0 + 1])) % 31)] })
-    }
-
-    // The whole key for a serial (5 characters from the alphabet), in its usual form.
-    static func make(serial: String, secret: String) -> String? {
-        guard serial.count == serialLength, serial.allSatisfy(alphabet.contains) else { return nil }
-        let body = serial + secretPart(serial: serial, secret: secret)
-        return grouped(body + checkPart(body))
-    }
-
-    // The key in its usual form, or what's wrong with how it was typed (only the typo check, no secret needed).
+    // The key in its usual form, or what's wrong with how it was typed (only the typo check: no key data needed).
     static func read(_ text: String) -> Result<String, Problem> {
         let raw = raw(text)
-        guard raw.count == length else { return .failure(.length) }
+        guard raw.count == length || raw.count == signedLength else { return .failure(.length) }
         guard raw.allSatisfy(alphabet.contains) else { return .failure(.characters) }
-        guard checkPart(String(raw.prefix(bodyLength))) == String(raw.suffix(length - bodyLength)) else { return .failure(.check) }
+        guard raw.count == length || raw.hasPrefix(marker),
+              checkPart(String(raw.dropLast(checkLength))) == String(raw.suffix(checkLength)) else { return .failure(.check) }
         return .success(grouped(raw))
     }
 
-    // Was this key made with this secret?
-    static func isGenuine(_ text: String, secret: String) -> Bool {
-        guard !secret.isEmpty, case .success = read(text) else { return false }
+    static func kind(_ text: String) -> Kind? {
+        guard case .success(let key) = read(text) else { return nil }
+        return raw(key).count == length ? .old : .signed
+    }
+
+    // What a signed key's signature covers.
+    static func signedMessage(serial: String) -> Data { Data(("PSPRO3:" + marker + serial).utf8) }
+
+    // A signed key's serial number and signature (64 bytes), or nil if it isn't one.
+    static func signedParts(_ text: String) -> (serial: String, signature: Data)? {
+        guard kind(text) == .signed else { return nil }
         let raw = raw(text)
-        let serial = String(raw.prefix(serialLength))
-        return String(raw.dropFirst(serialLength).prefix(bodyLength - serialLength)) == secretPart(serial: serial, secret: secret)
+        let serial = String(raw.dropFirst(marker.count).prefix(serialLength))
+        guard let signature = decode(raw.dropFirst(marker.count + serialLength).prefix(signatureLength), count: 64) else { return nil }
+        return (serial, Data(signature))
+    }
+
+    // An older key's fingerprint, as on the list build.sh makes (tools/pro-config.sh).
+    static func oldFingerprint(_ text: String) -> String {
+        SHA256.hash(data: Data(("PSPRO-OLD:" + raw(text)).utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    // Characters (one big number, most significant first) back into `count` bytes; nil if it doesn't fit.
+    static func decode(_ text: Substring, count: Int) -> [UInt8]? {
+        var number = [UInt8](repeating: 0, count: count)
+        for character in text {
+            guard var carry = alphabet.firstIndex(of: character) else { return nil }
+            for i in stride(from: count - 1, through: 0, by: -1) {
+                let value = Int(number[i]) * 31 + carry
+                number[i] = UInt8(value & 0xFF)
+                carry = value >> 8
+            }
+            if carry != 0 { return nil }
+        }
+        return number
+    }
+
+    static func unhex(_ text: String) -> Data? {
+        let text = text.filter { !$0.isWhitespace }
+        guard text.count % 2 == 0 else { return nil }
+        var data = Data()
+        var index = text.startIndex
+        while index < text.endIndex {
+            let next = text.index(index, offsetBy: 2)
+            guard let byte = UInt8(text[index..<next], radix: 16) else { return nil }
+            data.append(byte)
+            index = next
+        }
+        return data
+    }
+}
+
+// What keys are checked with: the public half of the owner's signing key pair, and the older keys' fingerprints.
+struct ProKeyCheck {
+    let publicKey: Curve25519.Signing.PublicKey?
+    let oldKeys: Set<String>
+
+    init(publicKey hex: String, oldKeys: [String]) {
+        publicKey = ProKey.unhex(hex).flatMap { try? Curve25519.Signing.PublicKey(rawRepresentation: $0) }
+        self.oldKeys = Set(oldKeys.map { $0.lowercased() })
+    }
+
+    // Does this key unlock Pro? (A signed key made with the owner's private key, or an older key on the list.)
+    func works(_ text: String) -> Bool {
+        switch ProKey.kind(text) {
+        case .signed:
+            guard let publicKey, let parts = ProKey.signedParts(text) else { return false }
+            return publicKey.isValidSignature(parts.signature, for: ProKey.signedMessage(serial: parts.serial))
+        case .old: return oldKeys.contains(ProKey.oldFingerprint(text))
+        case nil: return false
+        }
     }
 }
 
 final class Pro {
     static let shared = Pro()
 
-    // The secret keys are checked with (built in by build.sh). Empty: nothing is locked. Checks only: --pro-secret.
-    var secret = ProConfig.keySecret
-    var enabled: Bool { pretending != nil || !secret.isEmpty }
+    // The public key keys are checked with, and the older keys that still work (built in by build.sh). No public key:
+    // nothing is locked. Checks only: --pro-public-key.
+    var publicKey = ProConfig.publicKey
+    var oldKeys = ProConfig.oldKeys
+    var enabled: Bool { pretending != nil || !publicKey.isEmpty }
+    private var check: ProKeyCheck { ProKeyCheck(publicKey: publicKey, oldKeys: oldKeys) }
 
-    // Pro is unlocked: everything works. (Always true in a build without the secret.)
-    var unlocked: Bool { pretending ?? (secret.isEmpty || verified) }
+    // Pro is unlocked: everything works. (Always true in a build without the public key.)
+    var unlocked: Bool { pretending ?? (publicKey.isEmpty || verified) }
     private(set) var key: String?  // the saved key
     private var verified = false
     private var pretending: Bool?  // pictures (--preview) show a state and touch no file
@@ -108,8 +183,9 @@ final class Pro {
     static let features = ["the Voice changer", "Natural ↔ Cartoon", "Bass ↔ Treble", "Auto EQ", "Deeper when slow",
                            "the Soundboard"]
 
-    // Pictures only: a key made with a test secret (it unlocks nothing).
-    static let exampleKey = ProKey.make(serial: "TEST2", secret: "pitch-shift-pro-test-secret") ?? ""
+    // Pictures only: a key made with the test key pair in tools/pro-keys-test.txt (it unlocks nothing).
+    static let exampleKey = "P23WN-RJ3JB-23GWE-NTH5S-KX5XB-4TQEQ-6XS6N-AWQEY-3ZSWK-D864K-5FQ8N-4H3PJ-7UJJ2-FNNN5-RB7BG-"
+        + "MTDQ4-59W6A-SJ8M8-XQW3R-ENYZP-Z9ZKK-TU4AA-3GHXX"
 
     private struct Saved: Codable {
         var key: String
@@ -124,9 +200,9 @@ final class Pro {
 
     // At launch: reads the saved key and checks it (no internet).
     func load() {
-        guard pretending == nil, !secret.isEmpty else { return }
+        guard pretending == nil, !publicKey.isEmpty else { return }
         key = read()?.key
-        verified = key.map { ProKey.isGenuine($0, secret: secret) } ?? false
+        verified = key.map(check.works) ?? false
     }
 
     // Locks Pro again and forgets the key (--pro-reset).
@@ -163,20 +239,27 @@ final class Pro {
     }
 
     static func message(for problem: ProKey.Problem) -> String {
-        problem == .characters ? "That key has a typo: keys never use 0, 1, I, L or O." : "That key has a typo. Check it and try again."
+        switch problem {
+        case .characters: return "That key has a typo: keys never use 0, 1, I, L or O."
+        case .length: return "That isn't a whole key. Paste all of it, as it is in the email."
+        case .check: return "That key has a typo. Check it and try again."
+        }
     }
 
     static let wrongKey = "That key doesn't work. Check it and try again."
 
-    // Checks a typed key (typos first, then whether the owner's secret made it), then keeps it.
+    // Does this key unlock Pro in this copy? (--pro-check)
+    func works(_ typed: String) -> Bool { check.works(typed) }
+
+    // Checks a typed key (typos first, then whether it's a key the owner made), then keeps it.
     func activate(_ typed: String) -> Outcome {
-        guard !secret.isEmpty else { return .problem("Unlocking isn't set up in this copy of Pitch Shift.") }
+        guard !publicKey.isEmpty else { return .problem("Unlocking isn't set up in this copy of Pitch Shift.") }
         let key: String
         switch ProKey.read(typed) {
         case .success(let good): key = good
         case .failure(let problem): return .problem(Self.message(for: problem))
         }
-        guard ProKey.isGenuine(key, secret: secret) else { return .problem(Self.wrongKey) }
+        guard check.works(key) else { return .problem(Self.wrongKey) }
         write(Saved(key: key, unlocked: ISO8601DateFormatter().string(from: Date())))
         self.key = key
         let was = unlocked
@@ -187,10 +270,10 @@ final class Pro {
 
     // For --pro-status.
     var status: String {
-        guard !secret.isEmpty else { return "Pro: not set up in this build (nothing is locked)" }
+        guard !publicKey.isEmpty else { return "Pro: not set up in this build (nothing is locked)" }
         guard let key else { return "Pro: locked (no key saved in \(file.path))" }
-        let ending = "…-" + key.suffix(5)
-        return verified ? "Pro: unlocked (key \(ending))" : "Pro: locked (key \(ending) saved, but it doesn't work in this copy)"
+        let ending = (ProKey.kind(key) == .old ? "older key …-" : "key …-") + key.suffix(5)
+        return verified ? "Pro: unlocked (\(ending))" : "Pro: locked (\(ending) saved, but it doesn't work in this copy)"
     }
 }
 
@@ -207,6 +290,7 @@ final class ProSheet: NSObject, NSTextFieldDelegate {
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
     private var width: CGFloat = 380  // the sheet's width: 380, or the window's width in a narrow window
     private lazy var fieldWidth = field.widthAnchor.constraint(equalToConstant: 340)
+    private lazy var fieldHeight = field.heightAnchor.constraint(equalToConstant: 80)
     var isOpen: Bool { panel != nil }
 
     // A new email to the owner, with the subject filled in (opens in the Mail app, or whatever app handles email).
@@ -219,14 +303,19 @@ final class ProSheet: NSObject, NSTextFieldDelegate {
         emailButton.target = self
         emailButton.action = #selector(email)
         emailButton.toolTip = ProConfig.email
-        field.placeholderString = "XXXXX-XXXXX-XXXXX-XXXXX-XXXXX"
+        // A box of 4 lines: a key is 115 characters, shown 6 groups of 5 per line. A key pasted from an email with
+        // line breaks or spaces in it is cleaned up as it comes in (controlTextDidChange).
+        field.placeholderString = "Paste your key here"
         field.font = .monospacedSystemFont(ofSize: 14, weight: .medium)
         field.alignment = .center
         field.delegate = self
         field.setAccessibilityLabel("Your key")
-        field.cell?.usesSingleLineMode = true
-        field.cell?.isScrollable = true
+        field.cell?.usesSingleLineMode = false
+        field.cell?.wraps = true
+        field.cell?.isScrollable = false
+        field.lineBreakMode = .byCharWrapping
         fieldWidth.isActive = true
+        fieldHeight.isActive = true
         message.font = .systemFont(ofSize: 12)
         cancelButton.bezelStyle = .rounded
         cancelButton.keyEquivalent = "\u{1b}"
@@ -245,7 +334,18 @@ final class ProSheet: NSObject, NSTextFieldDelegate {
         guard panel == nil else { return }
         width = min(380, max(300, window.frame.width.rounded(.down)))
         fieldWidth.constant = width - 40
-        field.font = .monospacedSystemFont(ofSize: width < 340 ? 13 : 14, weight: .medium)
+        // The largest letters (up to 14 pt) that fit a line of 6 groups (35 characters) in the box, and 4 lines.
+        let line = String(repeating: "W", count: ProKey.groupsPerLine * 6 - 1)
+        var size: CGFloat = 14
+        while size > 10, (line as NSString).size(withAttributes: [.font: NSFont.monospacedSystemFont(ofSize: size, weight: .medium)]).width > width - 40 - 14 {
+            size -= 0.5
+        }
+        field.font = .monospacedSystemFont(ofSize: size, weight: .medium)
+        // Tall enough for a whole key (4 lines) as the box itself lays it out, with a little room to spare (the
+        // locked view empties the box right after).
+        field.stringValue = ProKey.shown(String(repeating: "W", count: ProKey.signedLength))
+        let needed = field.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: width - 40, height: 10_000)).height ?? 80
+        fieldHeight.constant = (needed + 6).rounded(.up)
         message.preferredMaxLayoutWidth = width - 40
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: width, height: 200), styleMask: [.titled], backing: .buffered, defer: false)
         panel.title = "Pitch Shift Pro"
@@ -337,15 +437,22 @@ final class ProSheet: NSObject, NSTextFieldDelegate {
         message.isHidden = text.isEmpty
     }
 
-    // Typing or pasting: capitals, dashes put in, at most 25 characters; a full key is checked for typos right away.
+    // Typing or pasting: capitals, spaces and line breaks taken out, dashes and lines put in, at most 115 characters;
+    // a whole key is checked for typos right away. At 25 characters it may be an older key (Unlock works if it has no
+    // typo) or the start of a signed key ("P2…": no typo shown yet).
     func controlTextDidChange(_ obj: Notification) {
-        let raw = String(ProKey.raw(field.stringValue).prefix(ProKey.length))
-        let grouped = ProKey.grouped(raw)
-        if field.stringValue != grouped { field.stringValue = grouped }
-        // Unlock works once the whole key is typed and has no typo.
+        let raw = String(ProKey.raw(field.stringValue).prefix(ProKey.signedLength))
+        let shown = ProKey.shown(raw)
+        if field.stringValue != shown { field.stringValue = shown }
         var typo: ProKey.Problem?
-        if raw.count == ProKey.length, case .failure(let problem) = ProKey.read(raw) { typo = problem }
-        unlockButton.isEnabled = raw.count == ProKey.length && typo == nil
+        var whole = false
+        if raw.count == ProKey.signedLength || raw.count == ProKey.length {
+            switch ProKey.read(raw) {
+            case .success: whole = true
+            case .failure(let problem): if raw.count == ProKey.signedLength || !raw.hasPrefix(ProKey.marker) { typo = problem }
+            }
+        }
+        unlockButton.isEnabled = whole
         show(typo.map(Pro.message) ?? "", color: typo == nil ? .secondaryLabelColor : .systemRed)
     }
 
@@ -382,7 +489,23 @@ final class ProSheet: NSObject, NSTextFieldDelegate {
     }
 
     func showUnlockedMessage() {
-        field.stringValue = Pro.exampleKey
+        field.stringValue = ProKey.shown(ProKey.raw(Pro.exampleKey))
         showDone()
+    }
+
+    // Pictures (pro-paste): the example key pasted as an email shows it, broken over lines with spaces at the ends,
+    // through the box's own paste (from a private pasteboard, so the Mac's clipboard is left alone).
+    func showPasted() {
+        guard let panel else { return }
+        let lines = ProKey.shown(ProKey.raw(Pro.exampleKey)).split(separator: "\n")
+        let pasted = "  " + lines.joined(separator: " \r\n") + "\n"
+        let board = NSPasteboard(name: NSPasteboard.Name("PitchShiftPreviewPaste"))
+        board.clearContents()
+        board.setString(pasted, forType: .string)
+        panel.makeFirstResponder(field)
+        if let editor = field.currentEditor() as? NSTextView {
+            editor.readSelection(from: board, type: .string)
+        }
+        board.releaseGlobally()
     }
 }

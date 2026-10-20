@@ -6,13 +6,21 @@ set -e
 cd "${0:A:h}"
 version=$1
 if [[ -z $version ]]; then echo "Use: ./release.sh 1.2.3"; exit 1; fi
-# Pitch Shift Pro: build.sh builds in the key secret from ~/Library/Application Support/Pitch Shift Keys/secret.txt
-# (or PRO_KEY_SECRET), so the paid parts are locked. Without it the release would have nothing locked, so it stops,
-# unless that's what's wanted: PRO_KEY_SECRET= ./release.sh 1.2.3 (everything free).
-if [[ -z ${PRO_KEY_SECRET+x} && ! -s "$HOME/Library/Application Support/Pitch Shift Keys/secret.txt" ]]; then
-  echo "No Pitch Shift Pro key secret on this Mac, so this release would have nothing locked."
-  echo "Make it with tools/pro-keys.sh new \"name\" (or copy the saved Pitch Shift Keys folder back), or release"
-  echo "with everything free: PRO_KEY_SECRET= ./release.sh $version"
+# Pitch Shift Pro: build.sh builds in the public key from ~/Library/Application Support/Pitch Shift Keys/
+# signing-public.txt (or PRO_PUBLIC_KEY), so the paid parts are locked, and the older keys from issued.txt there (or
+# PRO_ISSUED), so the keys sent out before signed keys keep working. Without the public key the release would have
+# nothing locked, and without issued.txt the older keys would stop working, so it stops, unless that's what's wanted:
+# PRO_PUBLIC_KEY= ./release.sh 1.2.3 (everything free), PRO_ISSUED= ./release.sh 1.2.3 (no older keys).
+keys_dir="$HOME/Library/Application Support/Pitch Shift Keys"
+if [[ -z ${PRO_PUBLIC_KEY+x} && ! -s "$keys_dir/signing-public.txt" ]]; then
+  echo "No Pitch Shift Pro public key on this Mac ($keys_dir/signing-public.txt), so this release would have nothing"
+  echo "locked. Make the key pair with tools/pro-keys.sh setup (or copy the saved Pitch Shift Keys folder back), or"
+  echo "release with everything free: PRO_PUBLIC_KEY= ./release.sh $version"
+  exit 1
+fi
+if [[ -n ${PRO_PUBLIC_KEY-x} && -z ${PRO_ISSUED+x} && ! -f "$keys_dir/issued.txt" ]]; then
+  echo "No list of keys sent out ($keys_dir/issued.txt), so the older keys people already have would stop working."
+  echo "Copy the saved Pitch Shift Keys folder back, or release without them: PRO_ISSUED= ./release.sh $version"
   exit 1
 fi
 # The app's version only; the Pitch Shift Mic driver keeps its own version so updates don't restart Mac sound.
