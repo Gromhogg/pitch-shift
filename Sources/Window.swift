@@ -2452,7 +2452,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         refresh()
     }
 
-    @objc func testClicked() { test.click() }
+    @objc func testClicked() {
+        guard preview == nil else { return }  // pictures: see setHear
+        test.click()
+    }
 
     // Opens the Soundboard next to the window, or closes it.
     @objc func soundsClicked() {
@@ -2584,13 +2587,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     // MARK: Switches
 
+    // Pictures (--preview) play nothing and save nothing, even if a switch or Test gets pressed: they show Pitch Shift
+    // Pro unlocked whatever the key, so they must never start any sound.
     func setHear(_ on: Bool) {
+        guard preview == nil else { refresh(); return }
         on ? hear.start() : hear.stop()
         defaults.set(on, forKey: Keys.hearOn)
         refresh()
     }
 
     func setVoice(_ on: Bool) {
+        guard preview == nil else { refresh(); return }  // pictures: see setHear
         guard on else {
             voice.stop()  // with the Soundboard open, its sounds still go out (the voice unchanged)
             if !voice.runsForSounds { DefaultMic.giveBack() }
@@ -2648,8 +2655,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     // For screenshots (--preview hear-on,voice-on,waiting,typing,recording,playing,listening,hover,menu,roll,
     // resize,no-driver,advanced-alert,sounds,rename,volume,drop,light,tone,slow,eq,changer,changer-man,
     // changer-realistic,changer-loading,changer-fallback,changer-slider-natural|fast|default|max|NN,changer-intel,
-    // pro-locked,pro-unlock,pro-typo,pro-done,pro-alone,pro-unlocked [--size 800x400]): shows a state, no sound. Any
-    // changer state also shows Your voice on.
+    // pro-locked,pro-unlock,pro-typo,pro-paste,pro-done,pro-alone,pro-unlocked [--size 800x400]): shows a state, no
+    // sound. Any changer state also shows Your voice on.
     func showPreview() {
         guard let preview else { return }
         // With Pitch Shift Pro locked (pro-locked, pro-unlock), the paid controls keep the free version's values.
@@ -2674,11 +2681,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             hear.setAutoEQ(on: preview.contains("eq") && pro, offsets: pro ? autoEQArg.offsets.map(Float.init) : [], for: outputUID)
         }
         refresh()
-        // The unlock window (with pro-typo: a key with a typo; pro-done: unlocked; pro-alone: as its own window).
+        // The unlock window (with pro-typo: a key with a typo; pro-paste: a key pasted from an email, line breaks and
+        // all; pro-done: unlocked; pro-alone: as its own window).
         if previewStates.contains("pro-unlock") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 ProSheet.shared.show(on: self.window, alone: previewStates.contains("pro-alone"))
                 if previewStates.contains("pro-typo") { ProSheet.shared.showTypo() }
+                if previewStates.contains("pro-paste") { ProSheet.shared.showPasted() }
                 if previewStates.contains("pro-done") { ProSheet.shared.showUnlockedMessage() }
             }
         }

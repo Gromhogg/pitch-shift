@@ -82,22 +82,32 @@
 //   --render-file IN OUT [--steps 5] [--advanced] [--steps-at "4:8,8:-5"] [--tone-amount 0.5] [--tone-at "2:1,4:-1"]
 //                [--tone-db 6,-6] [--auto-eq] [--eq-offsets 0,0,0,0,0]
 //                                              shifts a sound file with the app's own code (normal or advanced)
-//   --render-file ... --as-free, --render-voice ... --as-free
-//                                              as the free version plays it (Pitch Shift Pro locked): Bass ↔ Treble in
-//                                              the middle, Auto EQ off, the voice style at Cartoon, Deeper when slow
-//                                              off, no Voice changer (--voice is ignored)
+//   --as-free (with any mode above)            as the free version plays it: Bass ↔ Treble in the middle, Auto EQ off,
+//                                              the voice style at Cartoon, Deeper when slow and Higher when fast off,
+//                                              no Voice changer; the options for those are ignored (one note says
+//                                              which), and --render-sounds, --test-sounds (the Soundboard) and
+//                                              --add-voice, --rename-voice, --remove-voice stop with a message.
+//                                              A copy with Pitch Shift Pro locked always plays this way, like the
+//                                              window ("Pitch Shift Pro is locked: ... ignored (free version)").
 // Pitch Shift Pro (Sources/Pro.swift, notes/paid-unlock-plan.md):
 //   --pro-status                               locked or unlocked, and why
 //   --pro-key KEY                              unlocks with a key, like the unlock window (checks it on this Mac, no
 //                                              internet, and keeps it)
 //   --pro-reset                                locks Pro again (forgets the key)
-//                [--pro-file F] [--pro-secret S]   checks only: keep the key in F; check keys with S, not this build's
-//                                              secret
-//   --pro-check F [--pro-secret S]             checks only: each key in F (one per line): unlocks, typo or wrong
-//   --pro-test tools/pro-keys-test.txt         checks only: the app makes the same fixed test keys as tools/pro-keys.sh
+//                [--pro-file F] [--pro-public-key HEX] [--pro-old-keys ISSUED]
+//                                              checks only: keep the key in F (any mode); check keys with another
+//                                              public key (64 hex characters) and/or the older keys listed in ISSUED
+//                                              (lines like issued.txt's), not this build's (only with --pro-key /
+//                                              --pro-status and --pro-file, or --pro-check: they never unlock the
+//                                              sound or the window)
+//   --pro-check F [--pro-public-key HEX] [--pro-old-keys ISSUED]
+//                                              checks only: each key in F (one per line): unlocks, typo or wrong
+//   --pro-test tools/pro-keys-test.txt         checks only: the app accepts the same fixed test keys as
+//                                              tools/pro-keys.sh, and only those
 import AppKit
 import AVFoundation
 import CoreAudio
+import CryptoKit
 
 let args = CommandLine.arguments
 func arg(_ name: String) -> String? {
@@ -119,23 +129,60 @@ func arg(_ name: String) -> String? {
 // "Faster ↔ More real" slider at Natural, the first AI step, the default, the far right or NN percent, changer-intel
 // the card as on an Intel Mac (the slider stays at Natural); resize drags the window's corner through the three
 // layouts; pro-locked shows Pitch Shift Pro locked, pro-unlocked unlocked (the default for pictures), pro-unlock the
-// unlock window, with pro-typo a key with a typo in it, with pro-done the "Unlocked" message, with pro-alone as its
-// own window instead of a sheet).
+// unlock window, with pro-typo a key with a typo in it, with pro-paste a key pasted from an email (line breaks and
+// spaces in it), with pro-done the "Unlocked" message, with pro-alone as its own window instead of a sheet).
 let preview = arg("--preview")
 let previewStates = Set((preview ?? "").split(separator: ",").map(String.init))
 
-// Pitch Shift Pro. Checks only: --pro-file F keeps the key in F; --pro-secret S checks keys with S instead of this
-// build's secret (only with --pro-file or --pro-check, so the real Pro.json is never touched).
+// Pitch Shift Pro. Checks only: --pro-file F keeps the key in F (see --pro-public-key below).
 if let path = arg("--pro-file") { Pro.shared.file = URL(fileURLWithPath: path) }
-if let secret = arg("--pro-secret") {
-    guard arg("--pro-file") != nil || arg("--pro-check") != nil else { print("--pro-secret: only with --pro-file F or --pro-check F"); exit(1) }
-    Pro.shared.secret = secret
-}
-// There is no unlock server any more (keys are checked on the Mac); an old test script stops here instead of opening
-// the window.
+// There is no unlock server and no key secret any more (keys are signed, and checked on the Mac); an old test script
+// stops here instead of opening the window.
 if args.contains("--pro-server") { print("--pro-server: there is no server any more (keys are checked on this Mac)"); exit(1) }
-// --as-free: --render-file and --render-voice play as the free version does.
-let asFree = args.contains("--as-free")
+if args.contains("--pro-secret") { print("--pro-secret: there is no key secret any more (keys are signed); see --pro-public-key"); exit(1) }
+// While Pitch Shift Pro is locked (a build with the public key and no key that works), every mode below plays as the
+// free version does, like the window (see Free): the options for paid features are ignored with one note, and the
+// Soundboard modes and adding voices stop here, before any device is touched. --as-free does the same in any copy
+// (for comparing). Pictures (--preview) show the state they're asked for instead and play nothing.
+if preview == nil { Pro.shared.load() }
+let proLocked = preview == nil && !Pro.shared.unlocked
+let asFree = preview == nil && (proLocked || args.contains("--as-free"))
+if asFree {
+    let why = proLocked ? "Pitch Shift Pro is locked" : "--as-free"
+    if let mode = ["--render-sounds", "--test-sounds"].first(where: args.contains) {
+        print("\(why): the Soundboard is part of Pitch Shift Pro, so \(mode) doesn't run (free version)."); exit(1)
+    }
+    if let mode = ["--add-voice", "--rename-voice", "--remove-voice"].first(where: args.contains) {
+        print("\(why): your own voices are part of Pitch Shift Pro, so \(mode) doesn't run (free version)."); exit(1)
+    }
+    // The Voice changer, Natural ↔ Cartoon, Deeper when slow and Higher when fast, Bass ↔ Treble, Auto EQ.
+    let paid = ["--voice", "--strength", "--realism", "--quality", "--changer-tune", "--changer-stats",
+                "--cartoon", "--cartoon-amount", "--cartoon-at", "--slow-deeper", "--fast-higher",
+                "--tone-db", "--tone-amount", "--tone-at", "--as-device", "--auto-eq", "--eq-offsets"].filter(args.contains)
+    if !paid.isEmpty { print("\(why): \(paid.joined(separator: ", ")) ignored (free version).") }
+}
+// Checks of the key code only: --pro-public-key HEX checks keys with that public key instead of this build's, and
+// --pro-old-keys ISSUED accepts the older keys listed in ISSUED (lines like issued.txt's) instead of this build's
+// list; with --pro-check F, or with --pro-key / --pro-status and --pro-file F (so the real Pro.json is never
+// touched). They're read after the lock above was worked out and never reach the sound or the window: a key pair
+// anyone can make must not unlock anything.
+if arg("--pro-public-key") != nil || arg("--pro-old-keys") != nil {
+    guard ["--pro-check", "--pro-key", "--pro-status"].contains(where: args.contains),
+          arg("--pro-file") != nil || arg("--pro-check") != nil else {
+        print("--pro-public-key, --pro-old-keys: only with --pro-check F, or with --pro-key or --pro-status and --pro-file F")
+        exit(1)
+    }
+    if let hex = arg("--pro-public-key") {
+        guard ProKeyCheck(publicKey: hex, oldKeys: []).publicKey != nil else { print("--pro-public-key: 64 hex characters"); exit(1) }
+        Pro.shared.publicKey = hex
+    }
+    if let path = arg("--pro-old-keys") {
+        guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { print("--pro-old-keys: can't read \(path)"); exit(1) }
+        // The last word of each line is a key (as in issued.txt: date, name, key); the 25-character ones count.
+        Pro.shared.oldKeys = text.split(whereSeparator: \.isNewline).compactMap { $0.split(separator: " ").last.map(String.init) }
+            .filter { ProKey.raw($0).count == ProKey.length }.map(ProKey.oldFingerprint)
+    }
+}
 
 var signalSources: [DispatchSourceSignal] = []
 func onQuitSignals(_ handler: @escaping () -> Void) {
@@ -149,15 +196,16 @@ func onQuitSignals(_ handler: @escaping () -> Void) {
 }
 
 // --tone-db "B,T": Advanced processing's bass and treble in dB (not --tone, which is a frequency in --test-voice).
+// The free version (asFree): none of the Bass ↔ Treble or Auto EQ options below.
 let toneDbArg: (bass: Double, treble: Double)? = {
     let parts = (arg("--tone-db") ?? "").split(separator: ",").compactMap { Double($0) }
-    return parts.count == 2 ? (parts[0], parts[1]) : nil
+    return parts.count == 2 && !asFree ? (parts[0], parts[1]) : nil
 }()
 // --tone-amount T: the Bass ↔ Treble slider, −1 (more bass) … 0 (middle) … 1 (more treble). In --preview it sets
 // where the slider is. --tone-at "2:1,4:-1": moves it to 1 at 2 s, then to −1 at 4 s.
 func parseTilt(_ text: Substring) -> Float? { Float(text).flatMap { $0.isFinite ? max(-1, min(1, $0)) : nil } }
-let toneArg: Float? = arg("--tone-amount").flatMap { parseTilt(Substring($0)) }
-let toneChanges: [(Double, Float)] = (arg("--tone-at") ?? "").split(separator: ",").compactMap { item in
+let toneArg: Float? = asFree ? nil : arg("--tone-amount").flatMap { parseTilt(Substring($0)) }
+let toneChanges: [(Double, Float)] = asFree ? [] : (arg("--tone-at") ?? "").split(separator: ",").compactMap { item in
     let parts = item.split(separator: ":")
     guard parts.count == 2, let t = Double(parts[0]), let value = parseTilt(parts[1]) else { return nil }
     return (t, value)
@@ -166,6 +214,7 @@ let toneChanges: [(Double, Float)] = (arg("--tone-at") ?? "").split(separator: "
 // --auto-eq: Advanced processing's Auto EQ on. --eq-offsets "a,b,c,d,e": its manual offsets in dB (Sub, Bass, Mids,
 // Highs, Air; −12 … 12; missing ones are 0).
 let autoEQArg: (on: Bool, offsets: [Double]) = {
+    guard !asFree else { return (false, AdvancedProcessor.noOffsets) }
     let given = (arg("--eq-offsets") ?? "").split(separator: ",").compactMap { Double($0) }.filter(\.isFinite).map { max(-12, min(12, $0)) }
     return (args.contains("--auto-eq"), Array((given + AdvancedProcessor.noOffsets).prefix(5)))
 }()
@@ -175,8 +224,9 @@ func fourCC(_ value: UInt32) -> String {
 }
 
 // Voice style from the command line: --cartoon = 1 (Cartoon), --cartoon-amount X (0 = Natural ... 1 = Cartoon).
-// In --preview it sets where the slider is.
-let cartoonArg: Float? = args.contains("--cartoon") ? 1 : arg("--cartoon-amount").flatMap(Float.init).map { max(0, min(1, $0)) }
+// In --preview it sets where the slider is. The free version: always Cartoon.
+let cartoonArg: Float? = asFree ? Free.cartoon
+    : args.contains("--cartoon") ? 1 : arg("--cartoon-amount").flatMap(Float.init).map { max(0, min(1, $0)) }
 // "Deeper when slow" asked for (--test-voice, --render-voice; left out with --voice, see slowDeeperArg).
 let slowDeeperAsked = args.contains("--slow-deeper")
 
@@ -192,9 +242,8 @@ let changerTuneArg: [(String, Float)] = (arg("--changer-tune") ?? "").split(sepa
     }
     return (parts[0].trimmingCharacters(in: .whitespaces), value)
 }
-// The voice asked for with --voice (nil without --voice; stops with a message if it can't be used). --as-free: none,
-// as in the free version (the Voice changer is part of Pitch Shift Pro).
-if asFree && arg("--voice") != nil { print("Note: --as-free: no Voice changer in the free version, so --voice is ignored.") }
+// The voice asked for with --voice (nil without --voice; stops with a message if it can't be used). The free version
+// (asFree): none (the Voice changer is part of Pitch Shift Pro).
 let changerArg: ChangerOptions? = {
     guard let name = arg("--voice"), !asFree else { return nil }
     guard let entry = VoiceLibrary.shared.voice(name) else {
@@ -220,9 +269,10 @@ let changerArg: ChangerOptions? = {
 if changerArg != nil && (arg("--steps") != nil || slowDeeperAsked) {
     print("Note: with --voice the voice changer sets the pitch, so --steps and --slow-deeper are ignored (only one at a time).")
 }
-let slowDeeperArg = slowDeeperAsked && changerArg == nil
+let slowDeeperArg = asFree ? Free.slowDeeper : slowDeeperAsked && changerArg == nil
 // "Higher when fast" with --slow-deeper: --fast-higher N half-steps (0 ... 8; left out = 0, off, as before).
-let fastHigherArg: Float = slowDeeperArg ? VoiceShifter.cleanFastHigher(arg("--fast-higher").flatMap(Float.init) ?? 0) : 0
+let fastHigherArg: Float = asFree ? Free.fastHigher
+    : slowDeeperArg ? VoiceShifter.cleanFastHigher(arg("--fast-higher").flatMap(Float.init) ?? 0) : 0
 // The amount for the voice: --steps (or `fallback`), except with --voice, where it is not used (the changer sets the
 // pitch; the fallback keeps the renders as they were).
 func voiceStepsArg(_ fallback: Float) -> Float { changerArg != nil ? fallback : arg("--steps").flatMap(Float.init) ?? fallback }
@@ -449,15 +499,15 @@ if let typed = arg("--pro-key") {
     }
 }
 
-// Checks only: one key per line in F; prints each with "unlocks", "typo" or "wrong" (with this build's secret, or
-// --pro-secret S). Nothing is saved.
+// Checks only: one key per line in F; prints each with "unlocks", "typo" or "wrong" (with this build's public key and
+// list of older keys, or --pro-public-key / --pro-old-keys). Nothing is saved.
 if let path = arg("--pro-check") {
     guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { print("--pro-check: can't read \(path)"); exit(1) }
     var counts: [String: Int] = [:]
     for line in text.split(whereSeparator: \.isNewline) where !line.trimmingCharacters(in: .whitespaces).isEmpty {
         let typed = String(line)
         let verdict: String
-        if case .failure = ProKey.read(typed) { verdict = "typo" } else { verdict = ProKey.isGenuine(typed, secret: Pro.shared.secret) ? "unlocks" : "wrong" }
+        if case .failure = ProKey.read(typed) { verdict = "typo" } else { verdict = Pro.shared.works(typed) ? "unlocks" : "wrong" }
         counts[verdict, default: 0] += 1
         print("\(typed)\t\(verdict)")
     }
@@ -465,20 +515,39 @@ if let path = arg("--pro-check") {
     exit(0)
 }
 
-// Checks only: the fixed test keys in tools/pro-keys-test.txt ("secret S" line, then "SERIAL KEY" lines), the same
-// ones tools/pro-keys.sh checks, so the app and the key tool make the same keys.
+// Checks only: the fixed test keys in tools/pro-keys-test.txt, the same ones tools/pro-keys.sh checks. Signed keys
+// ("public HEX", then "signed SERIAL KEY" lines) work with the test public key and not with another; older keys
+// ("old SERIAL KEY") work only when they're on the list of older keys. A change of any one character in any of them
+// never works.
 if let path = arg("--pro-test") {
     guard let text = try? String(contentsOfFile: path, encoding: .utf8) else { print("--pro-test: can't read \(path)"); exit(1) }
-    var secret = "", good = 0, bad = 0
+    var publicKey = "", good = 0, bad = 0
+    let other = Curve25519.Signing.PrivateKey().publicKey.rawRepresentation.map { String(format: "%02x", $0) }.joined()
+    func result(_ ok: Bool, _ what: @autoclosure () -> String) { if ok { good += 1 } else { bad += 1; print("different: \(what())") } }
+    func changes(_ key: String) -> [String] {  // every one-character change of a key
+        let raw = Array(ProKey.raw(key))
+        return raw.indices.flatMap { i in ProKey.alphabet.filter { $0 != raw[i] }.map { c in var k = raw; k[i] = c; return String(k) } }
+    }
     for line in text.split(whereSeparator: \.isNewline) where !line.hasPrefix("#") {
         let parts = line.split(separator: " ", omittingEmptySubsequences: true).map(String.init)
-        if parts.count == 2 && parts[0] == "secret" { secret = parts[1]; continue }
-        guard parts.count == 2, !secret.isEmpty else { continue }
-        let made = ProKey.make(serial: parts[0], secret: secret)
-        let ok = made == parts[1] && ProKey.isGenuine(parts[1], secret: secret) && !ProKey.isGenuine(parts[1], secret: secret + "x")
-        if ok { good += 1 } else { bad += 1; print("different: \(parts[0]) made \(made ?? "nothing"), the file says \(parts[1])") }
+        if parts.count == 2 && parts[0] == "public" { publicKey = parts[1]; continue }
+        guard parts.count == 3 else { continue }
+        let key = parts[2], serial = parts[1]
+        switch parts[0] {
+        case "signed":
+            let check = ProKeyCheck(publicKey: publicKey, oldKeys: [])
+            result(check.publicKey != nil && ProKey.signedParts(key)?.serial == serial && check.works(key)
+                   && !ProKeyCheck(publicKey: other, oldKeys: []).works(key), "signed key \(serial) doesn't work with the test public key (only)")
+            result(!changes(key).contains(where: check.works), "a one-character change of signed key \(serial) works")
+        case "old":
+            let listed = ProKeyCheck(publicKey: publicKey, oldKeys: [ProKey.oldFingerprint(key)])
+            result(ProKey.kind(key) == .old && ProKey.raw(key).hasPrefix(serial) && listed.works(key)
+                   && !ProKeyCheck(publicKey: publicKey, oldKeys: []).works(key), "older key \(serial) isn't accepted only when listed")
+            result(!changes(key).contains(where: listed.works), "a one-character change of older key \(serial) works")
+        default: continue
+        }
     }
-    print("pro-test: \(good) of \(good + bad) keys match")
+    print("pro-test: \(good) of \(good + bad) checks pass")
     exit(bad == 0 && good > 0 ? 0 : 1)
 }
 
@@ -623,14 +692,15 @@ if let input = arg("--render-sounds") {
 if args.contains("--test") {
     let source: HearSource = args.contains("--all") ? .all : HearSource(saved: arg("--app") ?? "com.apple.Music")
     // Uses the saved Bass ↔ Treble and Auto EQ for the output, like the app (only read; --tone-amount changes the tone
-    // for this test, --auto-eq / --eq-offsets replace the Auto EQ).
+    // for this test, --auto-eq / --eq-offsets replace the Auto EQ). The free version: none of them, like the window.
     let shifter = HearShifter(halfSteps: arg("--steps").flatMap(Float.init) ?? 2, source: source, advanced: args.contains("--advanced"),
-                              tones: AppDelegate.savedTones(UserDefaults.standard), autoEQs: AppDelegate.savedAutoEQs(UserDefaults.standard))
+                              tones: asFree ? [:] : AppDelegate.savedTones(UserDefaults.standard),
+                              autoEQs: asFree ? [:] : AppDelegate.savedAutoEQs(UserDefaults.standard))
     shifter.testPID = arg("--pid").flatMap { pid_t($0) }
-    shifter.testOutputKey = arg("--as-device")
+    shifter.testOutputKey = asFree ? nil : arg("--as-device")
     shifter.fixedToneDb = toneDbArg
     if let toneArg { shifter.setTone(toneArg, for: shifter.outputKey) }
-    if args.contains("--auto-eq") || arg("--eq-offsets") != nil { shifter.fixedAutoEQ = autoEQArg }
+    if !asFree && (args.contains("--auto-eq") || arg("--eq-offsets") != nil) { shifter.fixedAutoEQ = autoEQArg }
     let usedEQ = shifter.fixedAutoEQ ?? shifter.autoEQ(for: shifter.outputKey).engine
     let showAutoEQ = usedEQ.on || usedEQ.offsets.contains { $0 != 0 }
     for (t, value) in toneChanges {
@@ -884,7 +954,7 @@ if args.contains("--test-voice") {
 // tone.
 if args.contains("--test-button") {
     let micUID = arg("--mic").flatMap { name in Mics.list().first { $0.name == name }?.uid }  // e.g. not a Bluetooth headset's
-    let voice = VoiceShifter(halfSteps: voiceStepsArg(3), cartoon: 0, micUID: micUID)
+    let voice = VoiceShifter(halfSteps: voiceStepsArg(3), cartoon: asFree ? Free.cartoon : 0, micUID: micUID)
     let rate = voice.currentMic.map(nominalRate) ?? 48000
     let volume = arg("--volume").flatMap(Double.init) ?? 0.03
     var speech = arg("--file").map { testVoiceFile($0, rate: rate) } ?? []
@@ -1036,12 +1106,10 @@ if let path = arg("--test-sounds") {
 }
 
 // Pitch Shift Pro: pictures show the state asked for (unlocked unless pro-locked or the unlock window is asked for)
-// and touch no file; the app reads and checks its saved key.
+// and touch no file; the app has read and checked its saved key at the top.
 if preview != nil {
     let locked = previewStates.contains("pro-locked") || (previewStates.contains("pro-unlock") && !previewStates.contains("pro-unlocked"))
     Pro.shared.pretend(unlocked: !locked)
-} else {
-    Pro.shared.load()
 }
 
 let app = NSApplication.shared

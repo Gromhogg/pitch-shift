@@ -1,13 +1,28 @@
-# Pitch Shift Pro: fixed test keys, made with the test secret below (they unlock nothing in a real build).
-# The key tool and the app must both make exactly these:
+# Pitch Shift Pro: fixed test keys (they unlock nothing in a real build). The key tool and the app must both accept
+# exactly these:
 #   tools/pro-keys.sh test
 #   "build/Pitch Shift.app/Contents/MacOS/PitchShift" --pro-test tools/pro-keys-test.txt
-# Each line: serial, then the key.
+#
+# Older keys (25 characters, sent out before signed keys), made with the test secret below. Each line: old, the
+# serial, the key. The tool makes them again from the secret; the app (which no longer has any secret) checks that
+# they're accepted only when they're on its list of older keys.
 secret pitch-shift-pro-test-secret
-TEST2 TEST2-3X6Y8-PV3CN-222EU-P8M7Z
-22222 22222-CDKVD-J5M8P-BH3J7-9P769
-ZZZZZ ZZZZZ-3H5FY-WZ7QW-EJZPM-DRW5K
-ABCDE ABCDE-BNT5N-KZCQ9-RDTGR-FQWTE
-23456 23456-ZE9YJ-QM6Q4-BNP9D-P2958
-K7M9Q K7M9Q-ZXN5F-NENVT-XTEZV-HNSFV
-XY3W8 XY3W8-2CJUB-WMDSQ-4DAVJ-8X5FX
+old TEST2 TEST2-3X6Y8-PV3CN-222EU-P8M7Z
+old 22222 22222-CDKVD-J5M8P-BH3J7-9P769
+old ZZZZZ ZZZZZ-3H5FY-WZ7QW-EJZPM-DRW5K
+old ABCDE ABCDE-BNT5N-KZCQ9-RDTGR-FQWTE
+old 23456 23456-ZE9YJ-QM6Q4-BNP9D-P2958
+old K7M9Q K7M9Q-ZXN5F-NENVT-XTEZV-HNSFV
+old XY3W8 XY3W8-2CJUB-WMDSQ-4DAVJ-8X5FX
+#
+# Signed keys (115 characters), made with the test key pair below (its private half is here on purpose: it's only for
+# tests). Each line: signed, the serial, the key. Signatures change each time a key is made, so these were made once
+# with tools/pro-keys.sh new and kept.
+public 3dd56e3dc8c3393e2ac5c3442176768b459ceff357a5d69476afc75f12ff6813
+private f3e6a21b5e1c80268ced3a395dea362d38599852c235e07518077fd31fc58ad5
+signed E5GQC P2E5G-QC2VD-325F5-B5QK6-F4W46-3B6PW-ZKBW6-952GN-STXZ6-EY4XG-XS4FP-5G4PS-RZDB2-HVZ2M-S3XQ9-DKG8Z-XW7UP-DFRGU-YPNVG-24YA3-R9WJK-NQX4B-6Z9EE
+signed ERGSE P2ERG-SE2QD-KWHT2-9FWYK-8S8WE-EEF86-G4BZD-GR2UY-A9U5X-KR468-8XXWV-KREUS-YSBA8-BC3H3-GQCA7-K68JY-GHN78-KYBUU-UTEXH-8NQ2U-93MJ4-7E3AG-DVEPH
+signed PQMH9 P2PQM-H93UY-NKQ6Y-AZ4XX-8683G-PJ4VM-RST7P-GCVC7-4RYDP-5YJHM-8ERPA-R3WM2-E2PXK-FXG8D-XGYFS-ZZ5ET-C9J8J-Y83HG-8R6HS-4233T-ZZU4N-35DFP-EMURU
+signed 68UEB P268U-EB39F-XWVAX-S9F82-N4U26-PG85Z-QPTNY-VB2MA-8Z4UU-MSJ3Y-FDVWZ-9G8M3-5686F-B584W-JUFXD-MSR2B-HDTE2-F6KFZ-BKXPE-CXWX8-M5FCB-Y4C2G-PQRH8
+signed AFBEB P2AFB-EB4FE-XX8TX-SFA2M-Z7UEG-VKKDM-GCXBR-VHEN5-FPGUG-N82BT-73CUN-ATJNB-NZ6D8-KPVEU-EKVHQ-KS2WU-NGY6K-EQ56J-KE4U2-RBD5U-XJACV-87EHF-9DTPV
+signed 3WNRJ P23WN-RJ3JB-23GWE-NTH5S-KX5XB-4TQEQ-6XS6N-AWQEY-3ZSWK-D864K-5FQ8N-4H3PJ-7UJJ2-FNNN5-RB7BG-MTDQ4-59W6A-SJ8M8-XQW3R-ENYZP-Z9ZKK-TU4AA-3GHXX
