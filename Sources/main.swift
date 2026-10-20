@@ -35,7 +35,8 @@
 //                [--voice Woman [--strength 1] [--realism R] [--changer-tune "k=v,..."] [--changer-stats]]
 //                                              with the voice changer (the amount, style and --slow-deeper are then
 //                                              ignored: only one at a time;
-//                                              --changer-stats prints what it does once per second of sound)
+//                                              --changer-stats prints what it does once per second of sound;
+//                                              --changer-tune ai32=0: the AI voice exactly as in 3.1.1, see VoiceModel.h)
 //                [--live-sim [--buffer 128]]   instead: the live chain's steps in callback-sized pieces (with the
 //                                              waiting sound), printing the delay they add (no devices)
 //   --list-voices [--voices-dir DIR]           the voice changer's voices (and files that were skipped)
@@ -202,7 +203,11 @@ let changerArg: ChangerOptions? = {
     guard let natural = entry.natural else { print("--voice: \(entry.name) has no Natural mode settings"); exit(1) }
     if !changerTuneArg.isEmpty, let probe = voicechanger_new(48000, 512) {  // check the keys before starting
         let aiKeys = ["aiSlowMs", "aiSlowEvery", "aiGainMaxDb", "aiSmoothFrames", "aiGapFrames", "aiQuietDb",
-                      "aiLookaheadMs", "aiSlowFrames", "aiIntonation", "aiSolaMode", "aiGainMs", "aiOnsetFrames"]  // Realistic mode's test keys (voicestream_tune)
+                      "aiLookaheadMs", "aiSlowFrames", "aiIntonation", "aiSolaMode", "aiGainMs", "aiOnsetFrames",
+                      // 3.2 (VoiceModel.h): "ai32=0" = 3.1.1's AI voice
+                      "aiSplit", "aiAheadMax", "aiAutoChip", "aiStartChip", "aiGraceMs", "aiRealtime", "aiLeftMs",
+                      "aiFadeAdapt", "aiJoinGains", "aiGainTwoSided", "aiNearMs", "aiBridgeStrict", "aiShortRunMs",
+                      "aiHissCross", "aiGainCap", "aiPauseDb", "aiLimit", "aiSlowChip"]  // Realistic mode's test keys (voicestream_tune)
         let unknown = changerTuneArg.filter { voicechanger_tune(probe, $0.0, $0.1) == 0 && !aiKeys.contains($0.0) && !isVoiceShifterTuneKey($0.0) }.map(\.0)
         voicechanger_delete(probe)
         if !unknown.isEmpty { print("--changer-tune: unknown keys \(unknown.joined(separator: ", "))"); exit(1) }

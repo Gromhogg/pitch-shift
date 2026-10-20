@@ -53,6 +53,15 @@ typedef struct VoiceStreamStats {
     int lookaheadMs;         // the look-ahead the pieces are made with now
     int64_t switches;        // look-ahead switches made (at quiet moments or after waiting 1.2 s)
     int aiNow;               // 1 = the AI voice is what plays now; 0 = Natural fills in (starting, loading, late)
+    // (3.2)
+    int reserveMs;           // time kept in hand for a slow piece now (70, more at the top slider positions)
+    int onCPU;               // 1 = the voice generator runs on its CPU copy now (switched to when pieces ran late)
+    int64_t chipSwitches;    // switches between the GPU and the CPU copy
+    int64_t lateHops;        // pieces that were not ready when the sound thread got to them (by the worker's clock)
+    int64_t tightHops;       // pieces that were ready less than 15 ms before they were needed
+    int64_t graceSaves;      // late pieces covered by playing on into the last piece's tail (no Natural heard)
+    int64_t loudSamples;     // output samples above 0.7 (where the app's soft limiter starts to bend the sound)
+    int64_t samplesOut;      // output samples
 } VoiceStreamStats;
 
 // Loads the encoder and the voice (.mlmodelc folders). computeUnits: VOICEMODEL_COMPUTE_*. Slow the first time
@@ -69,6 +78,8 @@ int voicemodel_max_lookahead_ms(const VoiceModel *model);
 
 // The fixed delay a stream would have (ms), the same sum voicestream_new makes: model NULL = the default 160 ms
 // pieces on the GPU (a CPU-only model gets the bigger reserve). For the window's "Delay: about ..." line.
+// (3.2: at the top slider positions part of the look-ahead asked for is kept in hand as extra reserve instead,
+// voicestream_tune "aiSplit"; the total delay is the same.)
 double voicestream_delay_ms(const VoiceModel *model, double chainRate, int maxFrames, int lookaheadMs);
 
 // chainRate: the voice chain's sample rate. maxFrames: the largest `frames` given to push/pull (one callback; it is
@@ -97,13 +108,31 @@ void voicestream_set_lookahead(VoiceStream *stream, int lookaheadMs);
 void voicestream_set_intonation(VoiceStream *stream, float intonation);
 
 // Test settings (--changer-tune): "aiSlowMs" = extra time added to each piece (forces late pieces),
-// "aiSlowEvery" = only every Nth piece, "aiGainMaxDb" = the most the loudness match may lift (default 18),
-// "aiGainMs" = its window (50); the pitch the AI voice follows (with look-ahead): "aiSmoothFrames" (light smoothing,
+// "aiSlowEvery" = only every Nth piece ("aiSlowChip" 1: only while the voice generator is not on its CPU copy, as
+// with a busy GPU), "aiGainMaxDb" = the most the loudness match may lift (default 18),
+// "aiGainMs" = its window (120 in 3.2, 50 in 3.1); the pitch the AI voice follows (with look-ahead): "aiSmoothFrames" (light smoothing,
 // frames on each side, 1), "aiSlowFrames" (the melody line, 7), "aiIntonation" (as voicestream_set_intonation),
 // "aiGapFrames" (unvoiced gaps up to this long inside a loud sound are bridged, 8), "aiOnsetFrames" (a vowel's
 // unvoiced lead-in frames that take its first pitch, 3); "aiSolaMode" (-1 by look-ahead,
 // 0 search, 1 keep the timing, 2 search near), "aiQuietDb" (a pause for look-ahead switches, -45),
-// "aiLookaheadMs" (as voicestream_set_lookahead). Returns 1 if the key is known.
+// "aiLookaheadMs" (as voicestream_set_lookahead).
+// 3.2 keys (the value after "=" is the default; the one in brackets gives 3.1.1's sound exactly):
+//   "ai32" 1 [0]: 0 turns every 3.2 change below off at once (later keys still apply);
+//   stutters: "aiSplit" 1 [0]: above 150 ms, part of the look-ahead asked for becomes extra reserve so that at most
+//   "aiAheadMax" 400 ms is real look-ahead (the total delay stays the same); "aiAutoChip" 1 [0]: the voice generator
+//   switches to a warm CPU copy when pieces run late on the GPU (2 late or 4 tight in the last 10) and back only
+//   after 30 s if the CPU runs late too (a failed try doubles the wait, up to 4 min); "aiStartChip" 0: 1 = start on the CPU copy; "aiGraceMs" 20 [0]: a late piece
+//   plays on into the last piece's tail this long before Natural fills in; "aiRealtime" 0: real-time thread policy;
+//   joins: "aiLeftMs" 50 [-1 = the model's 60]: the decoder's left margin (the right one gets the rest); "aiFadeAdapt" 1 [0]: the crossfade
+//   keeps the loudness when the two pieces differ (equal power) and when alike (equal gain); "aiJoinGains" 1 [0]: each
+//   piece keeps its own loudness across the crossfade; "aiGainTwoSided" 1 [0]: loudness windows reach before a
+//   piece's start; "aiSolaMode" 3 = search "aiNearMs" (1.5) around a fixed point;
+//   buzz: "aiBridgeStrict" 1 [0]: gaps are bridged only over smooth sound well above the room's noise;
+//   "aiGapFrames" 5 [8]; "aiShortRunMs" 40 [0]: voiced bits shorter than this in a pause get no tone;
+//   "aiHissCross" 0.3 [0]: hissy frames (zero crossings per sample above this) get no tone; "aiGainCap" 1 [0]: the
+//   loudness match lifts the AI voice only as far as the mic is above the room's noise (in pauses at most "aiPauseDb" -10 dB);
+//   "aiLimit" 0.6 [0]: a peak limiter on each finished piece (5 ms look-ahead, 80 ms release).
+// Returns 1 if the key is known.
 int voicestream_tune(VoiceStream *stream, const char *key, float value);
 
 // The fixed delay from mic to output, in chain samples (with the look-ahead in use, or the one asked for).
