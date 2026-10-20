@@ -43,6 +43,14 @@ are kept for later and are not what the app does today. Section 10 is done (bran
   as the public code in section 8). A key works on any number of Macs. If keys get passed around, the fix is a new
   secret in a later version (old keys then stop working, so the owner would re-send keys to people in `issued.txt`),
   or the Stripe server below.
+- **The Terminal options follow the lock (2026-10-19):** before, the hidden Terminal options (`--render-voice …
+  --voice Woman`, `--test-voice`, `--render-sounds` and so on) ignored the lock, so a locked copy could still make
+  the paid sounds from Terminal. Now a locked copy plays every Terminal mode as the free version does, like the
+  window: the paid options are ignored with one note ("Pitch Shift Pro is locked: --voice ignored (free version)"),
+  and the Soundboard modes and adding, renaming or removing voices stop with a message. `--as-free` does the same in
+  any copy. Two more ways around the lock were closed: `--pro-secret` (a test option) could unlock the window and the
+  sound with a home-made key, so it now only works for checking keys; and the hidden picture mode (`--preview`, which
+  shows Pro unlocked) no longer starts any sound if one of its switches is pressed.
 - **Later, with Stripe:** sections 5, 6 and 9 still apply, but the server would have to make keys the new way (or
   the app learn both kinds) and the app would need its `/activate` call back. `server/README.md` says the folder is
   not used yet.
@@ -159,8 +167,8 @@ Cloudflare KV (a simple key-value store).
 - Window: locked look and clicks for the Bass ↔ Treble and Natural ↔ Cartoon sliders, Deeper when slow and Sounds;
   the Unlock Pro button in the title bar (gone once unlocked); the menu item.
 - Command line: `--pro-key KEY` (unlock from Terminal, for testing), `--pro-reset` (lock again), `--pro-status`;
-  `--pro-file F` and `--pro-server URL` for tests; `--as-free` makes `--render-file` and `--render-voice` use the
-  free version's values.
+  `--pro-file F` and `--pro-server URL` for tests; `--as-free` makes every Terminal mode use the free version's values
+  (and a locked copy always does, see "The Terminal options follow the lock" above).
 - Hidden previews: `pro-locked`, `pro-unlock` (the unlock window; with `pro-typo` or `pro-done` for its messages),
   `pro-unlocked`. Previews without these show Pro unlocked (like before).
 - The sound engine is not changed.
@@ -168,7 +176,7 @@ Cloudflare KV (a simple key-value store).
 ## 8. Honest limits
 
 The code is GPL and public, so the key only gates the ready-made app: anyone who can build the app from the code can
-remove the lock, and the command-line test modes can still use the paid features. The GPL also means buyers (and
+remove the lock (the Terminal test modes follow the lock since 2026-10-19). The GPL also means buyers (and
 anyone they share the app with) may ask for the source code, and must be given it. This is the usual "pay for the
 convenient, ready-made build" model, and it's fine for a $5 app. A closed-source paid app would be different: Rubber
 Band is GPL and would need Breakfast Quay's commercial licence (£590 one-time with a credit in the app, £1,490 for a
@@ -287,5 +295,5 @@ unsigned, like now).
   a look before going live. Not handled here.
 - The Sounds button keeps its normal button shape while locked (text and lock dimmed), so it still looks clickable,
   on purpose (it opens the unlock window).
-- The command-line test modes (`--render-voice`, `--test-voice`, `--test-sounds`) still use the paid features; the
-  code is public anyway.
+- Done 2026-10-19: the command-line test modes (`--render-voice`, `--test-voice`, `--test-sounds`, …) follow the
+  lock now (see the top of this file).

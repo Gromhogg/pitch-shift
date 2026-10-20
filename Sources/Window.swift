@@ -2452,7 +2452,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         refresh()
     }
 
-    @objc func testClicked() { test.click() }
+    @objc func testClicked() {
+        guard preview == nil else { return }  // pictures: see setHear
+        test.click()
+    }
 
     // Opens the Soundboard next to the window, or closes it.
     @objc func soundsClicked() {
@@ -2584,13 +2587,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     // MARK: Switches
 
+    // Pictures (--preview) play nothing and save nothing, even if a switch or Test gets pressed: they show Pitch Shift
+    // Pro unlocked whatever the key, so they must never start any sound.
     func setHear(_ on: Bool) {
+        guard preview == nil else { refresh(); return }
         on ? hear.start() : hear.stop()
         defaults.set(on, forKey: Keys.hearOn)
         refresh()
     }
 
     func setVoice(_ on: Bool) {
+        guard preview == nil else { refresh(); return }  // pictures: see setHear
         guard on else {
             voice.stop()  // with the Soundboard open, its sounds still go out (the voice unchanged)
             if !voice.runsForSounds { DefaultMic.giveBack() }
