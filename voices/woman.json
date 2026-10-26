@@ -14,10 +14,10 @@
     "ltas": [-7.02, -1.87, 3.77, 3.16, 0.12, 2.69, 3.77, 3.7, 1.45, -0.14, -1.53, -2.74, -4.5, -6.87, -8.83, -11.38, -15.21, -18.28, -19.82, -20.19, -22.41]
   },
   "realistic": {
-    "model": "woman_us_ahead.mlmodelc",
+    "model": "woman_us_t200_ahead.mlmodelc",
     "encoder": "contentvec_ahead.mlmodelc",
     "rate": 48000,
     "eqAmount": 0.5
   },
-  "credits": "Made from the CSTR VCTK Corpus 0.92 (University of Edinburgh, CC BY 4.0), a blend of 8 American speakers. RVC v2 (MIT), ContentVec (MIT)."
+  "credits": "Trained on the CSTR VCTK Corpus 0.92 (University of Edinburgh, CC BY 4.0): 8 American speakers as one voice. Started from the RVC v2 48 kHz base models (MIT). RVC v2 (MIT), ContentVec (MIT)."
 }
