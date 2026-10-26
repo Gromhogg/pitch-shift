@@ -594,3 +594,58 @@ Pitch Shift was recording from their headset mic each time it was checked); hidd
 share above 400 Hz +1.0 / +2.2 points, words +0.44 at slider 1); the CPU copy adds ~50 MB and part of a second to
 the load; `aiClampMode=0` puts the old pitch limit back if high notes sound strained; slider moves in a room that is
 never quiet still crossfade, as in 3.1.1.
+
+## 3.3: trained Woman and Man voices (2026-10-26)
+
+**What changed:** the AI voice files only. Woman = `woman_us_t200_ahead.mlmodelc`, Man = `man_t200_ahead.mlmodelc`:
+the voices trained on Kaggle (Stage B4 of `notes/realism-3.2-plan.md`: RVC v2, 200 epochs, about 40 minutes of
+recordings of the same 8 VCTK speakers each, starting from the 3.1-3.2 blends; Woman 4.4 h, Man 4.8 h on a T4), then
+converted exactly like the shipped `_ahead` files (`convert_generator.py --context-ms 1000 --ahead-ms 700 --right-ms
+40`, 8-bit). The zips hold the converted files renamed, byte for byte the files the blind test was rendered with. New
+names so the "first time" note (`aiVoicePrepared.<id>.<model>.<size>`) and Core ML's cache treat them as new. The
+`natural` blocks, the pitch (Woman 235 Hz / 1.7, Man 112 Hz / 0.75) and the speech reader `contentvec_ahead` are
+unchanged; the blind test was rendered with these same values. No code changed.
+
+**Why these two** (`research/voicechanger/results/trained.md`; blind folder `~/Downloads/Pitch Shift trained voices
+compare/`): the owner picked trained epoch 200 for Woman in 5 of 5 sentences and for Man in 3 of 4 (the miss: sentence
+09, Man at the default slider 0.25, where they liked the blend better). By the numbers both are far above the blends in
+quality (Distill-MOS +0.43 to +0.48) with no more word errors, much cleaner in a noisy room (Woman: hiss between words 12-19 dB
+lower in a -35 dBFS room), Man's voice print much closer to real men; Woman's voice print slightly further from real women than the blend
+and less American by the accent model (US share 0.86-0.89 → 0.63-0.64, real American women 0.59). Every trained epoch joins its
+0.16 s pieces less smoothly ("poor" joins 3-7 % → 14-23 %; the audible-jump counts did not rise).
+
+**Checks** (offline, `--compute cpu`; 3.2.0 = a build of main 501753f; both unlocked builds unless noted):
+- Changer off byte-identical to 3.2.0: 14/14. Natural byte-identical (3 clips × Woman/Man × plain/Deeper when
+  slow/half strength + `--live-sim`): 21/21. `--as-free` byte-identical: 6/6.
+- The AI voice, 11 clips (Woman: `say` Daniel, Fred, VCTK p258 p285 p304 p363; Man: Samantha, VCTK p277 p283 p323
+  p329; each from a cold start) at 0.05 / 0.25 / 1: 0 late pieces and 0 s of fill-in in all 33 renders (same for the
+  blends), fixed delay 214 / 364 / 614 ms (as 3.2.0). Median pitch (Praat): Man 110 Hz at every position (blend 110);
+  Woman 205-207 Hz on average (blend 211-212), within 5 Hz on 4 clips and 10-16 Hz lower on the two VCTK men
+  p304 / p363 (cold 3 s clips; warm, on 70 men, trained.md has 222 Hz for both).
+- Real time (`smooth/bench/stream_test.mm` built against this branch's `Sources/Voice`: 128-sample callbacks, CPU,
+  60 s each, new and old voices alternating, on battery with Steam / a busy system task running). At normal priority
+  (as the app): late pieces at 0.25 new Woman 0 / Man 0 (old 5 / 1), at 1 all 0. At `nice 15` (round 1, busier):
+  at 0.25 new Woman 3 (0.24 s filled in), old Woman 8 (0.59 s), new Man 12 (3.2 s); at 1 all 0. Pieces 48-56 ms on
+  average for both. While a game (Geometry Dash) was in front, pieces on the CPU took 256-281 ms for 160 ms of sound
+  with or without nice, so the AI voice falls behind then; same model shape and cost as the blends.
+- Live (the guard passed: no app open, no mic in use): `--test-voice --mic "MacBook Pro Microphone" --file …
+  --compute cpu`, 30 s each, with the locked build and this Mac's key: Woman at 0.25 and Man at 1: AI voice playing
+  after 1.0 s, 0 late pieces, 0 s filled in, 0 dry-outs; card "about 0.47 s" / "about 1.02 s". The two
+  `aiVoicePrepared` keys these tests wrote were removed again, so the owner sees the real first-time note.
+- Locked build (public key + the one older key from `issued.txt`): with no key it plays exactly like `--as-free` of
+  3.2.0 and 3.3.0 (5/5) and refuses the Soundboard and adding voices; with this Mac's saved key it unlocks and plays
+  the AI and Natural voices byte for byte like the unlocked build; the private key and the old secret are not in the
+  app; no key in the branch.
+- 36 compiler warnings (as main); app and driver both chips; the Intel half says "Realistic mode: needs Apple
+  silicon; Natural mode is used" and its Natural matches Apple silicon within 0.00011; 18 hidden previews (870×369,
+  588×581, 306×850, light, Intel, locked) fine.
+- Updating: the installer replaces the whole app ("upgrade"), so the old `woman_us_ahead` / `man_ahead` folders go
+  (3.1.1 installed over 3.0.0 kept none of 3.0.0's files). Old `aiVoicePrepared` keys and Core ML cache entries stay
+  behind, unused; the app has never cleaned those up. Old model folders left in a Voices folder with no json are
+  ignored (checked with `--voices-dir`: the list shows only the built-in Woman and Man, with the new files).
+
+**Left / not sure:** nobody has listened in the app yet (only the blind test files); the joins between pieces are
+measurably less smooth (audibility unknown); Man at the default slider was the one blind-test miss; the Woman sounds
+less American to the accent model; at release, upload `woman_us_t200_ahead.mlmodelc.zip` and
+`man_t200_ahead.mlmodelc.zip` (in `research/voicechanger/models/`) and put the tag in place of PLACEHOLDER in
+`voices/models.txt`.
