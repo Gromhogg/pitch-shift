@@ -14,5 +14,5 @@
 # so the app's "first time" note and Core ML's cache can't mix them up with the blends. The encoder is unchanged.
 # name                         size(bytes)  sha256                                                            url
 contentvec_ahead.mlmodelc.zip  82964437     3566ad71d0625e4f7ac6eb1f77d7d3e9edf946a9ed5a913d4db7feab37354eb5  https://github.com/Gromhogg/pitch-shift/releases/download/v3.1.0/contentvec_ahead.mlmodelc.zip
-woman_us_t200_ahead.mlmodelc.zip  24950963  c714f2328e969d8cf4209b5a20a960b035c091c27061efe4f8e540b28a09476e  https://github.com/Gromhogg/pitch-shift/releases/download/PLACEHOLDER/woman_us_t200_ahead.mlmodelc.zip
-man_t200_ahead.mlmodelc.zip       24953528  5932f2b5c524fd880b445115817255f9a425aca47e408a0060a05f663a34d729  https://github.com/Gromhogg/pitch-shift/releases/download/PLACEHOLDER/man_t200_ahead.mlmodelc.zip
+woman_us_t200_ahead.mlmodelc.zip  24950963  c714f2328e969d8cf4209b5a20a960b035c091c27061efe4f8e540b28a09476e  https://github.com/Gromhogg/pitch-shift/releases/download/v3.3.0/woman_us_t200_ahead.mlmodelc.zip
+man_t200_ahead.mlmodelc.zip       24953528  5932f2b5c524fd880b445115817255f9a425aca47e408a0060a05f663a34d729  https://github.com/Gromhogg/pitch-shift/releases/download/v3.3.0/man_t200_ahead.mlmodelc.zip
