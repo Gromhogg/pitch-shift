@@ -295,6 +295,7 @@ struct VoiceModel {
     MLModel *voice2 = nil;
     MLModel *voice2CPU = nil;
     MLModel *sorter = nil;
+    bool sorterHead = false;       // ... the sorter file also has the small "classes" head
     double secondHopMs = 0, sorterMs = 0, secondLoadMs = 0;
 };
 
@@ -316,7 +317,7 @@ struct Runner {
     std::vector<float> limH, limHist; // 3.2 peak limiter: the gain each sample needs (min over 5 ms ahead), last ones
     std::vector<int> limQ;            // ... its sliding-minimum queue
     // 3.5: the second voice's output (only filled when a switch makes both voices) and the sound sorter's input/output
-    Buffer audioOut2, mel, scores;
+    Buffer audioOut2, mel, scores, classes;
     MLPredictionOptions *voiceOptions2 = nil, *sorterOptions = nil;
     id<MLFeatureProvider> sorterIn = nil;
     std::vector<float> win16;         // the sorter's 0.975 s of 16 kHz sound
@@ -372,7 +373,12 @@ bool makeRunner(VoiceModel *m, Runner &r) {
         r.sorterIn = [[MLDictionaryFeatureProvider alloc] initWithDictionary:@{@"logmel" : [MLFeatureValue featureValueWithMultiArray:r.mel.array]} error:&why];
         if (!r.sorterIn) return false;
         r.sorterOptions = [MLPredictionOptions new];
-        r.sorterOptions.outputBackings = @{@"scores" : r.scores.array};
+        if (m->sorterHead) {
+            if (!r.classes.make(@[@1, @(soundsorter::kHead)], MLMultiArrayDataTypeFloat32)) return false;
+            r.sorterOptions.outputBackings = @{@"scores" : r.scores.array, @"classes" : r.classes.array};
+        } else {
+            r.sorterOptions.outputBackings = @{@"scores" : r.scores.array};
+        }
         r.win16.assign(soundsorter::kWindow, 0.0f);
     }
     Gauss g(1234);
@@ -1086,7 +1092,13 @@ struct VoiceStream {
         if (m.sorter && logmel && !r.win16.empty()) {  // the sound classes of the 0.975 s up to the newest sound
             in16.get(E * kFrame16 - soundsorter::kWindow, r.win16.data(), soundsorter::kWindow, 0);
             f.loudDb = logmel->run(r.win16.data(), r.mel.f());
-            if (predict(m.sorter, r.sorterIn, r.sorterOptions, @"scores", r.scores)) soundsorter::groupScores(r.scores.f(), f.group);
+            if (sortSound(m, r)) {
+                soundsorter::groupScores(r.scores.f(), f.group);
+                if (m.sorterHead) {
+                    f.hasHead = true;
+                    for (int k = 0; k < soundsorter::kHead; k++) f.head[k] = r.classes.f()[k];
+                }
+            }
         }
         f.floorDb = floorDb;
         // the pitch frames from rangeFrames before the piece to the newest (chain-sample positions)
@@ -1114,12 +1126,27 @@ struct VoiceStream {
         const char *why = nullptr;
         const int on = rule.decide(f, &why);
         if (svTrace) {
-            std::fprintf(svTrace, "sv hop %lld A %lld E %lld loud %.1f floor %.1f frames %d voiced %d note %d sung %d range %.1f |",
+            if (f.hasHead) {
+            std::fprintf(svTrace, "svh");
+            for (int k = 0; k < soundsorter::kHead; k++) std::fprintf(svTrace, " %.3f", f.head[k]);
+            std::fprintf(svTrace, "\n");
+        }
+        std::fprintf(svTrace, "sv hop %lld A %lld E %lld loud %.1f floor %.1f frames %d voiced %d note %d sung %d range %.1f |",
                          (long long)hop, (long long)A, (long long)E, f.loudDb, f.floorDb, f.frames, f.voiced, f.note, f.sung, f.rangeSt);
             for (int g = 0; g < soundsorter::kGroups; g++) std::fprintf(svTrace, " %s %.3f", soundsorter::groupName(g), f.group[g]);
             std::fprintf(svTrace, " | %s -> %d\n", why ? why : "", on);
         }
         return on ? 2 : 1;
+    }
+
+    // 3.5: the sound sorter on the patch in r.mel: its 521 scores (and the head's classes) into r.scores (r.classes).
+    static bool sortSound(VoiceModel &m, Runner &r) {
+        @autoreleasepool {
+            NSError *why = nil;
+            id<MLFeatureProvider> o = [m.sorter predictionFromFeatures:r.sorterIn options:r.sorterOptions error:&why];
+            if (!o || !r.scores.take([o featureValueForName:@"scores"].multiArrayValue)) return false;
+            return !m.sorterHead || r.classes.take([o featureValueForName:@"classes"].multiArrayValue);
+        }
     }
 
     // 3.4 (aiHumLiftDb, aiHumLevelDb): the trained voices lose the tone of a long, quiet hum (they waver, drop an
@@ -1663,23 +1690,25 @@ int voicemodel_add_second(VoiceModel *m, const char *voicePath, const char *sort
             so.count != 2 || so[1].intValue != soundsorter::kClasses) {
             say(err, errSize, "the sound sorter's file has unexpected sizes"); return 0;
         }
+        NSArray<NSNumber *> *sh = sd.outputDescriptionsByName[@"classes"].multiArrayConstraint.shape;
+        m->sorterHead = sh.count == 2 && sh[1].intValue == soundsorter::kHead;
         m->voice2 = v2;
         if (m->voiceCPU) m->voice2CPU = open(voicePath, VOICEMODEL_COMPUTE_CPU);
         m->sorter = sorter;
         m->secondLoadMs = nowMs() - t0;
         // warm up (macOS prepares the models on the first calls) and time them
         Runner r;
-        if (!makeRunner(m, r)) { m->voice2 = m->voice2CPU = m->sorter = nil; say(err, errSize, "out of memory"); return 0; }
+        if (!makeRunner(m, r)) { m->voice2 = m->voice2CPU = m->sorter = nil; m->sorterHead = false; say(err, errSize, "out of memory"); return 0; }
         bool ok = true;
         for (int k = 0; k < 2 && ok; k++) ok = predict(m->voice2, r.voiceIn, r.voiceOptions, @"audio", r.audioOut) &&
-                                               predict(m->sorter, r.sorterIn, r.sorterOptions, @"scores", r.scores);
+                                               VoiceStream::sortSound(*m, r);
         if (ok && m->voice2CPU) for (int k = 0; k < 2 && ok; k++) ok = predict(m->voice2CPU, r.voiceIn, r.voiceOptions, @"audio", r.audioOut);
-        if (!ok) { m->voice2 = m->voice2CPU = m->sorter = nil; say(err, errSize, "the second voice doesn't run"); return 0; }
+        if (!ok) { m->voice2 = m->voice2CPU = m->sorter = nil; m->sorterHead = false; say(err, errSize, "the second voice doesn't run"); return 0; }
         double t1 = nowMs();
         for (int k = 0; k < 3; k++) predict(m->voice2, r.voiceIn, r.voiceOptions, @"audio", r.audioOut);
         m->secondHopMs = (nowMs() - t1) / 3;
         t1 = nowMs();
-        for (int k = 0; k < 3; k++) predict(m->sorter, r.sorterIn, r.sorterOptions, @"scores", r.scores);
+        for (int k = 0; k < 3; k++) VoiceStream::sortSound(*m, r);
         m->sorterMs = (nowMs() - t1) / 3;
         char buf[160];
         std::snprintf(buf, sizeof buf, "; second voice ready (%.0f ms, sorter %.1f ms; %.1f s)", m->secondHopMs, m->sorterMs,

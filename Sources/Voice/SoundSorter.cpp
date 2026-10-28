@@ -113,43 +113,36 @@ float LogMel::run(const float *x, float *patch, float levelDb, float maxLiftDb) 
 
 int Rule::decide(const Features &f, const char **why) {
     const float *g = f.group;
-    const char *reason = "main";
-    bool want = false, hold = false;
-    if (f.loudDb < quietMaxDb || (f.voiced == 0 && f.loudDb < f.floorDb + quietDb)) {
-        hold = true;
-        reason = "quiet: keep";
-    } else if (g[Click] > clickMax) {
-        reason = "click";
-    } else if (g[Scream] > screamMax) {
-        reason = "scream";
-    } else {
-        float other = std::max({g[Laugh], g[Hum], g[Sing], g[Breath]});
-        if (coughs > 0.5f) other = std::max(other, g[Cough]);
-        if (whistles > 0.5f) other = std::max(other, g[Whistle]);
-        const float noteShare = f.voiced > 0 ? (float)f.note / (float)f.voiced : 0;
-        const float voicedShare = f.frames > 0 ? (float)f.voiced / (float)f.frames : 0;
-        const bool tune = f.voiced >= tuneMin && voicedShare >= tuneVoiced && noteShare >= tuneNote;
-        const bool sung = f.sung * 2 > f.frames;
-        if (other >= enter && g[Speech] < speechMax) {
-            want = true;
-            reason = "sorter";
-        } else if (tune && (g[Speech] < tuneSpeechMax || (sung && g[Speech] < tuneSungSpeechMax))) {
-            want = true;
-            reason = "tune";
-        } else {
-            reason = g[Speech] >= speechMax ? "speech" : "unsure";
-        }
-    }
-    if (!hold) {
-        if (want) { runOn++; runOff = 0; }
-        else { runOff++; runOn = 0; }
+    const bool hold = f.loudDb < quietMaxDb || (f.voiced == 0 && f.loudDb < f.floorDb + quietDb);
+    const bool blocked = g[Click] > clickMax || g[Scream] > screamMax;
+    const float noteShare = f.voiced > 0 ? (float)f.note / (float)f.voiced : 0;
+    const char *reason = hold ? "quiet: keep" : blocked ? (g[Click] > clickMax ? "click" : "scream") : "main";
+    bool want = false;
+    if (!hold && !blocked) {
+        const bool breathy = std::max(g[Breath], coughs > 0.5f ? g[Cough] : 0.0f) >= breath && g[Speech] < breathSpeech;
+        runBreath = breathy ? runBreath + 1 : 0;
+        const float *h = f.head;
+        const bool head = f.hasHead && useHead > 0.5f;
+        const float other = head ? h[HLaugh] + h[HSigh] + h[HHum] + h[HSing] + (coughs > 0.5f ? h[HBody] : 0.0f) +
+                                   (whistles > 0.5f ? h[HWhistle] : 0.0f) : 0.0f;
+        if (head && other >= headEnter && h[HSpeech] < headSpeech) { want = true; reason = "head"; }
+        else if (g[Laugh] >= laugh && g[Speech] < laughSpeech) { want = true; reason = "laugh"; }
+        else if (std::max(g[Hum], g[Sing]) >= hum && g[Speech] < humSpeech) { want = true; reason = "hum"; }
+        else if (whistles > 0.5f && g[Whistle] >= whistle) { want = true; reason = "whistle"; }
+        else if (runBreath >= (int)breathHops) { want = true; reason = "breath"; }
+        else if (f.voiced >= tuneMin && noteShare >= tuneEnter) { want = true; reason = "tune"; }
+        else if (on && f.voiced >= tuneStayMin && noteShare >= tuneStay) { want = true; reason = "tune: stay"; }
+        else if (g[Speech] >= speechExit) reason = "speech";
+    } else if (!hold) {
+        runBreath = 0;
     }
     dwell++;
-    if (!on && want && runOn >= (int)enterHops) {
+    if (!hold) runOff = want ? 0 : runOff + 1;
+    if (!on && want) {
         on = true;
         dwell = 0;
-    } else if (on && !want && !hold && ((runOff >= (int)exitHops && dwell >= (int)minHops) || g[Speech] >= speechExit ||
-                                        g[Click] > clickMax)) {
+    } else if (on && !want && !hold && ((runOff >= (int)exitHops && dwell >= (int)minHops) || g[Speech] >= speechExit || blocked ||
+                                        (f.hasHead && useHead > 0.5f && f.head[HSpeech] >= headExit))) {
         on = false;
         dwell = 0;
     }
@@ -160,12 +153,15 @@ int Rule::decide(const Features &f, const char **why) {
 bool Rule::tune(const std::string &k, float v) {
     struct Item { const char *name; float Rule::*field; };
     static const Item items[] = {
-        {"svEnter", &Rule::enter}, {"svSpeechMax", &Rule::speechMax}, {"svCoughs", &Rule::coughs},
-        {"svWhistles", &Rule::whistles}, {"svClickMax", &Rule::clickMax}, {"svScreamMax", &Rule::screamMax},
-        {"svTuneNote", &Rule::tuneNote}, {"svTuneVoiced", &Rule::tuneVoiced}, {"svTuneMin", &Rule::tuneMin},
-        {"svTuneSpeechMax", &Rule::tuneSpeechMax}, {"svTuneSungSpeechMax", &Rule::tuneSungSpeechMax},
-        {"svQuietDb", &Rule::quietDb}, {"svQuietMaxDb", &Rule::quietMaxDb}, {"svEnterHops", &Rule::enterHops}, {"svExitHops", &Rule::exitHops},
-        {"svMinHops", &Rule::minHops}, {"svSpeechExit", &Rule::speechExit},
+        {"svLaugh", &Rule::laugh}, {"svLaughSpeech", &Rule::laughSpeech}, {"svHum", &Rule::hum},
+        {"svHumSpeech", &Rule::humSpeech}, {"svBreath", &Rule::breath}, {"svBreathSpeech", &Rule::breathSpeech},
+        {"svBreathHops", &Rule::breathHops}, {"svCoughs", &Rule::coughs}, {"svWhistles", &Rule::whistles},
+        {"svWhistle", &Rule::whistle}, {"svClickMax", &Rule::clickMax}, {"svScreamMax", &Rule::screamMax},
+        {"svTuneEnter", &Rule::tuneEnter}, {"svTuneMin", &Rule::tuneMin}, {"svTuneStay", &Rule::tuneStay},
+        {"svTuneStayMin", &Rule::tuneStayMin}, {"svQuietDb", &Rule::quietDb}, {"svQuietMaxDb", &Rule::quietMaxDb},
+        {"svExitHops", &Rule::exitHops}, {"svMinHops", &Rule::minHops}, {"svSpeechExit", &Rule::speechExit},
+        {"svHeadEnter", &Rule::headEnter}, {"svHeadSpeech", &Rule::headSpeech}, {"svHeadExit", &Rule::headExit},
+        {"svUseHead", &Rule::useHead},
     };
     for (const Item &it : items)
         if (k == it.name) { this->*it.field = v; return true; }

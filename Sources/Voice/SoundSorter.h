@@ -19,6 +19,9 @@ namespace soundsorter {
 constexpr int kRate = 16000;
 constexpr int kWindow = 15600;       // samples in one patch: 96 frames of 25 ms, hop 10 ms (0.975 s)
 constexpr int kFrames = 96, kBands = 64, kClasses = 521;
+// The sorter file's own small head (one layer on YAMNet's 1024 embedding values, trained on free recordings: speech,
+// laughs, breaths and sighs, coughs and sneezes, hums, singing, whistles, other sounds): output "classes", softmax.
+enum Head { HSpeech, HLaugh, HSigh, HBody, HHum, HSing, HWhistle, HOther, kHead };
 
 enum Group { Speech, Laugh, Hum, Sing, Breath, Cough, Whistle, Click, Scream, kGroups };
 const char *groupName(int g);
@@ -45,6 +48,8 @@ void groupScores(const float *scores, float *groups);
 // What one piece's decision looks at.
 struct Features {
     float group[kGroups] = {};  // YAMNet group scores (0 = none: no sorter)
+    float head[kHead] = {};     // the head's probabilities (all 0 = the sorter file has no head)
+    bool hasHead = false;
     float loudDb = -120;        // the window's loudest 10 ms (dBFS)
     float floorDb = -120;       // the room's noise (dBFS)
     int voiced = 0, frames = 0; // voiced frames / frames known, around the piece
@@ -53,33 +58,41 @@ struct Features {
     float rangeSt = 0;          // spread of the voiced frames' pitch (10-90 %, half-steps)
 };
 
-// The rule, with hysteresis. Tune keys ("sv..."), see SoundSorter.cpp.
+// The rule, with hysteresis (the same rule replayed offline: research/voicechanger/second/tools/simrule.py).
+// Into the second voice when the sorter is sure of a laugh, a hum or singing, of a breath / sigh / cough for two
+// pieces in a row (speech nearly absent), or when the pitch is note-like (a hum or hummed tune: YAMNet hears a quiet
+// hummed tune as speech, so the pitch decides it); out again as soon as none holds (after two pieces at least), at
+// once when speech is sure, and never for clicks, claps, typing, shouting or crying. Silence keeps the choice.
 class Rule {
 public:
     // One piece: 1 = the second voice, 0 = the main voice. `why` (may be null) gets a short reason for traces.
     int decide(const Features &f, const char **why = nullptr);
-    void reset() { on = false; runOn = runOff = dwell = 0; }
+    void reset() { on = false; runBreath = runOff = dwell = 0; }
     bool tune(const std::string &key, float value);
     bool isOn() const { return on; }
-    // settings
-    float enter = 0.45f;        // a non-speech group this sure (laughs, hums, singing, sighs/breaths) ...
-    float speechMax = 0.3f;     // ... while speech is below this
-    float coughs = 1;           // 1 = coughs and sneezes count as non-speech too (lower priority: 0 = never)
-    float whistles = 0;         // 1 = whistles go to the second voice (0: the main voice / the original, SoundGate)
+    // settings ("sv..." tune keys)
+    float laugh = 0.35f, laughSpeech = 0.35f;   // laughter this sure while speech is below that
+    float hum = 0.3f, humSpeech = 0.3f;         // humming / singing
+    float breath = 0.6f, breathSpeech = 0.1f;   // a breath, sigh, gasp (or a cough / sneeze) ...
+    float breathHops = 2;                       // ... for this many pieces in a row
+    float coughs = 1;           // 1 = coughs and sneezes count with breaths (lower priority: 0 = never)
+    float whistles = 0, whistle = 0.5f;         // 1 = whistles too (0: they stay the main voice / pass as they are)
     float clickMax = 0.3f;      // clicks, claps, typing above this: never the second voice
     float screamMax = 0.5f;     // shouting, screaming, crying above this: the main voice
-    float tuneNote = 0.6f;      // a hum or hummed tune by the pitch alone: this share of the voiced frames note-like ...
-    float tuneVoiced = 0.35f;   // ... at least this share of the frames voiced ...
-    float tuneMin = 30;         // ... and at least this many voiced frames
-    float tuneSpeechMax = 0.5f; // ... while speech is below this (a hummed tune reads as speech to YAMNet: see below)
-    float tuneSungSpeechMax = 1.01f;  // ... or below this inside a sung passage (VoiceChanger's 2 s rule)
+    float tuneEnter = 0.55f;    // a hum / hummed tune by the pitch: this share of the voiced frames note-like ...
+    float tuneMin = 30;         // ... with at least this many voiced frames (speech stays below 0.48 on every set)
+    float tuneStay = 0.3f, tuneStayMin = 20;    // ... and once in, it stays while this holds
     float quietDb = 8;          // no voice and less than this above the room's noise, ...
     float quietMaxDb = -60;     // ... or quieter than this (dBFS): keep the choice (silence decides nothing)
-    float enterHops = 1, exitHops = 1, minHops = 2;  // pieces in a row to switch; pieces to stay at least
+    float exitHops = 1, minHops = 2;  // pieces with nothing to stay for; pieces to stay at least
     float speechExit = 0.6f;    // speech this sure: back to the main voice at once
+    float headEnter = 0.6f;     // the head: laugh + sigh + hum + singing (+ coughs) this sure ...
+    float headSpeech = 0.2f;    // ... and speech below this: the second voice
+    float headExit = 0.5f;      // ... and speech this sure: back to the main voice at once
+    float useHead = 1;          // 0 = ignore the head
 private:
     bool on = false;
-    int runOn = 0, runOff = 0, dwell = 0;
+    int runBreath = 0, runOff = 0, dwell = 0;
 };
 
 }  // namespace soundsorter
