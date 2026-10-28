@@ -4,7 +4,10 @@
 //   - keeps the original in a delay line (for the sibilance keep in post),
 //   - low-passes and thins it to about 16 kHz (/3 at 48 kHz, /6 at 96 kHz, none at 16 kHz),
 //   - every 10 ms: YIN pitch tracker on the last ~43 ms (25 ms window, 55-600 Hz, threshold 0.12, parabolic
-//     interpolation); voiced = aperiodicity < 0.25 and level > noise floor + 10 dB and > -50 dBFS,
+//     interpolation); voiced = aperiodicity < 0.25 and level > noise floor + 10 dB and > -50 dBFS (3.4: a voice
+//     already going on may fade to floor + 6 dB and -58 dBFS; the noise floor is the 10th percentile of the levels of
+//     the last ~5 s of frames that were not voiced: before 3.4 voiced frames counted too, so a hum or a held note
+//     longer than ~4.6 s became "noise" and lost its pitch),
 //   - octave errors (YIN sometimes reads half or double the pitch for a frame or two, mostly where a sound starts or
 //     ends): each voiced frame's pitch may be its YIN value, half or double it; a small running path search picks
 //     the one that moves least from frame to frame (1 point per half-step), with a cost for taking half (4.5) or
@@ -38,6 +41,11 @@
 //     old limit; Natural keeps it either way); the AI voice maps from its own median (aiMedianMode
 //     1): the same frames teach it (held notes left out), and once it knows the speaker (300 frames) it moves at
 //     most 0.01 half-steps per frame, so a long note is not pulled back toward the voice's pitch while it is held,
+//   - sung passages (3.4): when more than 45 % of the last 200 voiced frames are note-like (the last 15 voiced frames
+//     within 1 half-step; speech stays below 38 % on every set tried, songs and hummed tunes go above), and until it
+//     falls below 30 %: the AI voice keeps the tune's steps as sung (intonation 1 instead of the voice's livelier one,
+//     gliding over 0.5 s), a passage sung more than 5 half-steps above the speaker's median (its 1 s mean) moves down
+//     as a whole instead of having its top squashed by the band, and the medians don't learn from it,
 //   - voice shape (formants): formant ^ (strength * |off| / |12 log2(target / assumedInputHz)|, limited to 1),
 //     gliding over 150 ms; Rubber Band gets shape / pitch.
 // post (after Rubber Band), per output sample, all plain filters (no added delay):
@@ -57,7 +65,9 @@
 // sibilanceHz, breathAttackMs, breathReleaseMs, octUpCost, octDownCost, jumpCost, rangeSt, rangeCost, contFrames,
 // gapFrames, warmFrames, medianGlideSt, aiBandSt, aiMaxSt, aiBandLowSt, aiMinSt, aiHoldFrames, aiSlewSt, aiMedianMode,
 // aiSteadyFrames, aiSteadySt, aiMedianGlideSt, aiMedianWarmFrames, heldMode, heldFrames, heldSt, heldLineFrames,
-// heldGapFrames, learnDelayFrames, medianSlowSt, aiClampMode (+ "ai32" 0 = aiClampMode 0, as 3.1.1).
+// heldGapFrames, learnDelayFrames, medianSlowSt, aiClampMode (+ "ai32" 0 = aiClampMode 0, as 3.1.1), 3.4: floorMode,
+// floorVoiceS, floorGapFrames, voicedKeepDb, voicedKeepFloorDb, singMode, singNoteFrames, singNoteSt, singWindow,
+// singOnShare, singOffShare, singGlideFrames, singTopSt, singResetFrames (+ "hum34" 0 = all of 3.4's off, as 3.3).
 #include "VoiceChanger.h"
 
 #include <algorithm>
@@ -179,6 +189,23 @@ struct Tuning {
     float learnDelayFrames = 150;    // a stretch's frames are learned when it is over, or this late at most (so the
                                      // start of a held note, even a slow scoop into it, isn't learned)
     float medianSlowSt = 0.05f;      // Natural's median in use, once it knows the speaker: the most it moves per frame
+    // 3.4 (hum34 0 = all of these as 3.3)
+    float floorMode = 1;             // voiced frames stay out of the noise floor (0: every frame counts, as before)
+    float floorVoiceS = 20;          // ... unless the voice has gone on this long without a pause (a tone in the room)
+    float floorGapFrames = 30;       // ... a pause: this many unvoiced frames in a row
+    float voicedKeepDb = 8;          // a voice going on stays voiced down to voicedMinDb - this ...
+    float voicedKeepFloorDb = 4;     // ... and to the noise floor + voicedAboveFloorDb - this
+    // sung passages (a hummed or sung tune; only the AI voice's pitch and the medians' learning change)
+    float singMode = 1;              // 0 = off (as 3.3)
+    float singNoteFrames = 15;       // a voiced frame is note-like when the last this many voiced frames ...
+    float singNoteSt = 1;            // ... stay within this many half-steps
+    float singWindow = 200;          // the share of note-like frames among the last this many voiced frames ...
+    float singOnShare = 0.45f;       // ... above this: a sung passage (speech stays below 0.38 on every set tried)
+    float singOffShare = 0.30f;      // ... below this: speech again
+    float singGlideFrames = 50;      // the AI pitch moves between the two mappings over this many frames
+    float singTopSt = 5;             // a sung passage whose slow middle is more than this above the speaker's median
+                                     // is moved down as a whole (keeps the tune instead of squashing it at the top)
+    float singResetFrames = 1000;    // this long without voice: start afresh
 };
 
 struct TuneKey {
@@ -208,6 +235,12 @@ const TuneKey kTuneKeys[] = {
     {"heldFrames", &Tuning::heldFrames}, {"heldSt", &Tuning::heldSt}, {"heldLineFrames", &Tuning::heldLineFrames},
     {"heldGapFrames", &Tuning::heldGapFrames}, {"learnDelayFrames", &Tuning::learnDelayFrames},
     {"medianSlowSt", &Tuning::medianSlowSt}, {"aiClampMode", &Tuning::aiClampMode},
+    {"floorMode", &Tuning::floorMode}, {"floorVoiceS", &Tuning::floorVoiceS}, {"floorGapFrames", &Tuning::floorGapFrames},
+    {"voicedKeepDb", &Tuning::voicedKeepDb}, {"voicedKeepFloorDb", &Tuning::voicedKeepFloorDb},
+    {"singMode", &Tuning::singMode}, {"singNoteFrames", &Tuning::singNoteFrames}, {"singNoteSt", &Tuning::singNoteSt},
+    {"singWindow", &Tuning::singWindow}, {"singOnShare", &Tuning::singOnShare}, {"singOffShare", &Tuning::singOffShare},
+    {"singGlideFrames", &Tuning::singGlideFrames}, {"singTopSt", &Tuning::singTopSt},
+    {"singResetFrames", &Tuning::singResetFrames},
 };
 
 struct VoiceKey {
@@ -377,6 +410,16 @@ struct VoiceChanger {
     float lineRing[kLine] = {};     // its slow line, one value per voiced frame
     int lineAt = 0, lineCount = 0;
     int lineRejects = 0;            // frames in a row too far from the line
+    int floorRun = 0, floorGap = 1000;  // 3.4: voiced frames since the last pause, unvoiced frames in a row
+    // 3.4 sung passages: the last voiced pitches (half-steps), note-like flags of the last voiced frames, the passage
+    // state and how far it has moved to the sung mapping (0 ... 1), the slow middle of the voice above its median
+    static constexpr int kSingNotes = 64, kSingFlags = 512;
+    float singSt[kSingNotes] = {};
+    int singStAt = 0, singStCount = 0, singGap = 0, singQuiet = 0;
+    uint8_t singFlag[kSingFlags] = {};
+    int singFlagAt = 0, singFlagCount = 0, singFlagSum = 0;
+    bool singOn = false;
+    float sing = 0, devSlow = 0;
     // Decisions for post.
     uint8_t flagRing[kFlagFrames] = {};
     int64_t flagCentre[kFlagFrames] = {};
@@ -508,9 +551,55 @@ struct VoiceChanger {
         }
     }
 
+    // 3.4, once a frame (f0 > 0 = voiced): is this a sung passage? A frame is note-like when the last singNoteFrames
+    // voiced frames (no gap over 3 frames) stay within singNoteSt; a passage is sung when more than singOnShare of
+    // the last singWindow voiced frames were note-like, and speech again below singOffShare. `sing` moves toward it
+    // over singGlideFrames.
+    void followSinging(float f0) {
+        if (tuning.singMode < 0.5f) { singOn = false; sing = 0; return; }
+        const int N = std::clamp((int)tuning.singNoteFrames, 2, kSingNotes);
+        const int W = std::clamp((int)tuning.singWindow, 10, kSingFlags);
+        if (f0 > 0) {
+            singGap = 0;
+            singQuiet = 0;
+            singSt[singStAt] = semitones(f0 / 100.0);
+            singStAt = (singStAt + 1) % kSingNotes;
+            singStCount = std::min(singStCount + 1, kSingNotes);
+            bool note = false;
+            if (singStCount >= N) {
+                float lo = 1e9f, hi = -1e9f;
+                for (int k = 1; k <= N; ++k) {
+                    const float v = singSt[(singStAt - k + kSingNotes) % kSingNotes];
+                    lo = std::min(lo, v);
+                    hi = std::max(hi, v);
+                }
+                note = hi - lo < tuning.singNoteSt;
+            }
+            if (singFlagCount >= W) singFlagSum -= singFlag[(singFlagAt - W + kSingFlags) % kSingFlags];
+            else singFlagCount++;
+            singFlag[singFlagAt] = note ? 1 : 0;
+            singFlagSum += note ? 1 : 0;
+            singFlagAt = (singFlagAt + 1) % kSingFlags;
+            const float share = singFlagCount >= W / 2 ? (float)singFlagSum / (float)singFlagCount : 0.0f;
+            if (!singOn && share > tuning.singOnShare) singOn = true;
+            else if (singOn && share < tuning.singOffShare) singOn = false;
+        } else {
+            if (++singGap > 3) singStCount = 0;
+            if (++singQuiet > (int)tuning.singResetFrames) {  // a long silence: start afresh
+                singOn = false;
+                singFlagAt = singFlagCount = singFlagSum = 0;
+                singQuiet = 0;
+            }
+        }
+        // (not while a note is held: the change of mapping would bend it; it moves at the next note or pause)
+        const float step = 1.0f / std::max(1.0f, tuning.singGlideFrames);
+        if (!(heldRules() && held)) sing = std::clamp(sing + std::clamp((singOn ? 1.0f : 0.0f) - sing, -step, step), 0.0f, 1.0f);
+    }
+
     // A frame the speaker's median may learn from: at once (heldMode 0), or learnDelayFrames later unless it turns
     // out to be part of a held note.
     void learn(float f0) {
+        if (singOn) return;  // 3.4: a sung passage doesn't teach the medians (a tune isn't the speaking voice)
         if (!heldRules()) { learnMedian(f0); return; }
         if (held) return;
         if (pendCount == kPending) {  // (can't happen with the delay limited above) learn the oldest now
@@ -534,6 +623,9 @@ struct VoiceChanger {
             const float up = std::max(0.0f, tuning.aiBandSt), upRoom = std::max(0.01f, tuning.aiMaxSt - up);
             const float down = std::max(0.0f, tuning.aiBandLowSt), downRoom = std::max(0.01f, tuning.aiMinSt - down);
             float s = semitones(hz / bandCentre);
+            // 3.4: a sung passage that sits high above the speaker's median moves down as a whole (the band below
+            // would otherwise squash its top notes into one)
+            if (sing > 0) s -= sing * std::max(0.0f, devSlow - tuning.singTopSt);
             if (s > up) s = up + upRoom * std::tanh((s - up) / upRoom);
             else if (s < -down) s = -down - downRoom * std::tanh((-down - s) / downRoom);
             hz = (float)(bandCentre * std::exp2(s / 12));
@@ -680,10 +772,24 @@ struct VoiceChanger {
         for (int i = 0; i < span; ++i) lin[i] = dec[(decCount - span + i) & (decSize - 1)];
         float f0, ap, level;
         yin(f0, ap, level);
-        pushLevel(level);
+        const bool floorVoice = tuning.floorMode >= 0.5f;  // 3.4 (0 = 3.3: every frame counts toward the noise floor)
+        if (!floorVoice) pushLevel(level);
         const float floorDb = noiseFloor();
-        const bool levelOk = level > floorDb + tuning.voicedAboveFloorDb && level > tuning.voicedMinDb;
+        // 3.4: a voice that is going on (voiced 1-2 frames ago) may fade a little below the levels a new one needs, so
+        // the quiet end of a hummed note or a soft word doesn't drop out (voicedKeepDb, voicedKeepFloorDb; 0 = as 3.3)
+        const bool going = octAge <= 2;
+        const float keepAbs = going ? tuning.voicedKeepDb : 0.0f, keepFloor = going ? tuning.voicedKeepFloorDb : 0.0f;
+        const bool levelOk = level > floorDb + tuning.voicedAboveFloorDb - keepFloor && level > tuning.voicedMinDb - keepAbs;
         const bool voiced = ap < tuning.voicedAp && levelOk;
+        if (floorVoice) {
+            // 3.4: a voice is not the room's noise. Voiced frames stay out of the noise floor (before, a hum or a held
+            // note longer than ~4.6 s filled the floor's 5 s and then fell 10 dB short of it: from there on it was "not
+            // voiced" and the AI voice lost its pitch). After floorVoiceS of voice with no pause of floorGapFrames they
+            // count again, so a steady tone in the room that never stops still becomes the floor.
+            if (voiced) { floorGap = 0; floorRun = std::min(floorRun + 1, 1 << 30); }
+            else if (++floorGap > (int)tuning.floorGapFrames) { floorRun = 0; floorGap = std::min(floorGap, 1 << 20); }
+            if (!voiced || floorRun > (int)(tuning.floorVoiceS * 100)) pushLevel(level);
+        }
         float corrected = 0, settled = -1;  // settled: the frame before, now that this one is in (-1 = no change)
         if (voiced) {
             static constexpr float kMul[3] = {0.5f, 1, 2};
@@ -739,6 +845,7 @@ struct VoiceChanger {
     }
 
     void mapFrame(float f0, float ap, bool levelOk, int64_t centre, float extra, VoiceChangerPitch *out) {
+        followSinging(f0);
         if (heldRules()) followStretch(f0);
         const float measured = heldRules() ? (float)medianHzBetween(mapBins, seedBin, seedWeight)
                                            : (float)binHz(medianBin(mapBins, seedBin, seedWeight));
@@ -752,10 +859,15 @@ struct VoiceChanger {
         const float aiMedian = aiOwn ? aiMedianNow() : median;  // the median the AI voice's pitch is mapped from
         // the AI's pitch change for a frame this far from its median (half-steps; aiOwn only)
         const bool aiFree = tuning.aiClampMode >= 0.5f;  // 3.2: no +-15 half-step limit on the AI pitch
+        // 3.4: in a sung passage the AI voice keeps the tune's steps as sung (intonation 1, not the voice's livelier one)
+        const float aiInto = voice.intonation + (1 - voice.intonation) * sing;
         auto aiTotal = [&](float dev) {
-            const float total = strength * (semitones(voice.targetHz / aiMedian) + (voice.intonation - 1) * dev) + extra;
+            const float total = strength * (semitones(voice.targetHz / aiMedian) + (aiInto - 1) * dev) + extra;
             return aiFree ? total : std::clamp(total, -tuning.maxSemitones, tuning.maxSemitones);
         };
+        // the slow middle of the voice above its median (1 s of voiced frames; a held note doesn't move it)
+        if (voiced && tuning.singMode >= 0.5f && !(heldRules() && held))
+            devSlow += 0.01f * (std::clamp(semitones(f0 / aiMedian), -12.0f, 18.0f) - devSlow);
         bool creak = false, rough = false;
         if (voiced) {
             if (prevCount < 3) prev[prevCount++] = f0;
@@ -934,6 +1046,10 @@ struct VoiceChanger {
         octAge = 999;
         aiHz = 0; aiAge = 999; voicedAge = 999; steadyRun = 0;
         pendAt = pendCount = 0; mapFrames = 0; stretchGap = 1000; held = false; stCount = stAt = lineCount = lineAt = lineRejects = 0;
+        floorRun = 0; floorGap = 1000;
+        singStAt = singStCount = singGap = singQuiet = 0;
+        singFlagAt = singFlagCount = singFlagSum = 0;
+        singOn = false; sing = 0; devSlow = 0;
         flagLatest = -1;
         frames = voicedFrames = creakFrames = 0;
         sibTop.clear(); sibOrigTop.clear();
@@ -1210,6 +1326,15 @@ int voicechanger_tune(VoiceChanger *c, const char *key, float value) {
     if (!c || !key || !std::isfinite(value)) return 0;
     if (std::strcmp(key, "ai32") == 0) {  // 0: every 3.2 change off (here: the AI pitch's +-15 half-step limit back)
         c->tuning.aiClampMode = value != 0 ? 1.0f : 0.0f;
+        return 1;
+    }
+    if (std::strcmp(key, "hum34") == 0) {  // 0: every 3.4 change off (3.3's sound exactly); 1: the 3.4 defaults
+        const bool on = value != 0;
+        const Tuning d;
+        c->tuning.floorMode = on ? d.floorMode : 0;
+        c->tuning.voicedKeepDb = on ? d.voicedKeepDb : 0;
+        c->tuning.voicedKeepFloorDb = on ? d.voicedKeepFloorDb : 0;
+        c->tuning.singMode = on ? d.singMode : 0;
         return 1;
     }
     for (int k = 0; k < kVoiceKeyCount; ++k) {
