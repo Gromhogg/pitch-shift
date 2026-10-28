@@ -132,6 +132,10 @@ void voicestream_set_intonation(VoiceStream *stream, float intonation);
 //   "aiHissCross" 0.3 [0]: hissy frames (zero crossings per sample above this) get no tone; "aiGainCap" 1 [0]: the
 //   loudness match lifts the AI voice only as far as the mic is above the room's noise (in pauses at most "aiPauseDb" -10 dB);
 //   "aiLimit" 0.6 [0]: a peak limiter on each finished piece (5 ms look-ahead, 80 ms release).
+// 3.4 keys ("hum34" 0 turns them off: 3.3's sound exactly, with VoiceChanger's "hum34"; "ai32=0" needs it too now):
+//   "aiHumLiftDb" 24 [0]: when the sound around a piece is a steady note (a hum), the speech reader hears it lifted
+//   toward "aiHumLevelDb" -20 (dBFS, the voiced frames' mean power) by at most this much (the trained voices lose the
+//   tone of a long, quiet hum); the output still follows the mic's loudness, and speech is never steady enough.
 // Returns 1 if the key is known.
 int voicestream_tune(VoiceStream *stream, const char *key, float value);
 

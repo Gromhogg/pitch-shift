@@ -432,6 +432,7 @@ struct VoiceStream {
     uint32_t lateBits = 0, tightBits = 0;  // ... the last 10 pieces: late / ready less than 15 ms before needed
     bool rtSet = false;            // 3.2: real-time thread policy set
     float limG = 1;                // 3.2: the peak limiter's gain at the end of the last piece
+    float liftDb = 0;              // 3.4: how much louder the speech reader hears a steady note now (dB)
     bool started = false;          // the AI voice has been switched in (live: at a quiet moment)
     int64_t askedAtHop = -1;       // hop when the look-ahead asked for first differed from the one in use
     static constexpr double kSwitchWaitS = 1.2;  // a look-ahead switch waits this long for a quiet moment at most
@@ -500,6 +501,9 @@ struct VoiceStream {
     std::atomic<int> gainCap{1};        // [0] the loudness match lifts the AI voice only as far as the mic is above the noise
     std::atomic<float> pauseDb{-10};    // ... and in a pause (the mic within 3 dB of the room's noise) at most this
     std::atomic<float> limitAt{0.6f};   // [0] peak limiter on each finished piece (5 ms look-ahead, 80 ms release)
+    std::atomic<float> humLiftDb{24};   // 3.4 [0]: a steady note (a hum) is heard by the speech reader lifted toward
+    std::atomic<float> humLevelDb{-20}; // humLevelDb, by at most this much (the trained voices lose the tone of a
+                                        // long, quiet hum); speech is never steady enough, so it is not changed
     FILE *trace = nullptr;              // research: per-piece trace (offline only, PITCHSHIFT_AI_TRACE)
 
     // stats
@@ -772,6 +776,7 @@ struct VoiceStream {
         // (it would differ from one piece to the next) and the crossfade searches for the best fit, as before
         const bool atEdge = LA < kEdgeFrames;
         windowPitch(E, r, !atEdge);
+        if (humLiftDb.load() > 0) humLift(E, A, r, (int)encFrames * kFrame16);
         if (m.picks) for (int i = 0; i < DEC; i++) r.pick.i()[i] = (int32_t)(d0 - (E - T)) + i;
         // 3. NSF source for the decoded frames at the model rate (phase in double, carried across hops)
         const int64_t decStart = d0 * (int64_t)upp;
@@ -1000,6 +1005,42 @@ struct VoiceStream {
         onCPUShown.store(onCPU ? 1 : 0, std::memory_order_relaxed);
     }
 
+    // 3.4 (aiHumLiftDb, aiHumLevelDb): the trained voices lose the tone of a long, quiet hum (they waver, drop an
+    // octave or whisper), less so when it is louder. When the sound around this piece (+-0.4 s of known frames) is a
+    // steady note - at least 30 voiced frames, 80 % of them within 0.75 half-steps of their median - the speech reader
+    // hears the window lifted toward humLevelDb (the voiced frames' mean power), by at most humLiftDb, moving 2 dB per
+    // piece (and never taking the window's peak over 0.9). Only the encoder's copy changes: the output still follows
+    // the mic's loudness (step 7 reads in16), and speech, never that steady, is untouched.
+    void humLift(int64_t E, int64_t A, Runner &r, int samples) {
+        const int T = r.model->T;
+        const int a = (int)std::max<int64_t>(0, A - 40 - (E - T)), b = (int)std::min<int64_t>(T, A + H + 40 - (E - T));
+        float st[128];
+        int n = 0, span = 0;
+        double e = 0;
+        for (int t = a; t < b; t++) {
+            if (!r.known[(size_t)t]) continue;
+            span++;
+            if (r.st[(size_t)t] == 0 || n >= 128) continue;
+            st[n++] = r.st[(size_t)t];
+            e += std::pow(10.0, levelAt(E - T + t) / 10);
+        }
+        float want = 0;
+        if (n >= 30 && n * 10 >= span * 7) {
+            std::nth_element(st, st + n / 2, st + n);
+            const float mid = st[n / 2];
+            int near = 0;
+            for (int k = 0; k < n; k++) if (std::fabs(st[k] - mid) <= 0.75f) near++;
+            if (near * 10 >= n * 8)
+                want = std::clamp(humLevelDb.load() - (float)(10 * std::log10(e / n + 1e-12)), 0.0f, humLiftDb.load());
+        }
+        liftDb += std::clamp(want - liftDb, -2.0f, 2.0f);
+        if (liftDb <= 0.01f) return;
+        float peak = 0;
+        vDSP_maxmgv(r.audio16.f(), 1, &peak, (vDSP_Length)samples);
+        const float g = std::min(std::pow(10.0f, liftDb / 20), peak > 0 ? 0.9f / peak : 1e9f);
+        if (g > 1) vDSP_vsmul(r.audio16.f(), 1, &g, r.audio16.f(), 1, (vDSP_Length)samples);
+    }
+
     // 3.2: peak limiter, threshold thr: each sample's gain is the smallest any sample in the next 5 ms needs, averaged
     // over 5 ms (so it is never above what that sample needs and turns down smoothly before a peak), coming back up
     // over 80 ms. Works at the model's rate on the final block and gives the tail the gain it ended with.
@@ -1110,6 +1151,7 @@ struct VoiceStream {
         lastGain = 0;
         lastO = 0;
         limG = 1;
+        liftDb = 0;
         phaseAt = INT64_MIN;
         laNow = std::clamp(laNow, 0, maxAhead());
         onCPU = startChip.load() && m->voiceCPU;
@@ -1604,6 +1646,10 @@ int voicestream_tune(VoiceStream *stream, const char *key, float value) {
     if (k == "aiGainCap") { stream->gainCap.store(value != 0); return 1; }
     if (k == "aiPauseDb") { stream->pauseDb.store(std::clamp(value, -60.0f, 0.0f)); return 1; }
     if (k == "aiLimit") { stream->limitAt.store(std::clamp(value, 0.0f, 1.0f)); return 1; }
+    // 3.4
+    if (k == "hum34") { stream->humLiftDb.store(value != 0 ? 24 : 0); return 1; }  // 0: as 3.3 (with VoiceChanger's)
+    if (k == "aiHumLiftDb") { stream->humLiftDb.store(std::clamp(value, 0.0f, 40.0f)); return 1; }
+    if (k == "aiHumLevelDb") { stream->humLevelDb.store(std::clamp(value, -60.0f, 0.0f)); return 1; }
     return 0;
 }
 
