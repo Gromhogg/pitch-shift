@@ -1459,6 +1459,8 @@ enum Keys {
     // switch before the slider) is read once to carry over, then removed.
     static let changerOn = "changerOn", changerVoice = "changerVoice", changerStrength = "changerStrength"
     static let changerRealism = "changerRealism", changerQuality = "changerQuality"
+    // 3.5: the AI voice's second voice for hums, laughs, sighs, singing (not set: on)
+    static let changerSounds = "changerSounds"
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
@@ -1536,6 +1538,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 }
             }
             voice.changer.realism = realisticOffered ? realism : 0
+            voice.changer.second = !preview.contains("changer-second-off")  // 3.5
             if voice.changer.on { voice.halfSteps = 0; voice.slowDeeper = false }  // as it would be (nothing saved)
             return
         }
@@ -1554,6 +1557,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         // Not set yet: the slider's default (the AI voice with the least delay that speaks smoothly).
         let realism = (defaults.object(forKey: Keys.changerRealism) as? NSNumber)?.floatValue ?? ChangerSettings.defaultRealism
         voice.changer.realism = realisticOffered && realism.isFinite ? max(0, min(1, realism)) : 0
+        voice.changer.second = defaults.object(forKey: Keys.changerSounds) as? Bool ?? true  // 3.5
         // Only one at a time: saved with a pitch change too (an older version allowed both), the changer wins.
         if voice.changer.on && (voice.halfSteps != 0 || voice.slowDeeper) { clearPitchChange() }
     }
@@ -1601,6 +1605,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     let realism = GradientSlider(left: "Faster", right: "More real", name: "Faster or more real") { _ in "" }
     let delayLabel = NSTextField(labelWithString: "Delay: about 0.1 s")
     let realisticLoading = NSProgressIndicator()  // while the realistic voice is being prepared
+    // 3.5 (one place: this switch, its row in the card, Tab order, showSecond, secondPicked): the AI voice's second
+    // voice for hums, laughs, sighs and singing; talking always uses the main voice
+    let secondSwitch = GradientSwitch()
+    static let secondText = "Second voice for laughs & hums"
     let realisticWarning = NSImageView()          // it fell behind, or can't run (the tooltip says why)
     var delayRow: CardRow!
     private var realismApply: DispatchWorkItem?   // a slider move is used once the knob rests (no new chain mid-drag)
@@ -1901,6 +1909,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
         changerCard = ShiftCard(title: "Voice changer", extraRows: [strengthRow, realismRow], showsAmount: false)
         changerCard.addRow(delayRow, tight: true)
+        secondSwitch.onChange = { [weak self] on in self?.secondPicked(on) }  // 3.5
+        secondSwitch.onLockedClick = { [weak self] in self?.showUnlock() }
+        changerCard.addRow(ShiftCard.switchRow(Self.secondText, secondSwitch))
         changerCard.picker.menu?.delegate = self
         changerCard.picker.target = self
         changerCard.picker.action = #selector(changerVoicePicked)
@@ -1921,7 +1932,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let autoEQViews: [NSView] = [autoEQSwitch] + autoEQStrip.bands + [autoEQStrip.reset]
         let hearViews: [NSView] = hearCard.keyViews + [advancedSwitch, tone] + autoEQViews
         let voiceViews: [NSView] = voiceCard.keyViews + [style, testButton, slowSwitch, fastSlider, installButton, soundsButton]
-        let changerViews: [NSView] = changerCard.keyViews + [strength, realism]
+        let changerViews: [NSView] = changerCard.keyViews + [strength, realism, secondSwitch]
         let order: [NSView] = hearViews + voiceViews + changerViews
         background.nextKeyView = order[0]
         for (view, next) in zip(order, order.dropFirst() + [order[0]]) { view.nextKeyView = next }
@@ -2545,6 +2556,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         refresh()
     }
 
+    // 3.5: the second voice for hums, laughs, sighs, singing on or off
+    func secondPicked(_ on: Bool) {
+        voice.changer.second = on
+        guard preview == nil else { refresh(); return }  // pictures change nothing
+        defaults.set(on, forKey: Keys.changerSounds)
+        refresh()
+    }
+
     func strengthPicked(_ value: Float) {
         voice.changer.strength = value
         guard preview == nil else { return }  // pictures change nothing
@@ -2892,6 +2911,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
         if realismApply == nil { realism.value = realisticOffered ? voice.changer.realism : 0 }  // (not while it moves)
         realism.isEnabled = active && hasRealistic && realisticOffered
+        showSecond(active: active, locked: locked, chosen: chosen)
 
         enum Look { case natural, loading, realistic, fallback(Int), unavailable(String) }
         var look: Look
@@ -2941,5 +2961,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         realism.toolTip = note
         delayRow.toolTip = note
         realism.setAccessibilityHelp(note)
+    }
+
+    // 3.5: the second voice's switch works with the AI voice (Apple silicon, the slider past Natural) and a voice that
+    // has a second voice (Woman, Man).
+    private func showSecond(active: Bool, locked: Bool, chosen: VoiceEntry?) {
+        let has = chosen?.manifest.realistic?.sounds != nil
+        secondSwitch.locked = locked
+        secondSwitch.isOn = voice.changer.second
+        secondSwitch.isEnabled = active && has && realisticOffered && voice.changer.realistic
+        secondSwitch.toolTip = locked ? "Pitch Shift Pro"
+            : !realisticOffered ? "The more real voices need a Mac with Apple silicon"
+            : chosen != nil && !has ? "\(chosen!.name) has no second voice"
+            : !voice.changer.realistic ? "Works with the more real voices (move the slider right)"
+            : "A second AI voice for hums, laughs, sighs, breaths and singing. Talking always uses the main voice."
     }
 }

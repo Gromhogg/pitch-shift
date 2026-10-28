@@ -25,6 +25,7 @@ struct VoiceManifest: Decodable, Equatable {
         var encoder: String  // the shared encoder's .mlmodelc
         var rate: Double     // the model's sample rate
         var eqAmount: Float
+        var sounds: String?  // 3.5: the second voice's .mlmodelc (hums, laughs, sighs, singing), next to the json file
     }
     var id: String
     var name: String
@@ -46,6 +47,7 @@ final class VoiceEntry {
     var id: String { manifest.id }
     var name: String { manifest.name }
     var modelURL: URL? { manifest.realistic.map { folder.appendingPathComponent($0.model) } }
+    var soundsURL: URL? { manifest.realistic?.sounds.map { folder.appendingPathComponent($0) } }
     // The voice's own speech reader, or (for an added voice that has none) the built-in one (VoiceLibrary.sharedEncoder).
     var encoderURL: URL? {
         guard let realistic = manifest.realistic else { return nil }
@@ -104,6 +106,14 @@ final class VoiceLibrary {
         let candidates = [(name as NSString).lastPathComponent, "contentvec_ahead.mlmodelc", "contentvec.mlmodelc"]
         return candidates.map { shared.appendingPathComponent($0) }.first { fm.fileExists(atPath: $0.path) }
             ?? shared.appendingPathComponent("contentvec_ahead.mlmodelc")
+    }
+    // 3.5: the sound sorter the second voices use (YAMNet; one file for every voice): next to the voice's json file,
+    // else built in.
+    static let sorterName = "sound_sorter.mlmodelc"
+    static func sorterURL(for entry: VoiceEntry) -> URL? {
+        let own = entry.folder.appendingPathComponent(sorterName)
+        if FileManager.default.fileExists(atPath: own.path) { return own }
+        return builtInFolder?.appendingPathComponent(sorterName)
     }
     static var userFolder: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]

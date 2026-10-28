@@ -97,6 +97,7 @@ struct ChangerSettings: Equatable {
     static let maxLookaheadMs = 700
     static let defaultRealism: Float = 0.25  // the AI voice with 150 ms of look-ahead: the least delay without stutters
     var on = false
+    var second = true  // 3.5: the AI voice's second voice for hums, laughs, sighs, singing (when the voice has one)
     var voiceID = "woman"
     var strength: Float = 1
     var realism: Float = 0
@@ -940,7 +941,7 @@ final class VoiceChain {
     // median pitch as an earlier chain measured it (so a new chain doesn't start from a guess).
     init(mic: AudioDeviceID, feed: AudioDeviceID, params: OSAllocatedUnfairLock<VoiceParams>, sounds: OSAllocatedUnfairLock<SoundPlay>,
          bufferFrames: UInt32? = nil, testSource: ((UnsafeMutablePointer<Float>, Int) -> Void)? = nil,
-         changerTune: [(String, Float)] = [], realistic: (id: String, model: OpaquePointer?, lookaheadMs: Int)? = nil,
+         changerTune: [(String, Float)] = [], realistic: (id: String, model: OpaquePointer?, lookaheadMs: Int, second: Bool)? = nil,
          speaker: (hz: Float, frames: Float)? = nil) throws {
         realisticID = realistic?.id
         self.testSource = testSource  // set before the sound starts, so a test never sends the real mic
@@ -1019,6 +1020,7 @@ final class VoiceChain {
             ai = voicestream_new(realistic.model, rate, Int32(max(callback, 1)), 0, &config)
             if let ai {
                 voicestream_set_intonation(ai, Self.aiIntonation(start))
+                voicestream_set_second(ai, realistic.second ? 1 : 0)
                 for (key, value) in changerTune { _ = voicestream_tune(ai, key, value) }
             }
         }
@@ -1257,6 +1259,11 @@ final class VoiceChain {
     // playing and moves to the new delay at the next quiet moment (main thread).
     func setLookahead(_ ms: Int) {
         if let ai { voicestream_set_lookahead(ai, Int32(ms)) }
+    }
+
+    // 3.5: the second voice on or off, without making the chain again (main thread; from the next piece).
+    func setSecond(_ on: Bool) {
+        if let ai { voicestream_set_second(ai, on ? 1 : 0) }
     }
 
     // The intonation the AI voice's pitch frames come with (the changer makes the speaker's moves this much bigger).
@@ -1573,7 +1580,10 @@ final class VoiceShifter {
     private func updateRealistic() {
         let want = realisticWanted
         if let want { models.want(want) }
-        if let chain, want != nil, chain.realisticID == want?.id { chain.setLookahead(changer.lookaheadMs) }  // no new chain
+        if let chain, want != nil, chain.realisticID == want?.id {  // no new chain
+            chain.setLookahead(changer.lookaheadMs)
+            chain.setSecond(changer.second)
+        }
         if running, let chain, chain.realisticID != want?.id {
             DispatchQueue.main.async { [weak self] in  // not from inside pushParams
                 guard let self, let current = self.chain, current.realisticID != self.realisticWanted?.id else { return }
@@ -1669,7 +1679,8 @@ final class VoiceShifter {
             stopLater = nil
             if chain == nil {
                 do {
-                    let ai = realisticWanted.map { (id: $0.id, model: models.model(for: $0.id), lookaheadMs: changer.lookaheadMs) }
+                    let ai = realisticWanted.map { (id: $0.id, model: models.model(for: $0.id), lookaheadMs: changer.lookaheadMs,
+                                                    second: changer.second) }
                     let made = try VoiceChain(mic: mic, feed: feed, params: params, sounds: sounds,
                                               bufferFrames: testBufferFrames, testSource: testSource, changerTune: changerTune,
                                               realistic: ai, speaker: lastSpeaker)
