@@ -223,6 +223,9 @@ func renderRealisticFile(input: String, natural: [Float], rate: Double, output: 
     voicestream_get_stats(stream, &stats)
     print(String(format: "AI voice: %lld pieces in %.1f s (%.1f ms each on average, %.1f ms worst), fixed delay %.0f ms (taken out of the file)",
                  stats.hops, Date().timeIntervalSince(started), stats.averageHopMs, stats.worstHopMs, Double(latency) / rate * 1000))
+    var sounds: Int64 = 0, whistles: Int64 = 0, passed = 0.0
+    voicestream_get_passed(stream, &sounds, &whistles, &passed)
+    print(String(format: "Other sounds heard as they are (3.4): %lld short sounds, %lld whistles, %.2f s", sounds, whistles, passed))
     let aligned = Array(result[min(latency, result.count)..<min(latency + length, result.count)])
     guard let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1),
           let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(max(1, aligned.count))) else {

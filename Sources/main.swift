@@ -36,7 +36,9 @@
 //                                              with the voice changer (the amount, style and --slow-deeper are then
 //                                              ignored: only one at a time;
 //                                              --changer-stats prints what it does once per second of sound;
-//                                              --changer-tune ai32=0: the AI voice exactly as in 3.1.1, see VoiceModel.h)
+//                                              --changer-tune ai32=0: the AI voice exactly as in 3.1.1, see VoiceModel.h;
+//                                              aiSounds=0: claps, clicks and whistles changed by the AI too, as
+//                                              before 3.4)
 //                [--live-sim [--buffer 128]]   instead: the live chain's steps in callback-sized pieces (with the
 //                                              waiting sound), printing the delay they add (no devices)
 //   --list-voices [--voices-dir DIR]           the voice changer's voices (and files that were skipped)
@@ -261,7 +263,10 @@ let changerArg: ChangerOptions? = {
                       "aiHumLiftDb", "aiHumLevelDb"]  // Realistic mode's test keys (voicestream_tune)
         let unknown = changerTuneArg.filter { voicechanger_tune(probe, $0.0, $0.1) == 0 && !aiKeys.contains($0.0) && !isVoiceShifterTuneKey($0.0) }.map(\.0)
         voicechanger_delete(probe)
-        if !unknown.isEmpty { print("--changer-tune: unknown keys \(unknown.joined(separator: ", "))"); exit(1) }
+        let gate = soundgate_new(48000)  // 3.4: "aiSounds" and SoundGate's "sg..." keys
+        let stillUnknown = unknown.filter { key in key != "aiSounds" && soundgate_tune(gate, key, changerTuneArg.first { $0.0 == key }?.1 ?? 0) == 0 }
+        soundgate_delete(gate)
+        if !stillUnknown.isEmpty { print("--changer-tune: unknown keys \(stillUnknown.joined(separator: ", "))"); exit(1) }
     }
     let strength = arg("--strength").flatMap(Float.init).map { max(0, min(1, $0)) } ?? 1
     return ChangerOptions(voice: natural, strength: strength, tune: changerTuneArg, stats: args.contains("--changer-stats"))
