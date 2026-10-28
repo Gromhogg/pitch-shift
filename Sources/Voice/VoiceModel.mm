@@ -46,6 +46,7 @@
 //   metadata: rate, upp, window_frames (T), dec_frames, flow_frames, hop_ms, context_ms (+ xfade_ms, sola_ms,
 //   margin_ms on newer files; + right_ms, max_ahead_ms, pick_frames in the look-ahead shape).
 #include "VoiceModel.h"
+#include "SoundGate.h"
 
 #include <cstdio>
 #include <cstring>
@@ -501,6 +502,11 @@ struct VoiceStream {
     std::atomic<float> pauseDb{-10};    // ... and in a pause (the mic within 3 dB of the room's noise) at most this
     std::atomic<float> limitAt{0.6f};   // [0] peak limiter on each finished piece (5 ms look-ahead, 80 ms release)
     FILE *trace = nullptr;              // research: per-piece trace (offline only, PITCHSHIFT_AI_TRACE)
+    // 3.4: sounds that are not a voice (claps, clicks, whistles) are heard as the original mic sound (SoundGate.h)
+    SoundGate *gate = nullptr;
+    std::atomic<int> gateOn{1};         // "aiSounds" 1 [0: the AI voice for every sound, as before 3.4]
+    std::vector<float> gateW;           // sound thread: the gate's weights for one callback
+    int gateFit = -1;                   // ... and the delay it was fitted to (samples)
 
     // stats
     std::atomic<int> loaded{0};
@@ -1187,6 +1193,7 @@ struct VoiceStream {
         int64_t end = inEnd.load(std::memory_order_relaxed);
         if (mic) in.put(end, mic, frames);
         else for (int i = 0; i < frames; i++) in.buf[(size_t)((end + i) & in.mask)] = 0;
+        if (gate && gateOn.load(std::memory_order_relaxed)) soundgate_push(gate, mic, frames);
         int64_t pe = pitchEnd.load(std::memory_order_relaxed);
         for (int k = 0; k < n && f0Hz && f0Pos; k++) {
             pitchPos[(size_t)(pe % kPitchSlots)] = f0Pos[k];
@@ -1199,6 +1206,29 @@ struct VoiceStream {
             @autoreleasepool { work(); }
         } else if (end + frames >= wakeAt.load(std::memory_order_acquire)) {
             dispatch_semaphore_signal(wake);
+        }
+    }
+
+    // 3.4: where the gate says so, the original mic sound (lined up with what plays: playLatency behind) replaces
+    // the AI voice (or Natural's fill-in), crossfaded by the gate's weights.
+    void passSounds(int64_t P, float *outBuf, int frames) {
+        if (playLatency != gateFit) {  // (the look-ahead it can use is the delay less one callback)
+            gateFit = playLatency;
+            soundgate_fit(gate, playLatency - maxFrames);
+        }
+        const int64_t t0 = P - playLatency;
+        for (int done = 0; done < frames;) {
+            const int n = std::min(frames - done, (int)gateW.size());
+            if (soundgate_weights(gate, t0 + done, n, gateW.data())) {
+                for (int i = 0; i < n; i++) {
+                    const float w = gateW[(size_t)i];
+                    if (w <= 0) continue;
+                    const int64_t m = t0 + done + i;
+                    const float dry = m >= 0 ? in.at(m) : 0.0f;
+                    outBuf[done + i] += w * (dry - outBuf[done + i]);
+                }
+            }
+            done += n;
         }
     }
 
@@ -1279,6 +1309,7 @@ struct VoiceStream {
             outBuf[i] = mix * ai + (1 - mix) * nat;
             if (std::fabs(outBuf[i]) > 0.7f) loud++;
         }
+        if (gate && gateOn.load(std::memory_order_relaxed)) passSounds(P, outBuf, frames);
         if (loud) loudSamples.fetch_add(loud, std::memory_order_relaxed);
         samplesOut.fetch_add(frames, std::memory_order_relaxed);
         if (mix >= 1) playing = true;
@@ -1484,6 +1515,9 @@ VoiceStream *voicestream_new(VoiceModel *model, double chainRate, int maxFrames,
         if (const char *path = getenv("PITCHSHIFT_AI_TRACE")) s->trace = std::fopen(path, "w");
     }
     s->in16.init((int64_t)kRate16 * 8);
+    s->gate = soundgate_new(chainRate);
+    s->gateW.assign(256, 0.0f);
+    if (s->gate) { s->gateFit = s->playLatency; soundgate_fit(s->gate, s->playLatency - maxFrames); }
     s->pitchPos.assign(kPitchSlots, 0);
     s->pitchHz.assign(kPitchSlots, 0.0f);
     s->scratch.assign(8192, 0.0f);
@@ -1524,6 +1558,7 @@ void voicestream_delete(VoiceStream *stream) {
         pthread_join(stream->thread, nullptr);
     }
     if (stream->trace) std::fclose(stream->trace);
+    soundgate_delete(stream->gate);
     delete stream->run;
     delete stream;
 }
@@ -1561,6 +1596,9 @@ void voicestream_pull(VoiceStream *stream, const float *naturalNow, int naturalD
 int voicestream_tune(VoiceStream *stream, const char *key, float value) {
     if (!stream || !key) return 0;
     std::string k(key);
+    // 3.4: other sounds heard as they are (SoundGate)
+    if (k == "aiSounds") { stream->gateOn.store(value != 0); return 1; }
+    if (k.rfind("sg", 0) == 0) return soundgate_tune(stream->gate, key, value);
     if (k == "aiSlowMs") { stream->slowMs.store((int)value); return 1; }
     if (k == "aiSlowEvery") { stream->slowEvery.store(std::max(1, (int)value)); return 1; }
     if (k == "aiSlowChip") { stream->slowChip.store(value != 0); return 1; }
@@ -1584,6 +1622,7 @@ int voicestream_tune(VoiceStream *stream, const char *key, float value) {
         stream->solaMode.store(-1); stream->nearMs.store(1.5f); stream->bridgeStrict.store(on);
         stream->gapFrames.store(on ? 5 : 8); stream->shortRunMs.store(on ? 40 : 0); stream->hissCross.store(on ? 0.3f : 0);
         stream->gainCap.store(on); stream->gainMs.store(on ? 120 : 50); stream->limitAt.store(on ? 0.6f : 0);
+        stream->gateOn.store(on);  // (3.4's pass-through of other sounds too, so that 0 is 3.1.1's sound exactly)
         stream->resplit();
         return 1;
     }
@@ -1605,6 +1644,14 @@ int voicestream_tune(VoiceStream *stream, const char *key, float value) {
     if (k == "aiPauseDb") { stream->pauseDb.store(std::clamp(value, -60.0f, 0.0f)); return 1; }
     if (k == "aiLimit") { stream->limitAt.store(std::clamp(value, 0.0f, 1.0f)); return 1; }
     return 0;
+}
+
+void voicestream_get_passed(const VoiceStream *stream, int64_t *sounds, int64_t *whistles, double *seconds) {
+    SoundGateStats st{};
+    if (stream && stream->gate) soundgate_get_stats(stream->gate, &st);
+    if (sounds) *sounds = st.taps;
+    if (whistles) *whistles = st.whistles;
+    if (seconds) *seconds = st.passedSeconds;
 }
 
 void voicestream_get_stats(const VoiceStream *stream, VoiceStreamStats *out) {
@@ -1662,6 +1709,12 @@ int voicestream_tune(VoiceStream *, const char *, float) { return 0; }
 
 void voicestream_get_stats(const VoiceStream *, VoiceStreamStats *out) {
     if (out) std::memset(out, 0, sizeof(*out));
+}
+
+void voicestream_get_passed(const VoiceStream *, int64_t *sounds, int64_t *whistles, double *seconds) {
+    if (sounds) *sounds = 0;
+    if (whistles) *whistles = 0;
+    if (seconds) *seconds = 0;
 }
 
 }  // extern "C"

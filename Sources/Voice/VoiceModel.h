@@ -3,7 +3,8 @@
 // using Natural mode.
 //   sound thread: voicestream_push (copies the mic + the pitch from voicechanger_analyse) and voicestream_pull (takes
 //   the finished AI voice, a fixed delay later; while loading, on a late piece or an error it plays Natural mode's
-//   sound delayed to the same fixed delay instead, crossfaded; never the raw mic). A new stream plays at its fixed
+//   sound delayed to the same fixed delay instead, crossfaded; never the raw mic, except (3.4) for sounds that are
+//   not a voice: claps, clicks, knocks, keys, whistles, which SoundGate.h lets through as they are). A new stream plays at its fixed
 //   delay from the start: silence until Natural's sound reaches it, then the AI voice from its first piece.
 //   worker thread (made by voicestream_new): resample, encoder, generator, crossfade into the output ring.
 //
@@ -148,6 +149,12 @@ void voicestream_push(VoiceStream *stream, const float *mic, int frames, const f
 void voicestream_pull(VoiceStream *stream, const float *naturalNow, int naturalDelay, float *out, int frames);
 
 void voicestream_get_stats(const VoiceStream *stream, VoiceStreamStats *out);
+
+// 3.4: sounds that are not a voice (claps, finger snaps, knocks, taps, keys, mouse clicks, whistles) are heard as the
+// original mic sound at the same delay instead of the AI voice's version of them (SoundGate.h). voicestream_tune keys:
+// "aiSounds" 1 [0 = off, the AI voice for every sound; "ai32=0" turns it off too], "sg..." (how it decides,
+// SoundGate.cpp). This says what was heard as the original so far: short sounds, whistles, and for how long.
+void voicestream_get_passed(const VoiceStream *stream, int64_t *sounds, int64_t *whistles, double *seconds);
 
 #ifdef __cplusplus
 }
