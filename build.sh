@@ -53,11 +53,11 @@ for arch in arm64 x86_64; do
     clang++ -arch $arch -mmacosx-version-min=14.4 -O2 -std=c++17 -fobjc-arc -Ibuild/libs/src/libsamplerate-0.2.2/include \
       -c "$f" -o "$obj/${f:t:r}.o"
   done
-  # Rubber Band is built into the app, so the app works on its own.
+  # Rubber Band is built into the app, so the app works on its own. -dead_strip leaves out the code nothing calls.
   swiftc -target $arch-apple-macos14.4 -O -swift-version 5 $swift_sources $obj/*.o -o $obj/PitchShift \
     -import-objc-header Sources/Bridging.h -Ibuild/libs/include \
     -Xlinker build/libs/lib/librubberband.a -Xlinker build/libs/lib/libsamplerate.a -lc++ -framework Accelerate \
-    -framework CoreML
+    -framework CoreML -Xlinker -dead_strip
 done
 lipo -create build/obj/arm64/PitchShift build/obj/x86_64/PitchShift -output "$app/Contents/MacOS/PitchShift"
 rm -f build/obj/ProConfig.swift  # the filled-in copy (public key and older keys' fingerprints)
