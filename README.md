@@ -42,29 +42,30 @@ More help: [windows/README.md](windows/README.md).
 
 ## How to use it
 
-**What you hear**
+**Output pitch shifter** (what you hear)
 
 - Pick an app, or **All sound**.
-- Click the big number to type an exact amount, like `2.5` or `-1.25`. 12 is one octave. Or use **−**, **0** and **+**.
+- Click the big number to type an exact amount, like `2.5` or `-1.25`. 12 is one octave. Or use **−**, **0** and **+**. You can set it while the card is off too (Mac); it's used when you turn the card on.
 - Turn on **Advanced processing** for music at bigger amounts: going up, the bass stays deep; going down, the top stays bright. A new amount takes a moment longer to kick in.
 - With Advanced processing on, slide from **Bass** to **Treble** to suit your headphones (Mac). Pitch Shift remembers it for each pair of headphones or speakers.
 - Turn on **Auto EQ** (Mac, with Advanced processing on) to keep the deep bass, mids and highs balanced like the original song. Its five small sliders move by themselves; drag one to nudge it, and double-click it or press **Auto** to go back. It's remembered for each pair of headphones or speakers too.
 
-**Your voice**
+**Input pitch shifter** (your voice)
 
 - Pick your mic, turn it on, and slide from **Natural** (sounds like a different person) to **Cartoon** (chipmunk or monster). On Windows, choose Natural or Cartoon.
+- Set how much higher or lower with the big number or **−**, **0** and **+**, the same way (also while the card is off, on Mac).
 - Turn on **Deeper when slow** and your voice goes lower while you talk slowly, then back when you talk normally (Mac).
 - With it on, **Higher when fast** makes your voice go higher while you talk fast: the slider sets how much, from **Off** to **+8** half-steps (starts at +4).
 - In Discord, Zoom or any other app, choose **Pitch Shift Mic** as your microphone.
 - Press **Test** to record 5 seconds of your shifted voice and hear it back. With the AI voice changer on, Test waits for the AI voice's delay before it stops, so you hear all 5 seconds in the AI voice.
 - Press **Sounds** for the Soundboard (Mac): add sound files with **+**, then click one to play it into your call. You hear it too; on your Mac's own speakers your voice is muted while it plays, so it can't echo.
 - Drag sound files onto the Soundboard to add them. Right-click a sound to rename it, change its volume or remove it.
-- The Soundboard works with **Your voice** off too: your mic then goes into the call unchanged.
+- The Soundboard works with **Input pitch shifter** off too: your mic then goes into the call unchanged.
 - Use headphones in calls. If your voice cuts out, turn off the call app's noise suppression (like Krisp).
 
 **Voice changer** (Mac)
 
-- Turn it on and pick **Woman** (for a man's voice) or **Man** (for a woman's voice). It turns on **Your voice** too.
+- Turn it on and pick **Woman** (for a man's voice) or **Man** (for a woman's voice). It turns on **Input pitch shifter** too.
 - Slide from **Light** to **Full** to choose how strong the change is.
 - Slide **Faster ↔ More real** to choose between speed and realism. All the way to **Faster** is the plain voice changer, with almost no delay. Anywhere to the right, an AI voice says your words again in the new voice, so it sounds like a real person (Macs with Apple silicon). The further right, the more of what you say next it hears before it speaks, so words come out clearer and steadier, but your voice reaches the call later: the card shows the delay ("Delay: about 0.46 s"), up to about one second all the way right. It starts a quarter of the way along: the least delay that speaks smoothly. The first time, the AI voice takes up to a minute to get ready; the plain voice changer plays meanwhile. Whenever the plain voice changer stands in for the AI voice, the card says **backup voice** next to the delay. With the AI voice, the **Light**…**Full** slider moves only the pitch, from **Your pitch** to the voice's. Moving the slider changes the delay at your next short pause (so nothing is cut or repeated), or within 1.5 seconds if you don't pause. Claps, finger snaps, knocks, clicks and whistles come through as they really sound instead of being turned into a voice; everything your voice makes (words, laughs, coughs, breaths) stays the AI voice.
 - Holding a note ("aaah") keeps its pitch steady in both the plain and the AI voice changer.
@@ -77,7 +78,7 @@ All of them can be on at the same time. Closing the window keeps Pitch Shift run
 
 **Pitch Shift Pro ($5, Mac)**
 
-- Free: **What you hear** with Advanced processing, and **Your voice** in the Cartoon style, with **Test**.
+- Free: **Output pitch shifter** with Advanced processing, and **Input pitch shifter** in the Cartoon style, with **Test**.
 - Pro adds the **Voice changer** (with your own voices), the **Natural ↔ Cartoon** and **Bass ↔ Treble** sliders, **Auto EQ**, **Deeper when slow** (with **Higher when fast**) and the **Soundboard**. They show a small lock until you unlock them.
 - To get a key, click **Unlock Pro** at the top right, then **Email for a key** (or email cbsweetland@gmail.com). Copy the whole key from the email you get back (it's long, 4 lines; spaces and line breaks don't matter), paste it in and click **Unlock**. It works on all your Macs, for good, with no internet needed. Keys sent out before (25 characters) keep working.
 
@@ -124,9 +125,9 @@ Pitch Shift Pro: the app's side is `Sources/Pro.swift` and `Sources/ProConfig.sw
 
 ## How it works
 
-- **What you hear:** a macOS audio tap grabs the app's sound and mutes the original. [Rubber Band](https://breakfastquay.com/rubberband/) changes the pitch, and the result plays on your current speakers or headphones. It never changes your Mac's sound settings.
+- **Output pitch shifter:** a macOS audio tap grabs the app's sound and mutes the original. [Rubber Band](https://breakfastquay.com/rubberband/) changes the pitch, and the result plays on your current speakers or headphones. It never changes your Mac's sound settings.
 - **Advanced processing:** going up, the bass is shifted an octave less so it stays bass; going down, the song's very top is kept; and a slow tone control keeps the song's overall balance like the original's. Details: [notes/advanced-processing-research.md](notes/advanced-processing-research.md).
-- **Your voice:** your mic goes through Rubber Band's low-delay shifter (from 6 half-steps up or down: Pitch Shift's own pulse shifter, which moves each pulse of your voice whole, so big shifts don't buzz) into "Pitch Shift Mic", a virtual mic built from [BlackHole](https://github.com/ExistentialAudio/BlackHole) that comes with Pitch Shift (you don't need to install BlackHole). It only runs while an app is listening to Pitch Shift Mic.
+- **Input pitch shifter:** your mic goes through Rubber Band's low-delay shifter (from 6 half-steps up or down: Pitch Shift's own pulse shifter, which moves each pulse of your voice whole, so big shifts don't buzz) into "Pitch Shift Mic", a virtual mic built from [BlackHole](https://github.com/ExistentialAudio/BlackHole) that comes with Pitch Shift (you don't need to install BlackHole). It only runs while an app is listening to Pitch Shift Mic.
 - **Soundboard:** sounds are added to Pitch Shift Mic after your voice, at their normal pitch and an even loudness (very loud, squashed sounds are turned down to match the others); each sound also has its own volume (0–150%). While a sound plays, voice and sound are kept under −3 dBFS, so call apps don't get them clipped. On your Mac's own speakers, your mic is muted while a sound plays, so the call never hears it twice.
 - **Voice changer:** Pitch Shift follows the pitch of your voice and moves it to a typical woman's or man's pitch (about 235 or 112 Hz, keeping your ups and downs, a bit bigger for Woman), and Pitch Shift's pulse shifter makes the change, moving each pulse of your voice whole (so the big move doesn't buzz) and changing the shape of the voice (its formants) the way a smaller or larger throat would. A light tone control then moves the sound toward the average woman's or man's voice. It adds no delay. It learns your usual pitch while you talk, but not while you hold a note, so a held note stays where you sing it.
 - **Realistic voice changer:** an AI voice model (RVC v2 with the ContentVec speech reader) says your words again in the new voice. It runs on your Mac with Core ML (nothing goes online), only on Apple silicon. It works in pieces of 0.16 s and waits about 0.28 s to have enough of your voice to work with, plus up to 0.7 s more to hear what comes next (the **Faster ↔ More real** slider): with that, each piece is made knowing the sound after it, so the pieces join smoothly instead of stuttering, and it follows your pitch smoothly (holding a note stays steady). Toward the right end, part of that time is kept in hand instead (up to about 0.37 s), so a busy moment on your Mac doesn't make it fall behind; if pieces still come late because a game is using the graphics chip, it moves the voice model to the main processor by itself. If it ever falls behind, the plain voice changer fills in, so the call never hears silence or your own voice. Short sounds that are not a voice (claps, snaps, knocks, clicks) and whistles are passed through as the mic heard them, at the same delay: while it waits it checks that they die away like a click and that nothing else sounds within 0.3 s of them (a clap while you talk stays the AI voice); when in doubt it keeps the AI voice. Since 3.5 each voice has a second AI voice for hums, laughs, sighs, breaths and singing: a small sound sorter (YAMNet, with one extra layer trained for this) listens to the same second of sound and picks, piece by piece, the main voice for speech and anything unsure and the second voice for those sounds; it switches only after two pieces in a row and blends the two voices over the switching piece. It puts no tone on hiss or room noise, doesn't turn the room's noise up in pauses, and keeps its loudest moments under the level where sound starts to bend. The voices were trained on recordings of 8 speakers each from a public speech collection (VCTK; Woman's are all American), as one voice, so they are not copies of a real person. Voices you add work the same way; ones made before Pitch Shift 3.1 play without the look-ahead (convert them again for it). Details: [notes/voice-changer-plan.md](notes/voice-changer-plan.md).

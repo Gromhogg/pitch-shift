@@ -1,7 +1,7 @@
-// The window: three cards ("What you hear", "Your voice" and "Voice changer"), each with an on/off switch and a
-// picker; the first two also have a big number you can click and type into, and − 0 + buttons. No extra text. The
-// window can be resized: the cards sit in a row, in two columns, or one above the other, and everything grows with
-// the window.
+// The window: three cards ("Output pitch shifter" for what you hear, "Input pitch shifter" for your voice, and "Voice
+// changer"), each with an on/off switch and a picker; the first two also have a big number you can click and type
+// into, and − 0 + buttons (they work while the card is off too). No extra text. The window can be resized: the cards
+// sit in a row, in two columns, or one above the other, and everything grows with the window.
 import AppKit
 import AVFoundation
 import CoreAudio
@@ -53,8 +53,9 @@ extension NSControl {
     }
 }
 
-// An on/off switch in the icon's colors (the standard switch can't be recolored). The knob slides, and stretches
-// a little while pressed, like the standard switch.
+// An on/off switch in the icon's colors (the standard switch can't be recolored). It never changes size: the knob
+// slides across with an ease while the colors fade in or out (with Reduce Motion they only fade). It's made of layers,
+// so it keeps moving smoothly while the app is busy turning something on.
 final class GradientSwitch: NSView {
     var onChange: (Bool) -> Void = { _ in }
     var onEnabled: (Bool) -> Void = { _ in }  // when it starts or stops looking usable (for its label)
@@ -89,12 +90,7 @@ final class GradientSwitch: NSView {
         didSet {
             guard oldValue != isOn else { return }
             setAccessibilityValue(isOn ? 1 : 0)
-            let target: CGFloat = isOn ? 1 : 0
-            if isShowing && !Theme.reduceMotion {
-                Theme.animate(0.18) { animator().knob = target }
-            } else {
-                knob = target
-            }
+            slide(animated: isShowing)
         }
     }
     var size = NSSize(width: 38, height: 22) {
@@ -102,56 +98,136 @@ final class GradientSwitch: NSView {
             guard oldValue != size else { return }
             invalidateIntrinsicContentSize()
             noteFocusRingMaskChanged()
-            needsDisplay = true
+            needsLayout = true
         }
     }
-    @objc dynamic var knob: CGFloat = 0 { didSet { needsDisplay = true } }  // 0 = off (left), 1 = on (right)
     private var pressed = false { didSet { needsDisplay = true } }
+    private let trackLayer = CALayer()
+    private let colors = CALayer()       // holds the icon's colors (dims them while the switch can't be used)
+    private let fill = CAGradientLayer()  // the icon's colors, shown while on
+    private let knob = CALayer()
+    private var placed: NSRect?           // the track the layers were last laid out for
 
     init() {
         super.init(frame: NSRect(x: 0, y: 0, width: 38, height: 22))
+        wantsLayer = true
+        layerContentsRedrawPolicy = .onSetNeedsDisplay
         setAccessibilityElement(true)
         setAccessibilityRole(.checkBox)
         setAccessibilitySubrole(.switch)
         setAccessibilityValue(0)
         setContentHuggingPriority(.required, for: .horizontal)
+        fill.colors = [Theme.purple.cgColor, Theme.pink.cgColor]
+        fill.startPoint = CGPoint(x: 0, y: 0.5)
+        fill.endPoint = CGPoint(x: 1, y: 0.5)
+        fill.opacity = 0
+        colors.addSublayer(fill)
+        knob.shadowColor = NSColor.black.cgColor
+        knob.shadowOpacity = 0.3
+        knob.shadowRadius = 1
+        knob.shadowOffset = CGSize(width: 0, height: -1)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    override class func defaultAnimation(forKey key: NSAnimatablePropertyKey) -> Any? {
-        key == "knob" ? CABasicAnimation() : super.defaultAnimation(forKey: key)
-    }
-
     override var intrinsicContentSize: NSSize { size }
+    override var wantsUpdateLayer: Bool { true }
 
     private var track: NSRect {
         NSRect(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2, width: size.width, height: size.height).insetBy(dx: 1, dy: 1)
     }
 
-    override func draw(_ dirtyRect: NSRect) {
-        let alpha: CGFloat = looksEnabled && !locked ? 1 : 0.4
+    // Where the knob's middle is, off (left) or on (right).
+    private func knobCenter(_ on: Bool) -> CGPoint {
+        let track = self.track, width = track.height - 4
+        return CGPoint(x: track.minX + 2 + width / 2 + (on ? track.width - width - 4 : 0), y: track.midY)
+    }
+
+    private func quietly(_ changes: () -> Void) {
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        changes()
+        CATransaction.commit()
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        guard let layer else { return }
         let track = self.track
-        let shape = NSBezierPath(roundedRect: track, xRadius: track.height / 2, yRadius: track.height / 2)
-        NSColor.quaternaryLabelColor.withAlphaComponent(0.25 * alpha + 0.1).setFill()
-        shape.fill()
-        if knob > 0 {
-            NSGraphicsContext.current?.cgContext.setAlpha(knob * alpha)
-            Theme.gradient.draw(in: shape, angle: 0)
-            NSGraphicsContext.current?.cgContext.setAlpha(1)
+        guard track != placed else { return }  // (a knob on its way keeps going)
+        placed = track
+        quietly {
+            if knob.superlayer == nil { [trackLayer, colors, knob].forEach(layer.addSublayer) }
+            let round = track.height / 2
+            trackLayer.frame = track
+            trackLayer.cornerRadius = round
+            colors.frame = track
+            fill.frame = colors.bounds
+            fill.cornerRadius = round
+            let width = track.height - 4
+            knob.bounds = CGRect(x: 0, y: 0, width: width, height: width)
+            knob.cornerRadius = width / 2
+            knob.shadowPath = CGPath(ellipseIn: knob.bounds, transform: nil)
+            knob.removeAllAnimations()
+            fill.removeAllAnimations()
+            knob.position = knobCenter(isOn)
+            fill.opacity = isOn ? 1 : 0
         }
-        let height = track.height - 4
-        let width = height * (pressed ? 1.25 : 1)
-        let circle = NSRect(x: track.minX + 2 + knob * (track.width - width - 4), y: track.minY + 2, width: width, height: height)
-        NSGraphicsContext.saveGraphicsState()
-        let shadow = NSShadow()
-        shadow.shadowColor = NSColor.black.withAlphaComponent(0.3)
-        shadow.shadowBlurRadius = 2
-        shadow.shadowOffset = NSSize(width: 0, height: -1)
-        shadow.set()
-        NSColor.white.withAlphaComponent(isEnabled && !locked ? 1 : 0.7).setFill()
-        NSBezierPath(roundedRect: circle, xRadius: height / 2, yRadius: height / 2).fill()
-        NSGraphicsContext.restoreGraphicsState()
+    }
+
+    // The colors for light or dark mode, and how usable it looks. Pressed, the knob turns a little grey.
+    override func updateLayer() {
+        let usable = looksEnabled && !locked
+        CATransaction.begin()
+        if isShowing { CATransaction.setAnimationDuration(0.12) } else { CATransaction.setDisableActions(true) }
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            trackLayer.backgroundColor = NSColor.quaternaryLabelColor.withAlphaComponent(usable ? 0.35 : 0.2).cgColor
+        }
+        colors.opacity = usable ? 1 : 0.4
+        knob.backgroundColor = NSColor(white: pressed ? 0.88 : 1, alpha: isEnabled && !locked ? 1 : 0.7).cgColor
+        CATransaction.commit()
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+
+    // Moves the knob and the colors to the switch's state, from wherever they are now: a second click while it's
+    // moving turns it around smoothly, and it always ends fully on or off.
+    private func slide(animated: Bool) {
+        let target = knobCenter(isOn)
+        let opacity: Float = isOn ? 1 : 0
+        let fromPosition = knob.presentation()?.position ?? knob.position
+        let fromOpacity = fill.presentation()?.opacity ?? fill.opacity
+        let smooth = animated && !Theme.reduceMotion
+        if animated && !smooth { Theme.crossfade(self, 0.2) }
+        quietly {
+            knob.removeAllAnimations()
+            fill.removeAllAnimations()
+            knob.position = target
+            fill.opacity = opacity
+        }
+        let travel = knobCenter(true).x - knobCenter(false).x
+        guard smooth, travel > 0 else { return }
+        // The whole way takes 0.2 s; turning around partway takes less.
+        let duration = 0.2 * Double(max(0.4, min(1, abs(target.x - fromPosition.x) / travel)))
+        let move = CABasicAnimation(keyPath: "position")
+        move.fromValue = NSValue(point: fromPosition)
+        move.toValue = NSValue(point: target)
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = fromOpacity
+        fade.toValue = opacity
+        for (part, animation) in [(knob, move), (fill as CALayer, fade)] {
+            animation.duration = duration
+            animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            part.add(animation, forKey: "slide")
+        }
     }
 
     // Reachable with Tab when "Keyboard navigation" is on in the Mac's settings; Space switches it.
@@ -188,6 +264,7 @@ final class GradientSwitch: NSView {
     private func flip() {
         guard isEnabled, !locked else { return }
         isOn.toggle()
+        CATransaction.flush()  // starts the slide now, before whatever the switch turns on keeps the app busy
         onChange(isOn)
     }
 }
@@ -1095,6 +1172,7 @@ final class CardPicker: NSPopUpButton {
 // `showsAmount: false` (the Voice changer) has no big number and no − 0 +.
 final class ShiftCard: NSView {
     static let baseWidth: CGFloat = 266  // card width in the smallest window
+    static let offStrength: CGFloat = 0.65  // how strong the number looks while the card is off
     let toggle = GradientSwitch()
     let amount = AmountField()
     let minus = NSButton()
@@ -1171,7 +1249,7 @@ final class ShiftCard: NSView {
         header.distribution = .equalSpacing
         toggle.setAccessibilityLabel(text)
         toggle.onChange = { [weak self] in self?.onToggle($0) }
-        amount.setAccessibilityLabel("\(text) pitch")
+        amount.setAccessibilityLabel("\(text) amount")
         amount.onCommit = { [weak self] in self?.onAmount($0) }
         let parts = [(minus, #selector(lower), "Lower", "Down 1"), (zero, #selector(reset), "Back to 0", "Back to 0"), (plus, #selector(higher), "Higher", "Up 1")]
         for (button, action, name, tip) in parts {
@@ -1352,20 +1430,21 @@ final class ShiftCard: NSView {
     // Call when a row is shown or hidden.
     func forgetHeights() { heights = [:] }
 
-    // Updates the number and buttons; `active` dims everything when the card is off, `waiting` fades just the
-    // number (on, but the chosen app isn't making sound), `amountActive: false` dims just the number and − 0 +
-    // (the Voice changer sets the pitch instead).
+    // Updates the number and buttons; `active` dims the card when it's off (the number and − 0 + still work then,
+    // a little fainter: the amount is used when the card is turned on), `waiting` fades just the number (on, but the
+    // chosen app isn't making sound), `amountActive: false` dims just the number and − 0 + (the Voice changer sets
+    // the pitch instead).
     func show(on: Bool, value: Float, active: Bool, waiting: Bool = false, amountActive: Bool? = nil) {
         let faded = self.active != nil && active != self.active  // everything crossfades
         show(on: on, active: active)
         amount.value = value
-        let numberActive = amountActive ?? active
+        let numberActive = amountActive ?? true
         if numberActive != self.numberActive {
             if self.numberActive != nil && !faded { Theme.crossfade(buttons, 0.25) }
             self.numberActive = numberActive
         }
         amount.isEnabled = numberActive
-        amount.strength = numberActive ? (waiting ? 0.5 : 1) : 0.4
+        amount.strength = numberActive ? (active ? (waiting ? 0.5 : 1) : Self.offStrength) : 0.4
         minus.isEnabled = numberActive && value > -24
         plus.isEnabled = numberActive && value < 24
         zero.isEnabled = numberActive && value != 0
@@ -1759,7 +1838,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     func buildWindow() {
-        hearCard = ShiftCard(title: "What you hear")
+        hearCard = ShiftCard(title: "Output pitch shifter")
         hearCard.picker.pullsDown = true  // a menu of apps to tick, not a single choice
         hearCard.picker.menu?.delegate = self
         hearCard.picker.target = self
@@ -1860,7 +1939,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             fastRow.spacing = (10 * scale).rounded()
         }
 
-        voiceCard = ShiftCard(title: "Your voice", extraRows: [styleRow, slowRow])
+        voiceCard = ShiftCard(title: "Input pitch shifter", extraRows: [styleRow, slowRow])
         voiceCard.addRow(fastRow, tight: true)
         voiceCard.addRow(footer)
         voiceCard.picker.menu?.delegate = self
@@ -2674,8 +2753,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     // For screenshots (--preview hear-on,voice-on,waiting,typing,recording,playing,listening,hover,menu,roll,
     // resize,no-driver,advanced-alert,sounds,rename,volume,drop,light,tone,slow,eq,changer,changer-man,
     // changer-realistic,changer-loading,changer-fallback,changer-slider-natural|fast|default|max|NN,changer-intel,
-    // pro-locked,pro-unlock,pro-typo,pro-paste,pro-done,pro-alone,pro-unlocked [--size 800x400]): shows a state, no
-    // sound. Any changer state also shows Your voice on.
+    // pro-locked,pro-unlock,pro-typo,pro-paste,pro-done,pro-alone,pro-unlocked,switch-flip [--size 800x400]
+    // [--steps 3,-2]): shows a state, no sound. Any changer state also shows Your voice on.
     func showPreview() {
         guard let preview else { return }
         // With Pitch Shift Pro locked (pro-locked, pro-unlock), the paid controls keep the free version's values.
@@ -2693,6 +2772,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             if preview.contains("drop") { soundboard.showDropping() }  // sound files dragged over it
         }
         if let cartoonArg, pro { voice.cartoon = cartoonArg }  // where the style slider is (--cartoon-amount 0.5)
+        if let steps = arg("--steps")?.split(separator: ",").compactMap({ Float($0) }), let first = steps.first {
+            hear.halfSteps = AmountField.clamp(first)  // the two big numbers (--steps 3,-2)
+            voice.halfSteps = AmountField.clamp(steps.last ?? first)
+        }
         if preview.contains("tone") { hear.advanced = true }  // Advanced processing on (nothing runs in pictures)
         if let toneArg, !outputUID.isEmpty, pro { hear.setTone(toneArg, for: outputUID) }  // the tone slider (--tone-amount -0.4)
         if preview.contains("slow"), pro { voice.slowDeeper = true }  // "Deeper when slow" on
@@ -2725,6 +2808,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 self.testButton.title = "● 5"
                 self.testButton.bezelColor = .systemRed
             }
+        }
+        // Slowed down 10 times: the first card's switch goes on, and turns back halfway (a quick second click); the
+        // second card's switch is held down.
+        if preview.contains("switch-flip") {
+            window.contentView?.layer?.speed = 0.1
+            if let press = NSEvent.mouseEvent(with: .leftMouseDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                              windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) {
+                voiceCard.toggle.mouseDown(with: press)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.hearCard.toggle.isOn = true }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.hearCard.toggle.isOn = false }
         }
         if preview.contains("menu") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.hearCard.picker.performClick(nil) }
