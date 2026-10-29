@@ -134,7 +134,8 @@ func arg(_ name: String) -> String? {
 // ready/standing in with Natural, changer-slider-* puts the "Faster ↔ More real" slider at Natural, the first AI
 // step, the default, the far right or NN percent, changer-intel the card as on an Intel Mac (the slider stays at
 // Natural), changer-second-off / changer-quiet-on the two 3.5 switches off / on, changer-card-off the card with its
-// switch off (its settings as given); click-voice / click-vc turn Your voice's / the Voice changer's switch on half a second in, as a click
+// switch off (its settings as given); click-voice / click-vc turn Your voice's / the Voice changer's switch on half
+// a second in, as a click
 // would (the other one goes off); resize drags the window's corner through the three layouts; pro-locked shows
 // Pitch Shift Pro locked, pro-unlocked unlocked (the default for pictures), pro-unlock the unlock window, with pro-typo
 // a key with a typo in it, with pro-paste a key pasted from an email (line breaks and spaces in it), with pro-done
@@ -278,7 +279,6 @@ let changerArg: ChangerOptions? = {
         if !stillUnknown.isEmpty { print("--changer-tune: unknown keys \(stillUnknown.joined(separator: ", "))"); exit(1) }
     }
     let strength = arg("--strength").flatMap(Float.init).map { max(0, min(1, $0)) } ?? 1
-    // 3.5: --block-background = the card's "Block background sounds" switch on (the voice's quiet main AI voice)
     let quiet = args.contains("--block-background")
     if quiet && entry.quietURL == nil { print("Note: \(entry.name) has no \"Block background sounds\" voice; its usual AI voice is used.") }
     return ChangerOptions(voice: natural, strength: strength, tune: changerTuneArg, stats: args.contains("--changer-stats"), quiet: quiet)

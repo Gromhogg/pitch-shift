@@ -1546,7 +1546,7 @@ enum Keys {
     static let changerRealism = "changerRealism", changerQuality = "changerQuality"
     // 3.5: the AI voice's second voice for hums, laughs, sighs, singing (not set: on)
     static let changerSounds = "changerSounds"
-    // 3.5: "Block background sounds", the AI voice's quiet main voice (not set: off)
+    // 3.5: "Block background sounds" (not set: off)
     static let changerQuiet = "changerQuiet"
 }
 
@@ -1628,7 +1628,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             }
             voice.changer.realism = realisticOffered ? realism : 0
             voice.changer.second = !preview.contains("changer-second-off")  // 3.5
-            voice.changer.quiet = preview.contains("changer-quiet-on")  // 3.5
+            voice.changer.quiet = preview.contains("changer-quiet-on")
             previewVoice = preview.contains("voice-on") && !voice.changer.on  // only one at a time: the changer wins
             return
         }
@@ -1648,7 +1648,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let realism = (defaults.object(forKey: Keys.changerRealism) as? NSNumber)?.floatValue ?? ChangerSettings.defaultRealism
         voice.changer.realism = realisticOffered && realism.isFinite ? max(0, min(1, realism)) : 0
         voice.changer.second = defaults.object(forKey: Keys.changerSounds) as? Bool ?? true  // 3.5
-        voice.changer.quiet = defaults.bool(forKey: Keys.changerQuiet)  // 3.5
+        voice.changer.quiet = defaults.bool(forKey: Keys.changerQuiet)
     }
 
     // Realistic voices need Apple silicon (the Intel half of the app has no AI). Pictures: changer-intel shows the
@@ -1689,9 +1689,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     // voice for hums, laughs, sighs and singing; talking always uses the main voice
     let secondSwitch = GradientSwitch()
     static let secondText = "Second voice for laughs & hums"
-    // 3.5 (one place, like the switch above: showQuiet, quietPicked): "Block background sounds", the AI voice's main
-    // voice trained to leave out clicks, typing and room noise (it sounds a little different, so it's a choice, off
-    // until turned on). It works while the card is off too (saved for when it's on).
+    // 3.5: off until turned on, because that voice sounds a little different
     let quietSwitch = GradientSwitch()
     var quietRow: CardRow!
     static let quietText = "Block background sounds"
@@ -2002,7 +2000,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         secondSwitch.onChange = { [weak self] on in self?.secondPicked(on) }  // 3.5
         secondSwitch.onLockedClick = { [weak self] in self?.showUnlock() }
         changerCard.addRow(ShiftCard.switchRow(Self.secondText, secondSwitch))
-        quietSwitch.onChange = { [weak self] on in self?.quietPicked(on) }  // 3.5
+        quietSwitch.onChange = { [weak self] on in self?.quietPicked(on) }
         quietSwitch.onLockedClick = { [weak self] in self?.showUnlock() }
         quietRow = ShiftCard.switchRow(Self.quietText, quietSwitch)
         changerCard.addRow(quietRow)
@@ -2716,8 +2714,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         refresh()
     }
 
-    // 3.5: "Block background sounds" on or off (with the AI voice playing, the other main voice loads; the backup voice
-    // fills in meanwhile, as when the voice changes)
     func quietPicked(_ on: Bool) {
         voice.changer.quiet = on
         guard preview == nil else { refresh(); return }  // pictures change nothing
@@ -2850,8 +2846,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     // resize,no-driver,advanced-alert,sounds,rename,volume,drop,light,tone,slow,eq,changer,changer-man,
     // changer-realistic,changer-loading,changer-fallback,changer-slider-natural|fast|default|max|NN,changer-intel,
     // changer-second-off,changer-quiet-on,changer-card-off,pro-locked,pro-unlock,pro-typo,pro-paste,pro-done,pro-alone,
-    // pro-unlocked,switch-flip,click-voice,click-vc [--size 800x400] [--steps 3,-2]): shows a state, no sound. With a changer state, Your voice shows off (only one
-    // at a time).
+    // pro-unlocked,switch-flip,click-voice,click-vc [--size 800x400] [--steps 3,-2]): shows a state, no sound. With a
+    // changer state, Your voice shows off (only one at a time).
     func showPreview() {
         guard let preview else { return }
         // With Pitch Shift Pro locked (pro-locked, pro-unlock), the paid controls keep the free version's values.
@@ -3166,9 +3162,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             : "A second AI voice for hums, laughs, sighs, breaths and singing. Talking always uses the main voice."
     }
 
-    // 3.5: "Block background sounds" works with the AI voice (Apple silicon, the slider past Natural) and a voice that
-    // has a quiet version (Woman, Man). Like the pitch cards' controls, it also works while the card is off (a little
-    // fainter; the setting is used when the card is turned on).
+    // Like the pitch cards' controls, it works while the card is off too (drawn fainter; used once the card is on).
     private func showQuiet(active: Bool, usable: Bool, locked: Bool, chosen: VoiceEntry?) {
         let has = chosen?.manifest.realistic?.quiet != nil
         quietSwitch.locked = locked

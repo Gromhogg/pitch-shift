@@ -26,8 +26,7 @@ struct VoiceManifest: Decodable, Equatable {
         var rate: Double     // the model's sample rate
         var eqAmount: Float
         var sounds: String?  // 3.5: the second voice's .mlmodelc (hums, laughs, sighs, singing), next to the json file
-        var quiet: String?   // 3.5: "Block background sounds": the main voice trained to leave out clicks, typing and
-                             // room noise (round 4), next to the json file; used instead of `model` while that switch is on
+        var quiet: String?   // 3.5: used instead of `model` while "Block background sounds" is on
     }
     var id: String
     var name: String
@@ -50,11 +49,9 @@ final class VoiceEntry {
     var name: String { manifest.name }
     var modelURL: URL? { manifest.realistic.map { folder.appendingPathComponent($0.model) } }
     var soundsURL: URL? { manifest.realistic?.sounds.map { folder.appendingPathComponent($0) } }
-    // 3.5: "Block background sounds". The main voice file to load (the quiet one when asked for and the voice has
-    // one), and the name the model store and the voice chain give that file (another file = another name, so turning
-    // the switch loads the other file the way a voice change does).
     var quietURL: URL? { manifest.realistic?.quiet.map { folder.appendingPathComponent($0) } }
     func modelURL(quiet: Bool) -> URL? { quiet ? quietURL ?? modelURL : modelURL }
+    // Another file gets another name, so turning "Block background sounds" loads it the way a voice change does.
     func modelKey(quiet: Bool) -> String { quiet && quietURL != nil ? id + "+quiet" : id }
     // The voice's own speech reader, or (for an added voice that has none) the built-in one (VoiceLibrary.sharedEncoder).
     var encoderURL: URL? {

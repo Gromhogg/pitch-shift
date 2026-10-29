@@ -98,9 +98,7 @@ struct ChangerSettings: Equatable {
     static let defaultRealism: Float = 0.25  // the AI voice with 150 ms of look-ahead: the least delay without stutters
     var on = false
     var second = true  // 3.5: the AI voice's second voice for hums, laughs, sighs, singing (when the voice has one)
-    // 3.5: "Block background sounds": the AI voice's main voice is the one trained to leave out clicks, typing and room
-    // noise (VoiceManifest.Realistic.quiet), when the voice has one. Off: the usual main voice.
-    var quiet = false
+    var quiet = false  // 3.5: "Block background sounds"
     var voiceID = "woman"
     var strength: Float = 1
     var realism: Float = 0
@@ -133,7 +131,7 @@ struct ChangerOptions {
     var strength: Float = 1
     var tune: [(String, Float)] = []  // --changer-tune "key=value,..."
     var stats = false                 // --changer-stats: print what it does once a second
-    var quiet = false                 // --block-background: the "Block background sounds" main voice (3.5)
+    var quiet = false                 // --block-background
 }
 
 // The sound effect (Soundboard) to mix into Pitch Shift Mic. Set from the window, read by the sound thread without
@@ -1572,7 +1570,6 @@ final class VoiceShifter {
         return nil
         #endif
     }
-    // Its models' name (VoiceEntry.modelKey: with "Block background sounds" on, the quiet main file's).
     private var realisticKey: String? { realisticWanted?.modelKey(quiet: changer.quiet) }
 
     // What the window shows: the AI voice only while it is what plays; "backup voice" (loading or fallback) whenever
@@ -1603,8 +1600,8 @@ final class VoiceShifter {
         }
     }
 
-    // Starts loading the AI voice, remakes the chain when its AI stream is for another voice (or none; or the other
-    // main file of "Block background sounds"), and frees the models once nothing uses them.
+    // Starts loading the AI voice, remakes the chain when its AI stream is for another voice (or none), and frees the
+    // models once nothing uses them.
     private func updateRealistic() {
         let want = realisticWanted, key = realisticKey
         if let want { models.want(want, quiet: changer.quiet) }
