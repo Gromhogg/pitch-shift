@@ -69,11 +69,15 @@ final class VoiceRing {
         restartWatch()
     }
 
+    // What doesn't fit (more than a second waiting; shouldn't happen) is left out.
     func write(_ samples: UnsafePointer<Float>, _ n: Int) {
-        for j in 0..<n where count < size {
-            buffer[(read + count) % size] = samples[j]
-            count += 1
-        }
+        let n = min(n, size - count)
+        guard n > 0 else { return }
+        let at = (read + count) % size
+        let first = min(n, size - at)  // up to the end of the buffer, then the rest from its start
+        (buffer + at).update(from: samples, count: first)
+        if first < n { buffer.update(from: samples + first, count: n - first) }
+        count += n
     }
 
     // Call after writing a callback's worth of shifted sound, before reading `frames` samples.
@@ -127,6 +131,15 @@ final class VoiceRing {
             return
         }
         let available = min(frames, count)
+        if available == frames && crossfade == 0 && fadeIn == 0 {  // nothing to blend: the waiting sound as it is
+            let first = min(frames, size - read)
+            out.update(from: buffer + read, count: first)
+            if first < frames { (out + first).update(from: buffer, count: frames - first) }
+            read = (read + frames) % size
+            count -= frames
+            played = min(played + frames, size)
+            return
+        }
         for i in 0..<available {
             var value = buffer[read]
             if crossfade > 0 {

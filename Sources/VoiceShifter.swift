@@ -650,11 +650,12 @@ final class VoiceStretcher {
         var output: UnsafeMutablePointer<Float>? = buffer
         let got = Int(rubberband_retrieve(state, &output, UInt32(count)))
         guard gain != 1 || gainTarget != 1 else { return got }  // Cartoon and going down: untouched
+        var gain = self.gain
         for j in 0..<got {
             gain += (gainTarget - gain) * gainSmoothing
             buffer[j] *= gain
         }
-        if abs(gain - gainTarget) < 1e-4 { gain = gainTarget }  // close enough (0.001 dB): stop gliding
+        self.gain = abs(gain - gainTarget) < 1e-4 ? gainTarget : gain  // close enough (0.001 dB): stop gliding
         return got
     }
 
@@ -1138,13 +1139,15 @@ final class VoiceChain {
         } else if let ai {
             voicestream_pull(ai, nil, 0, source, Int32(frames))  // (not reached while a voice is on: it always shifts)
         }
-        for i in 0..<frames {
-            let value = callMix.out(applied.silent ? 0 : source[i], shifting: shifting)
-            for b in micOutputStreams..<outs.count {
-                guard let d = outs[b].mData?.assumingMemoryBound(to: Float.self) else { continue }
-                let ch = Int(outs[b].mNumberChannels)
-                for c in 0..<ch { d[i * ch + c] = value }
-            }
+        // (the mixing works on a copy, put back after: a stored value changed once per callback, not once per sample)
+        var mix = callMix
+        let silent = applied.silent
+        for i in 0..<frames { source[i] = mix.out(silent ? 0 : source[i], shifting: shifting) }
+        callMix = mix
+        for b in micOutputStreams..<outs.count {
+            guard let d = outs[b].mData?.assumingMemoryBound(to: Float.self) else { continue }
+            let ch = Int(outs[b].mNumberChannels)
+            for i in 0..<frames { for c in 0..<ch { d[i * ch + c] = source[i] } }
         }
         publish(frames, shifting: shifting)
     }

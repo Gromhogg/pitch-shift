@@ -331,8 +331,9 @@ final class Soundboard {
                 silence.pointee = true
                 return noErr
             }
-            var ended = false
-            for i in 0..<Int(frameCount) { out[i] = state.mix.next(&ended) * gain }
+            var mix = state.mix, ended = false  // (a copy for the loop, put back after)
+            for i in 0..<Int(frameCount) { out[i] = mix.next(&ended) * gain }
+            state.mix = mix
             return noErr
         }
         engine.attach(source)
