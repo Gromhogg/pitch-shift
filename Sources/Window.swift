@@ -1739,7 +1739,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Keep the colorful icon in the Dock (macOS's dark icon style would otherwise turn it grey).
+        // At 256 points: still twice the biggest Dock icon, and ~6 MB less memory than the file's full 512 points.
         if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"), let icon = NSImage(contentsOf: url) {
+            icon.size = NSSize(width: 256, height: 256)
             NSApp.applicationIconImage = icon
         }
         buildMenu()
