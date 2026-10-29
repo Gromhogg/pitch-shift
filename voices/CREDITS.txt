@@ -28,3 +28,11 @@ Every recording used, with its author and licence, is listed in CREDITS-second-v
 Sound sorter (which voice makes each piece): YAMNet (Google, tensorflow/models research/audioset/yamnet, Apache
 License 2.0: LICENSE-Apache-2.0.txt), converted to Core ML, plus one layer trained by the Pitch Shift project on
 FSD50K and Freesound clips (CC0 / CC BY), VocalSet (CC BY 4.0) and VCTK speech (CC BY 4.0).
+
+"Block background sounds" voices (Pitch Shift 3.5; an optional switch, off unless turned on): each started from its
+main voice above (Woman / Man after 200 rounds) and was trained 40 more rounds on Kaggle on the same VCTK recordings,
+with room and desk sounds mixed under the speech it hears (it still had to make the clean speech), so it leaves such
+sounds out. Only the part that reads the speech learned; the part that makes the sound of the voice was kept as it
+was. The sounds: 185 FSD50K clips (Fonseca et al., Freesound Datasets) from Freesound, CC0 or CC BY 3.0 (typing,
+knocks, taps, claps, finger snaps, writing, crumpling, drawers, fans, hiss), plus made-up hiss and hum. They are not
+part of the app. Every clip, with its author and licence, is listed in CREDITS-block-background.txt.

@@ -13,6 +13,7 @@ final class VoiceModelStore {
     // on the GPU, the CPU if those can't be used.
     static var computeUnits: Int32 = Int32(VOICEMODEL_COMPUTE_AUTO)
 
+    // (Each id is a voice's VoiceEntry.modelKey: its id, or "woman+quiet" with "Block background sounds" on, 3.5.)
     enum Status: Equatable {
         case none
         case loading(String)          // voice id
@@ -27,33 +28,37 @@ final class VoiceModelStore {
     private let queue = DispatchQueue(label: "Pitch Shift AI voice loading", qos: .userInitiated)
 
     // True until this voice has been loaded once on this Mac (then macOS keeps the prepared models).
-    func firstTime(_ entry: VoiceEntry) -> Bool { !UserDefaults.standard.bool(forKey: Self.preparedKey(entry)) }
+    func firstTime(_ entry: VoiceEntry, quiet: Bool = false) -> Bool {
+        !UserDefaults.standard.bool(forKey: Self.preparedKey(entry, quiet: quiet))
+    }
 
     // What the window can say while loading.
-    func loadingNote(_ entry: VoiceEntry?) -> String {
-        guard let entry, firstTime(entry) else { return "Getting the AI voice ready…" }
+    func loadingNote(_ entry: VoiceEntry?, quiet: Bool = false) -> String {
+        guard let entry, firstTime(entry, quiet: quiet) else { return "Getting the AI voice ready…" }
         return "Getting the AI voice ready. The first time can take up to a minute."
     }
 
     // Asks for a voice's models (main thread). Loads in the background unless they are loaded or loading already.
-    func want(_ entry: VoiceEntry) {
-        wanted = entry.id
+    // quiet: "Block background sounds" (3.5): the voice's quiet main file instead of its usual one, if it has one.
+    func want(_ entry: VoiceEntry, quiet: Bool = false) {
+        let id = entry.modelKey(quiet: quiet)
+        wanted = id
         switch status {
-        case .ready(let id) where id == entry.id, .loading(let id) where id == entry.id: return
+        case .ready(let ready) where ready == id, .loading(let ready) where ready == id: return
         default: break
         }
-        guard let encoder = entry.encoderURL?.path, let voice = entry.modelURL?.path else {
-            setStatus(.failed(entry.id, "\(entry.name) has no AI voice"))
+        guard let encoder = entry.encoderURL?.path, let voice = entry.modelURL(quiet: quiet)?.path else {
+            setStatus(.failed(id, "\(entry.name) has no AI voice"))
             return
         }
         guard FileManager.default.fileExists(atPath: encoder), FileManager.default.fileExists(atPath: voice) else {
-            setStatus(.failed(entry.id, "the AI voice files are missing"))
+            setStatus(.failed(id, "the AI voice files are missing"))
             return
         }
         if let model { retired.append(model) }  // another voice was loaded: a running chain may still use it
         model = nil
-        setStatus(.loading(entry.id))
-        let id = entry.id, units = Self.computeUnits, key = Self.preparedKey(entry), second = Self.secondFiles(entry)
+        setStatus(.loading(id))
+        let units = Self.computeUnits, key = Self.preparedKey(entry, quiet: quiet), second = Self.secondFiles(entry)
         queue.async { [weak self] in
             var err = [CChar](repeating: 0, count: 200)
             let made = voicemodel_load(encoder, voice, units, &err, Int32(err.count))
@@ -95,8 +100,8 @@ final class VoiceModelStore {
     }
 
     // Loads right here and waits (for --render-voice). The caller frees it with voicemodel_free.
-    static func loadNow(_ entry: VoiceEntry) throws -> OpaquePointer {
-        guard let encoder = entry.encoderURL?.path, let voice = entry.modelURL?.path,
+    static func loadNow(_ entry: VoiceEntry, quiet: Bool = false) throws -> OpaquePointer {
+        guard let encoder = entry.encoderURL?.path, let voice = entry.modelURL(quiet: quiet)?.path,
               FileManager.default.fileExists(atPath: encoder), FileManager.default.fileExists(atPath: voice) else {
             throw Problem(message: "\(entry.name): the AI voice files are missing")
         }
@@ -104,7 +109,7 @@ final class VoiceModelStore {
         guard let made = voicemodel_load(encoder, voice, computeUnits, &err, Int32(err.count)) else {
             throw Problem(message: "Realistic mode: \(String(cString: err))")
         }
-        UserDefaults.standard.set(true, forKey: preparedKey(entry))
+        UserDefaults.standard.set(true, forKey: preparedKey(entry, quiet: quiet))
         addSecond(made, secondFiles(entry))
         return made
     }
@@ -132,12 +137,13 @@ final class VoiceModelStore {
 
     // Changes when the model files change (size of the voice file, and its name when it isn't "<id>.mlmodelc", as for
     // Woman's woman_us.mlmodelc, which has the old Woman's size), so a new version counts as "first time" again.
-    private static func preparedKey(_ entry: VoiceEntry) -> String {
-        let size = entry.modelURL.flatMap { url -> Int? in
+    // (quiet: the "Block background sounds" file, which has its own name, so its own key.)
+    private static func preparedKey(_ entry: VoiceEntry, quiet: Bool = false) -> String {
+        let size = entry.modelURL(quiet: quiet).flatMap { url -> Int? in
             let weights = url.appendingPathComponent("weights/weight.bin")
             return (try? FileManager.default.attributesOfItem(atPath: weights.path)[.size] as? Int) ?? nil
         } ?? 0
-        let model = entry.manifest.realistic?.model ?? ""
+        let model = (quiet && entry.quietURL != nil ? entry.manifest.realistic?.quiet : entry.manifest.realistic?.model) ?? ""
         let name = model == "\(entry.id).mlmodelc" || model.isEmpty ? "" : ".\(model)"
         return "aiVoicePrepared.\(entry.id)\(name).\(size)"
     }
@@ -194,9 +200,10 @@ func renderRealisticFile(input: String, natural: [Float], rate: Double, output: 
     for c in 0..<used { for i in 0..<length { mono[i] += source.floatChannelData![c][i] / Float(used) } }
 
     let started = Date()
-    let model = try VoiceModelStore.loadNow(entry)
+    let model = try VoiceModelStore.loadNow(entry, quiet: options.quiet)  // (3.5: --block-background, the quiet main voice)
     defer { voicemodel_free(model) }
     print(String(cString: voicemodel_describe(model)))
+    if options.quiet, let quiet = entry.manifest.realistic?.quiet { print("Block background sounds (3.5): main voice \(quiet)") }
     let block = 128
     var config = VoiceStreamConfig(hopMs: 160, contextMs: 480, crossfadeMs: 40, solaMs: 10, reserveMs: 70, lookaheadMs: Int32(lookaheadMs))
     guard let stream = voicestream_new(model, rate, Int32(block), 1, &config) else { throw Problem(message: "Could not start the AI voice.") }

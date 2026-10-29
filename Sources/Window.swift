@@ -1546,6 +1546,8 @@ enum Keys {
     static let changerRealism = "changerRealism", changerQuality = "changerQuality"
     // 3.5: the AI voice's second voice for hums, laughs, sighs, singing (not set: on)
     static let changerSounds = "changerSounds"
+    // 3.5: "Block background sounds", the AI voice's quiet main voice (not set: off)
+    static let changerQuiet = "changerQuiet"
 }
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDelegate {
@@ -1603,10 +1605,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     // The Voice changer as saved (before the voice starts). Pictures show Woman (Man with changer-man), Strength 1 (or
     // --strength), the AI voice at the slider's default with changer-realistic/-loading/-fallback, the slider at
-    // changer-slider-natural / -fast / -default / -max / -NN (NN percent), and save nothing.
+    // changer-slider-natural / -fast / -default / -max / -NN (NN percent), and save nothing. changer-card-off: the
+    // same settings with the card's switch off; changer-quiet-on: "Block background sounds" on (3.5).
     func restoreChanger() {
         if let preview {
-            voice.changer.on = preview.contains("changer") && Pro.shared.unlocked  // off while Pitch Shift Pro is locked
+            // (off while Pitch Shift Pro is locked)
+            voice.changer.on = preview.contains("changer") && !preview.contains("changer-card-off") && Pro.shared.unlocked
             voice.changer.voiceID = arg("--voice").flatMap { VoiceLibrary.shared.voice($0)?.id }
                 ?? (preview.contains("changer-man") ? "man" : "woman")  // --voice NAME: that voice (an added one too)
             voice.changer.strength = arg("--strength").flatMap(Float.init).map { max(0, min(1, $0)) } ?? 1
@@ -1624,6 +1628,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             }
             voice.changer.realism = realisticOffered ? realism : 0
             voice.changer.second = !preview.contains("changer-second-off")  // 3.5
+            voice.changer.quiet = preview.contains("changer-quiet-on")  // 3.5
             previewVoice = preview.contains("voice-on") && !voice.changer.on  // only one at a time: the changer wins
             return
         }
@@ -1643,6 +1648,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let realism = (defaults.object(forKey: Keys.changerRealism) as? NSNumber)?.floatValue ?? ChangerSettings.defaultRealism
         voice.changer.realism = realisticOffered && realism.isFinite ? max(0, min(1, realism)) : 0
         voice.changer.second = defaults.object(forKey: Keys.changerSounds) as? Bool ?? true  // 3.5
+        voice.changer.quiet = defaults.bool(forKey: Keys.changerQuiet)  // 3.5
     }
 
     // Realistic voices need Apple silicon (the Intel half of the app has no AI). Pictures: changer-intel shows the
@@ -1683,6 +1689,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     // voice for hums, laughs, sighs and singing; talking always uses the main voice
     let secondSwitch = GradientSwitch()
     static let secondText = "Second voice for laughs & hums"
+    // 3.5 (one place, like the switch above: showQuiet, quietPicked): "Block background sounds", the AI voice's main
+    // voice trained to leave out clicks, typing and room noise (it sounds a little different, so it's a choice, off
+    // until turned on). It works while the card is off too (saved for when it's on).
+    let quietSwitch = GradientSwitch()
+    var quietRow: CardRow!
+    static let quietText = "Block background sounds"
     let realisticWarning = NSImageView()          // it fell behind, or can't run (the tooltip says why)
     var delayRow: CardRow!
     private var realismApply: DispatchWorkItem?   // a slider move is used once the knob rests (no new chain mid-drag)
@@ -1990,6 +2002,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         secondSwitch.onChange = { [weak self] on in self?.secondPicked(on) }  // 3.5
         secondSwitch.onLockedClick = { [weak self] in self?.showUnlock() }
         changerCard.addRow(ShiftCard.switchRow(Self.secondText, secondSwitch))
+        quietSwitch.onChange = { [weak self] on in self?.quietPicked(on) }  // 3.5
+        quietSwitch.onLockedClick = { [weak self] in self?.showUnlock() }
+        quietRow = ShiftCard.switchRow(Self.quietText, quietSwitch)
+        changerCard.addRow(quietRow)
         changerCard.picker.menu?.delegate = self
         changerCard.picker.target = self
         changerCard.picker.action = #selector(changerVoicePicked)
@@ -2010,7 +2026,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let autoEQViews: [NSView] = [autoEQSwitch] + autoEQStrip.bands + [autoEQStrip.reset]
         let hearViews: [NSView] = hearCard.keyViews + [advancedSwitch, tone] + autoEQViews
         let voiceViews: [NSView] = voiceCard.keyViews + [style, testButton, slowSwitch, fastSlider, installButton, soundsButton]
-        let changerViews: [NSView] = changerCard.keyViews + [strength, realism, secondSwitch]
+        let changerViews: [NSView] = changerCard.keyViews + [strength, realism, secondSwitch, quietSwitch]
         let order: [NSView] = hearViews + voiceViews + changerViews
         background.nextKeyView = order[0]
         for (view, next) in zip(order, order.dropFirst() + [order[0]]) { view.nextKeyView = next }
@@ -2700,6 +2716,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         refresh()
     }
 
+    // 3.5: "Block background sounds" on or off (with the AI voice playing, the other main voice loads; the backup voice
+    // fills in meanwhile, as when the voice changes)
+    func quietPicked(_ on: Bool) {
+        voice.changer.quiet = on
+        guard preview == nil else { refresh(); return }  // pictures change nothing
+        defaults.set(on, forKey: Keys.changerQuiet)
+        refresh()
+    }
+
     func strengthPicked(_ value: Float) {
         voice.changer.strength = value
         guard preview == nil else { return }  // pictures change nothing
@@ -2824,8 +2849,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     // For screenshots (--preview hear-on,voice-on,waiting,typing,recording,playing,listening,hover,menu,roll,
     // resize,no-driver,advanced-alert,sounds,rename,volume,drop,light,tone,slow,eq,changer,changer-man,
     // changer-realistic,changer-loading,changer-fallback,changer-slider-natural|fast|default|max|NN,changer-intel,
-    // pro-locked,pro-unlock,pro-typo,pro-paste,pro-done,pro-alone,pro-unlocked,switch-flip,click-voice,click-vc
-    // [--size 800x400] [--steps 3,-2]): shows a state, no sound. With a changer state, Your voice shows off (only one
+    // changer-second-off,changer-quiet-on,changer-card-off,pro-locked,pro-unlock,pro-typo,pro-paste,pro-done,pro-alone,
+    // pro-unlocked,switch-flip,click-voice,click-vc [--size 800x400] [--steps 3,-2]): shows a state, no sound. With a changer state, Your voice shows off (only one
     // at a time).
     func showPreview() {
         guard let preview else { return }
@@ -3075,6 +3100,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         if realismApply == nil { realism.value = realisticOffered ? voice.changer.realism : 0 }  // (not while it moves)
         realism.isEnabled = active && hasRealistic && realisticOffered
         showSecond(active: active, locked: locked, chosen: chosen)
+        showQuiet(active: active, usable: usable, locked: locked, chosen: chosen)
 
         enum Look { case natural, loading, realistic, fallback(Int), unavailable(String) }
         var look: Look
@@ -3100,7 +3126,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             case .loading:
                 loading = true
                 backup = true
-                note = VoiceModelStore.shared.loadingNote(chosen) + " The backup voice (Natural) plays meanwhile."
+                note = VoiceModelStore.shared.loadingNote(chosen, quiet: voice.changer.quiet) + " The backup voice (Natural) plays meanwhile."
             case .fallback(let misses):
                 warning = true
                 backup = true
@@ -3138,5 +3164,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             : chosen != nil && !has ? "\(chosen!.name) has no second voice"
             : !voice.changer.realistic ? "Works with the more real voices (move the slider right)"
             : "A second AI voice for hums, laughs, sighs, breaths and singing. Talking always uses the main voice."
+    }
+
+    // 3.5: "Block background sounds" works with the AI voice (Apple silicon, the slider past Natural) and a voice that
+    // has a quiet version (Woman, Man). Like the pitch cards' controls, it also works while the card is off (a little
+    // fainter; the setting is used when the card is turned on).
+    private func showQuiet(active: Bool, usable: Bool, locked: Bool, chosen: VoiceEntry?) {
+        let has = chosen?.manifest.realistic?.quiet != nil
+        quietSwitch.locked = locked
+        quietSwitch.isOn = voice.changer.quiet
+        quietSwitch.isEnabled = usable && has && realisticOffered && voice.changer.realistic
+        let soft: CGFloat = active || locked ? 1 : ShiftCard.offStrength
+        if quietRow.alphaValue != soft {
+            if window?.isVisible == true { Theme.animate(0.25) { quietRow.animator().alphaValue = soft } } else { quietRow.alphaValue = soft }
+        }
+        quietSwitch.toolTip = locked ? "Pitch Shift Pro"
+            : !realisticOffered ? "The more real voices need a Mac with Apple silicon"
+            : chosen != nil && !has ? "\(chosen!.name) has no version that blocks background sounds"
+            : !voice.changer.realistic ? "Works with the more real voices (move the slider right)"
+            : "Uses a version of the AI voice that leaves out clicks, typing and room noise. It sounds a little different, and breaths come out quieter."
     }
 }

@@ -98,6 +98,9 @@ struct ChangerSettings: Equatable {
     static let defaultRealism: Float = 0.25  // the AI voice with 150 ms of look-ahead: the least delay without stutters
     var on = false
     var second = true  // 3.5: the AI voice's second voice for hums, laughs, sighs, singing (when the voice has one)
+    // 3.5: "Block background sounds": the AI voice's main voice is the one trained to leave out clicks, typing and room
+    // noise (VoiceManifest.Realistic.quiet), when the voice has one. Off: the usual main voice.
+    var quiet = false
     var voiceID = "woman"
     var strength: Float = 1
     var realism: Float = 0
@@ -130,6 +133,7 @@ struct ChangerOptions {
     var strength: Float = 1
     var tune: [(String, Float)] = []  // --changer-tune "key=value,..."
     var stats = false                 // --changer-stats: print what it does once a second
+    var quiet = false                 // --block-background: the "Block background sounds" main voice (3.5)
 }
 
 // The sound effect (Soundboard) to mix into Pitch Shift Mic. Set from the window, read by the sound thread without
@@ -1546,7 +1550,7 @@ final class VoiceShifter {
         let callback = Double(chain?.callbackFrames ?? (rate > 48000 ? 256 : 128))
         var seconds: Double
         if settings.realistic && Self.aiRuns {
-            let model = models.model(for: VoiceLibrary.shared.voice(settings.voiceID)?.id ?? "")
+            let model = models.model(for: VoiceLibrary.shared.voice(settings.voiceID)?.modelKey(quiet: settings.quiet) ?? "")
             seconds = voicestream_delay_ms(model, rate, Int32(callback), Int32(settings.lookaheadMs)) / 1000 + callback / rate
         } else {
             let measured = chain.map { c in c.stats.withLock { $0.changing && $0.sending ? Double($0.delay) / c.sampleRate : 0 } } ?? 0
@@ -1568,6 +1572,8 @@ final class VoiceShifter {
         return nil
         #endif
     }
+    // Its models' name (VoiceEntry.modelKey: with "Block background sounds" on, the quiet main file's).
+    private var realisticKey: String? { realisticWanted?.modelKey(quiet: changer.quiet) }
 
     // What the window shows: the AI voice only while it is what plays; "backup voice" (loading or fallback) whenever
     // Natural plays instead: while the models load, before the first AI piece, and while (or since the last look, a
@@ -1575,9 +1581,10 @@ final class VoiceShifter {
     private func realisticState() -> ChangerState {
         guard let entry = VoiceLibrary.shared.voice(changer.voiceID) else { return .unavailable("no voice") }
         guard entry.manifest.realistic != nil else { return .unavailable("\(entry.name) has no AI voice") }
+        let key = entry.modelKey(quiet: changer.quiet)
         switch models.status {
-        case .failed(let id, let why) where id == entry.id: return .unavailable(why)
-        case .ready(let id) where id == entry.id:
+        case .failed(let id, let why) where id == key: return .unavailable(why)
+        case .ready(let id) where id == key:
             guard let chain, let ai = chain.aiStats else { return .realistic }  // nobody listening yet: ready to go
             if seenChain !== chain {  // a new chain counts from 0
                 seenChain = chain
@@ -1596,18 +1603,18 @@ final class VoiceShifter {
         }
     }
 
-    // Starts loading the AI voice, remakes the chain when its AI stream is for another voice (or none), and frees the
-    // models once nothing uses them.
+    // Starts loading the AI voice, remakes the chain when its AI stream is for another voice (or none; or the other
+    // main file of "Block background sounds"), and frees the models once nothing uses them.
     private func updateRealistic() {
-        let want = realisticWanted
-        if let want { models.want(want) }
-        if let chain, want != nil, chain.realisticID == want?.id {  // no new chain
+        let want = realisticWanted, key = realisticKey
+        if let want { models.want(want, quiet: changer.quiet) }
+        if let chain, want != nil, chain.realisticID == key {  // no new chain
             chain.setLookahead(changer.lookaheadMs)
             chain.setSecond(changer.second)
         }
-        if running, let chain, chain.realisticID != want?.id {
+        if running, let chain, chain.realisticID != key {
             DispatchQueue.main.async { [weak self] in  // not from inside pushParams
-                guard let self, let current = self.chain, current.realisticID != self.realisticWanted?.id else { return }
+                guard let self, let current = self.chain, current.realisticID != self.realisticKey else { return }
                 self.closeChain()
                 self.update()
             }
@@ -1700,8 +1707,8 @@ final class VoiceShifter {
             stopLater = nil
             if chain == nil {
                 do {
-                    let ai = realisticWanted.map { (id: $0.id, model: models.model(for: $0.id), lookaheadMs: changer.lookaheadMs,
-                                                    second: changer.second) }
+                    let ai = realisticKey.map { (id: $0, model: models.model(for: $0), lookaheadMs: changer.lookaheadMs,
+                                                 second: changer.second) }
                     let made = try VoiceChain(mic: mic, feed: feed, params: params, sounds: sounds,
                                               bufferFrames: testBufferFrames, testSource: testSource, changerTune: changerTune,
                                               realistic: ai, speaker: lastSpeaker)
