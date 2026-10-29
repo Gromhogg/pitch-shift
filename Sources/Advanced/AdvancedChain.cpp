@@ -48,7 +48,8 @@ namespace {
 
 const int MAXCH = 2;     // channels
 const int MAXPATHS = 3;  // shifted paths in one chain
-const int NEQ = 10;      // EQ filters
+const int NEQ = 10;      // EQ filters (an even number: they are run two at a time)
+static_assert(NEQ % 2 == 0, "the EQ runs its filters in pairs");
 const int RBOPTS = RubberBandStretcher::OptionProcessRealTime | RubberBandStretcher::OptionEngineFiner |
                    RubberBandStretcher::OptionChannelsTogether;  // the app's normal settings
 
@@ -340,6 +341,10 @@ struct TonalEQ {
     int64_t blocks = 0, blocks2 = 0;     // analyses so far; analyses since the slow correction was reset
     double a = 0;
     int gen = -1;                        // which chain the current prediction is for (see Engine::targetGen)
+    // predict's weights depend only on the chain, not on the sound, so each bin's are worked out once per chain:
+    // per path the weight, and the air band's gain; wGen = the chain (gen) they belong to, -1 = none yet.
+    std::vector<double> wPath[MAXPATHS], wAir;
+    std::vector<int> wGen;
 
     void setFilter(Biquad &b, int k, double gdb) const {
         if (k == 0) b.lowshelf(shelfLo, gdb, sr);
@@ -375,6 +380,8 @@ struct TonalEQ {
             knotI[j] = std::min(NKNOT - 2, (int)x); knotF[j] = x - knotI[j];
         }
         rbin.assign(N / 2, 0.0);
+        for (auto &w : wPath) w.assign(N / 2, 0.0);
+        wAir.assign(N / 2, 0.0); wGen.assign(N / 2, -1);
         for (auto *v : {&pref, &pcur, &pr, &pc, &pq, &pqs, &pcs, &T, &S, &e, &D}) v->assign(nb, 0.0);
         g.assign(NEQ, 0.0);
         for (int k = 0; k < NEQ; k++) eqf[k] = 31.25 * pow(2.0, k);
@@ -409,7 +416,12 @@ struct TonalEQ {
 
     // FFT of the last N samples of a ring ending at `end`; band powers into out (FFT left in re/im)
     void bandPowers(Ring &r, int64_t end, std::vector<double> &out) {
-        for (int i = 0; i < N; i++) tmp[i] = r[end - N + i] * hann[i];
+        // the ring holds at least N samples; they are read in two pieces where it wraps around
+        const float *d = r.d.data(), *w = hann.data();
+        float *x = tmp.data();
+        size_t start = (size_t)((end - N) & r.mask), first = std::min((size_t)N, r.d.size() - start);
+        for (size_t i = 0; i < first; i++) x[i] = d[start + i] * w[i];
+        for (size_t i = first; i < (size_t)N; i++) x[i] = d[i - first] * w[i];
 #if ADVANCED_VDSP
         DSPSplitComplex s{re.data(), im.data()};
         vDSP_ctoz((const DSPComplex *)tmp.data(), 2, &s, 1, N / 2);
@@ -445,29 +457,34 @@ struct TonalEQ {
         double s = std::min(1.0, fabs(N) / offN);
         return s * (k[knotI[j]] * (1 - knotF[j]) + k[knotI[j] + 1] * knotF[j]);
     }
-    // predicted output band powers of chain spec s, bins [k0, k1): each input bin is moved by each path's shift,
-    // weighted by that path's input filters (and output high-pass, and the air band's crossover)
-    void predict(const Spec &s, int k0, int k1) {
+    // predicted output band powers of chain spec s (chain gen), bins [k0, k1): each input bin is moved by each path's
+    // shift, weighted by that path's input filters (and output high-pass, and the air band's crossover)
+    void predict(const Spec &s, int chainGen, int k0, int k1) {
         double ratio[MAXPATHS];
         for (int q = 0; q < s.n; q++) ratio[q] = pow(2.0, s.p[q].shift / 12.0);
         for (int k = std::max(1, k0); k < k1; k++) {
             double P = rbin[k];
             if (P <= 0) continue;
             double f = (double)k * sr / N;
-            for (int q = 0; q < s.n; q++) {
-                const PathSpec &p = s.p[q];
-                double pw = 0, amp = 0;
-                for (int i = 0; i < p.nt; i++) { double m = p.t[i].mag(f); amp += m; pw += m * m; }
-                if (p.coherent) pw = amp * amp;
-                pw *= (double)p.outW * p.outW;
-                double fo = f * ratio[q];
-                if (s.air > 0) { double ga = s.airBW ? bwLP4(fo, s.air) : lrLP(fo, s.air); pw *= ga * ga; }
-                if (p.outHP > 0) { double h = lrHP(fo, p.outHP); pw *= h * h * h * h; }  // 8th order = |LR4|^2
-                if (p.subHP > 0) { double h = lrHP(fo, p.subHP); pw *= h * h; }          // 4th order = |LR4|
-                addAt(fo, P * pw);
-            }
-            if (s.air > 0) { double h = s.airBW ? bwHP4(f, s.air) : lrHP(f, s.air); addAt(f, P * h * h); }
+            if (wGen[k] != chainGen) { weigh(s, ratio, k, f); wGen[k] = chainGen; }
+            for (int q = 0; q < s.n; q++) addAt(f * ratio[q], P * wPath[q][k]);
+            if (s.air > 0) addAt(f, P * wAir[k] * wAir[k]);
         }
+    }
+    void weigh(const Spec &s, const double *ratio, int k, double f) {
+        for (int q = 0; q < s.n; q++) {
+            const PathSpec &p = s.p[q];
+            double pw = 0, amp = 0;
+            for (int i = 0; i < p.nt; i++) { double m = p.t[i].mag(f); amp += m; pw += m * m; }
+            if (p.coherent) pw = amp * amp;
+            pw *= (double)p.outW * p.outW;
+            double fo = f * ratio[q];
+            if (s.air > 0) { double ga = s.airBW ? bwLP4(fo, s.air) : lrLP(fo, s.air); pw *= ga * ga; }
+            if (p.outHP > 0) { double h = lrHP(fo, p.outHP); pw *= h * h * h * h; }  // 8th order = |LR4|^2
+            if (p.subHP > 0) { double h = lrHP(fo, p.subHP); pw *= h * h; }          // 4th order = |LR4|
+            wPath[q][k] = pw;
+        }
+        if (s.air > 0) wAir[k] = s.airBW ? bwHP4(f, s.air) : lrHP(f, s.air);
     }
 };
 
@@ -1285,18 +1302,30 @@ struct Engine {
             for (int k = 0; k < ch.spec.n; k++) {
                 Path &p = ch.path[k];
                 const float *src[MAXCH];
-                for (int c = 0; c < nch; c++) {
-                    const float *x = xin[c].data();
-                    if (p.spec.nt == 1 && p.spec.t[0].nf == 0 && p.spec.t[0].gain == 1) { src[c] = x; continue; }  // whole input
-                    float *o = pin[c].data(), *y = tmpT[c].data();
-                    std::fill(o, o + q, 0.0f);
+                if (p.spec.nt == 1 && p.spec.t[0].nf == 0 && p.spec.t[0].gain == 1) {  // whole input
+                    for (int c = 0; c < nch; c++) src[c] = xin[c].data();
+                } else {
+                    for (int c = 0; c < nch; c++) { std::fill(pin[c].begin(), pin[c].begin() + q, 0.0f); src[c] = pin[c].data(); }
                     for (int i = 0; i < p.spec.nt; i++) {  // sum of terms, each = gain x (input through its LR4 filters)
                         const Term &tm = p.spec.t[i];
-                        std::copy(x, x + q, y);
-                        for (int f = 0; f < tm.nf; f++) { LR4 &flt = p.filt[i][f][c]; for (int j = 0; j < q; j++) y[j] = flt.run(y[j]); }
-                        for (int j = 0; j < q; j++) o[j] += tm.gain * y[j];
+                        for (int c = 0; c < nch; c++) std::copy(xin[c].begin(), xin[c].begin() + q, tmpT[c].begin());
+                        for (int f = 0; f < tm.nf; f++) {
+                            if (nch == 2) {  // both channels in one pass, so their filters work at the same time
+                                LR4 &f0 = p.filt[i][f][0], &f1 = p.filt[i][f][1];
+                                float *y0 = tmpT[0].data(), *y1 = tmpT[1].data();
+                                for (int j = 0; j < q; j++) { y0[j] = f0.run(y0[j]); y1[j] = f1.run(y1[j]); }
+                            } else {
+                                LR4 &flt = p.filt[i][f][0];
+                                float *y = tmpT[0].data();
+                                for (int j = 0; j < q; j++) y[j] = flt.run(y[j]);
+                            }
+                        }
+                        for (int c = 0; c < nch; c++) {
+                            float *o = pin[c].data();
+                            const float *y = tmpT[c].data();
+                            for (int j = 0; j < q; j++) o[j] += tm.gain * y[j];
+                        }
                     }
-                    src[c] = o;
                 }
                 if (p.sh) {
                     p.sh->rb->process(src, q, false);
@@ -1341,19 +1370,33 @@ struct Engine {
             float w = p.spec.outW;
             int64_t j0 = tau0 - ch.h0 + p.lag;
             if (j0 + m > p.produced) underruns++;
+            // the samples it has made (0 <= j < produced), read in pieces that don't wrap around its ring
+            int i0 = (int)std::min<int64_t>(m, std::max<int64_t>(0, -j0));
+            int i1 = (int)std::max<int64_t>(i0, std::min<int64_t>(m, p.produced - j0));
             for (int c = 0; c < nch; c++) {
                 float *s = sum[c].data();
-                for (int i = 0; i < m; i++) {
-                    int64_t j = j0 + i;
-                    if (j >= 0 && j < p.produced) s[i] += w * p.ring[c][j];
+                const float *r = p.ring[c].d.data();
+                for (int i = i0; i < i1;) {
+                    size_t at = (size_t)((j0 + i) & p.ring[c].mask);
+                    int n = (int)std::min<int64_t>(i1 - i, (int64_t)p.ring[c].d.size() - (int64_t)at);
+                    for (int k = 0; k < n; k++) s[i + k] += w * r[at + k];
+                    i += n;
                 }
             }
         }
-        if (ch.spec.air > 0)  // pitch-down: above the air cut-off, the unshifted input
-            for (int c = 0; c < nch; c++)
-                for (int i = 0; i < m; i++) sum[c][i] = ch.airLP[c].run(sum[c][i]) + ch.airHP[c].run(hist[c][tau0 + i]);
+        if (ch.spec.air > 0) {  // pitch-down: above the air cut-off, the unshifted input
+            if (nch == 2) {  // both channels in one pass, so their filters work at the same time
+                float *s0 = sum[0].data(), *s1 = sum[1].data();
+                for (int i = 0; i < m; i++) {
+                    s0[i] = ch.airLP[0].run(s0[i]) + ch.airHP[0].run(hist[0][tau0 + i]);
+                    s1[i] = ch.airLP[1].run(s1[i]) + ch.airHP[1].run(hist[1][tau0 + i]);
+                }
+            } else
+                for (int i = 0; i < m; i++) sum[0][i] = ch.airLP[0].run(sum[0][i]) + ch.airHP[0].run(hist[0][tau0 + i]);
+        }
         for (int c = 0; c < nch; c++) std::copy(sum[c].begin(), sum[c].begin() + m, pre[c].begin());
-        // EQ, with its gains moving a small step every 32 samples
+        // EQ, with its gains moving a small step every 32 samples. The filters run two at a time on each sample, and
+        // both channels in one pass, so several work at the same time (the same sums in the same order as one by one).
         int i = 0;
         while (i < m) {
             if (ch.eqCount == 0 && ch.eqSteps > 0) {
@@ -1362,9 +1405,18 @@ struct Engine {
                 setEqFilters(ch);
             }
             int n = std::min(m - i, 32 - ch.eqCount);
-            for (int c = 0; c < nch; c++) {
-                float *s = sum[c].data() + i;
-                for (int b = 0; b < NEQ; b++) { Biquad &f = ch.eq[c][b]; for (int k = 0; k < n; k++) s[k] = f.run(s[k]); }
+            if (nch == 2) {
+                float *s0 = sum[0].data() + i, *s1 = sum[1].data() + i;
+                for (int b = 0; b < NEQ; b += 2) {
+                    Biquad &f0 = ch.eq[0][b], &g0 = ch.eq[0][b + 1], &f1 = ch.eq[1][b], &g1 = ch.eq[1][b + 1];
+                    for (int k = 0; k < n; k++) { s0[k] = g0.run(f0.run(s0[k])); s1[k] = g1.run(f1.run(s1[k])); }
+                }
+            } else {
+                float *s = sum[0].data() + i;
+                for (int b = 0; b < NEQ; b += 2) {
+                    Biquad &f = ch.eq[0][b], &g = ch.eq[0][b + 1];
+                    for (int k = 0; k < n; k++) s[k] = g.run(f.run(s[k]));
+                }
             }
             ch.eqCount = (ch.eqCount + n) & 31;
             i += n;
@@ -1389,7 +1441,7 @@ struct Engine {
         if (stage == 1 || stage == 2) {
             Chain *c = eqTarget();
             if (stage == 1) { std::fill(E.pq.begin(), E.pq.end(), 0.0); E.gen = targetGen; }
-            if (c && E.gen == targetGen) E.predict(c->spec, stage == 1 ? 1 : E.N / 4, stage == 1 ? E.N / 4 : E.N / 2);
+            if (c && E.gen == targetGen) E.predict(c->spec, E.gen, stage == 1 ? 1 : E.N / 4, stage == 1 ? E.N / 4 : E.N / 2);
             return;
         }
         if (stage == 3) {
