@@ -9,6 +9,7 @@
 //   real time, but a bounded amount per call), and once it has caught up it is faded in over 80 ms.
 // - Fresh shifters come from a pool made in advanced_new. Rubber Band's reset() makes memory, so used shifters are
 //   reset by a small helper thread, never by the sound thread. They are handed over with atomic flags (no locks).
+//   On the Mac the helper sleeps until a shifter is let go of; elsewhere it looks every 2 ms.
 // - The EQ looks at the long-term spectrum. Its analysis (two big FFTs and a fit) is cut into 8 slices, one slice per
 //   256 samples, so no single call has to do all of it.
 // - The FFT: on the Mac, Apple's Accelerate (vDSP). Elsewhere (Windows), a small FFT written here (RealFFT below) that
@@ -24,6 +25,9 @@
 #include <Accelerate/Accelerate.h>
 #else
 #define ADVANCED_VDSP 0
+#endif
+#if defined(__APPLE__)
+#include <dispatch/dispatch.h>
 #endif
 #include <algorithm>
 #include <atomic>
@@ -908,6 +912,10 @@ struct Engine {
     std::vector<std::unique_ptr<Shifter>> pool;
     std::thread worker;
     std::atomic<bool> quit{false};
+#if defined(__APPLE__)
+    // Wakes the helper when a shifter is let go of (signalling never waits), so it sleeps the rest of the time.
+    dispatch_semaphore_t tidyWake = dispatch_semaphore_create(0);
+#endif
 
     Ring hist[MAXCH], keepR[MAXCH], cur;   // input minus keep; keep; measured output (mono, for the EQ)
     int64_t t = 0, tStart = 0;             // samples processed; where the sound history starts (after a reset)
@@ -1029,13 +1037,23 @@ struct Engine {
                     s->rb->reset();
                     s->state.store(SH_FRESH, std::memory_order_release);
                 }
+#if defined(__APPLE__)
+            dispatch_semaphore_wait(tidyWake, DISPATCH_TIME_FOREVER);
+#else
             std::this_thread::sleep_for(std::chrono::milliseconds(2));
+#endif
         }
     }
 
     ~Engine() {
         quit.store(true, std::memory_order_release);
+#if defined(__APPLE__)
+        dispatch_semaphore_signal(tidyWake);
+#endif
         if (worker.joinable()) worker.join();
+#if defined(__APPLE__)
+        dispatch_release(tidyWake);
+#endif
     }
 
     // ---------------------------------------------------------------- the rule for any N
@@ -1129,9 +1147,15 @@ struct Engine {
     // ---------------------------------------------------------------- chains
 
     void retire(Chain &ch) {
+        bool any = false;
         for (int q = 0; q < ch.spec.n; q++)
-            if (ch.path[q].sh) { ch.path[q].sh->state.store(SH_DIRTY, std::memory_order_release); ch.path[q].sh = nullptr; }
+            if (ch.path[q].sh) { ch.path[q].sh->state.store(SH_DIRTY, std::memory_order_release); ch.path[q].sh = nullptr; any = true; }
         ch.state = C_FREE;
+#if defined(__APPLE__)
+        if (any) dispatch_semaphore_signal(tidyWake);
+#else
+        (void)any;
+#endif
     }
 
     // Start a chain for amount N in slot `slot`. False if not enough fresh shifters yet (try again soon).
