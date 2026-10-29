@@ -12,7 +12,7 @@ namespace {
 const int kWin = 400, kHop = 160, kFft = 512, kSpec = kFft / 2 + 1;
 
 // YAMNet class indices (yamnet_class_map.csv) of each group
-const int kSpeech[] = {0, 1, 2, 3, 4, 12};              // speech, child speech, conversation, narration, babbling, whispering
+const int kSpeech[] = {0, 1, 2, 3, 4, 5, 12};           // speech, child speech, conversation, narration, babbling, speech synthesizer, whispering
 const int kLaugh[] = {13, 14, 15, 16, 17, 18};          // laughter, baby laughter, giggle, snicker, belly laugh, chuckle
 const int kHum[] = {32, 27, 28, 490};                   // humming, chant, mantra, hum
 const int kSing[] = {24, 25, 26, 29, 249, 250};         // singing, choir, yodeling, child singing, vocal music, a capella
@@ -123,15 +123,25 @@ int Rule::decide(const Features &f, const char **why) {
         runBreath = breathy ? runBreath + 1 : 0;
         const float *h = f.head;
         const bool head = f.hasHead && useHead > 0.5f;
+        // no speech: by the head when there is one (YAMNet's own speech score calls a quiet hummed tune speech)
+        const bool speechless = head ? h[HSpeech] < headSpeech : g[Speech] < tuneSpeech;
         const float other = head ? h[HLaugh] + h[HSigh] + h[HHum] + h[HSing] + (coughs > 0.5f ? h[HBody] : 0.0f) +
                                    (whistles > 0.5f ? h[HWhistle] : 0.0f) : 0.0f;
-        if (head && other >= headEnter && h[HSpeech] < headSpeech) { want = true; reason = "head"; }
+        // The head on its own only for breathy sound (few voiced frames: laughs, sighs) or note-like sound (hums,
+        // tunes, singing), or when YAMNet hears no speech either: voiced, unsteady sound is speech's ground. And a
+        // piece with no voice at all (a breath, the pause before talking) goes in only after a run of sure breaths
+        // (heavy breathing, a long sigh): the breath before speaking is short.
+        bool headOk = (f.voiced <= headMaxVoiced || noteShare >= headNote || g[Speech] < headYamSpeech) && g[Speech] < headYamMax;
+        const bool breathyHead = head && h[HSigh] + h[HBody] >= headEnter && h[HSpeech] < headSpeech;
+        runUnvoiced = f.voiced == 0 && (breathyHead || g[Breath] >= breath) ? runUnvoiced + 1 : 0;
+        if (f.voiced == 0 && !on && runUnvoiced < (int)unvoicedHops) headOk = false;
+        if (head && other >= headEnter && h[HSpeech] < headSpeech && headOk) { want = true; reason = "head"; }
         else if (g[Laugh] >= laugh && g[Speech] < laughSpeech) { want = true; reason = "laugh"; }
         else if (std::max(g[Hum], g[Sing]) >= hum && g[Speech] < humSpeech) { want = true; reason = "hum"; }
         else if (whistles > 0.5f && g[Whistle] >= whistle) { want = true; reason = "whistle"; }
         else if (runBreath >= (int)breathHops) { want = true; reason = "breath"; }
-        else if (f.voiced >= tuneMin && noteShare >= tuneEnter) { want = true; reason = "tune"; }
-        else if (on && f.voiced >= tuneStayMin && noteShare >= tuneStay) { want = true; reason = "tune: stay"; }
+        else if (f.voiced >= tuneMin && noteShare >= tuneEnter && speechless) { want = true; reason = "tune"; }
+        else if (on && f.voiced >= tuneStayMin && noteShare >= tuneStay && speechless) { want = true; reason = "tune: stay"; }
         else if (g[Speech] >= speechExit) reason = "speech";
     } else if (!hold) {
         runBreath = 0;
@@ -141,8 +151,8 @@ int Rule::decide(const Features &f, const char **why) {
     if (!on && want) {
         on = true;
         dwell = 0;
-    } else if (on && !want && !hold && ((runOff >= (int)exitHops && dwell >= (int)minHops) || g[Speech] >= speechExit || blocked ||
-                                        (f.hasHead && useHead > 0.5f && f.head[HSpeech] >= headExit))) {
+    } else if (on && !want && !hold && ((runOff >= (int)exitHops && dwell >= (int)minHops) || blocked ||
+                                        (f.hasHead && useHead > 0.5f ? f.head[HSpeech] >= headExit : g[Speech] >= speechExit))) {
         on = false;
         dwell = 0;
     }
@@ -161,7 +171,9 @@ bool Rule::tune(const std::string &k, float v) {
         {"svTuneStayMin", &Rule::tuneStayMin}, {"svQuietDb", &Rule::quietDb}, {"svQuietMaxDb", &Rule::quietMaxDb},
         {"svExitHops", &Rule::exitHops}, {"svMinHops", &Rule::minHops}, {"svSpeechExit", &Rule::speechExit},
         {"svHeadEnter", &Rule::headEnter}, {"svHeadSpeech", &Rule::headSpeech}, {"svHeadExit", &Rule::headExit},
-        {"svUseHead", &Rule::useHead},
+        {"svUseHead", &Rule::useHead}, {"svTuneSpeech", &Rule::tuneSpeech}, {"svHeadMaxVoiced", &Rule::headMaxVoiced},
+        {"svHeadNote", &Rule::headNote}, {"svHeadYamSpeech", &Rule::headYamSpeech}, {"svHeadYamMax", &Rule::headYamMax},
+        {"svUnvoicedHops", &Rule::unvoicedHops},
     };
     for (const Item &it : items)
         if (k == it.name) { this->*it.field = v; return true; }

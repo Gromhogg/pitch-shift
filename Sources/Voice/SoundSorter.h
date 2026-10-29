@@ -67,12 +67,12 @@ class Rule {
 public:
     // One piece: 1 = the second voice, 0 = the main voice. `why` (may be null) gets a short reason for traces.
     int decide(const Features &f, const char **why = nullptr);
-    void reset() { on = false; runBreath = runOff = dwell = 0; }
+    void reset() { on = false; runBreath = runOff = dwell = runUnvoiced = 0; }
     bool tune(const std::string &key, float value);
     bool isOn() const { return on; }
     // settings ("sv..." tune keys)
     float laugh = 0.35f, laughSpeech = 0.35f;   // laughter this sure while speech is below that
-    float hum = 0.3f, humSpeech = 0.3f;         // humming / singing
+    float hum = 0.2f, humSpeech = 0.3f;         // humming / singing
     float breath = 0.6f, breathSpeech = 0.1f;   // a breath, sigh, gasp (or a cough / sneeze) ...
     float breathHops = 2;                       // ... for this many pieces in a row
     float coughs = 1;           // 1 = coughs and sneezes count with breaths (lower priority: 0 = never)
@@ -85,14 +85,20 @@ public:
     float quietDb = 8;          // no voice and less than this above the room's noise, ...
     float quietMaxDb = -60;     // ... or quieter than this (dBFS): keep the choice (silence decides nothing)
     float exitHops = 1, minHops = 2;  // pieces with nothing to stay for; pieces to stay at least
-    float speechExit = 0.6f;    // speech this sure: back to the main voice at once
-    float headEnter = 0.6f;     // the head: laugh + sigh + hum + singing (+ coughs) this sure ...
+    float speechExit = 0.6f;    // speech this sure (YAMNet; the head's speech when there is a head): back at once
+    float headEnter = 0.7f;     // the head: laugh + sigh + hum + singing (+ coughs) this sure ...
     float headSpeech = 0.2f;    // ... and speech below this: the second voice
     float headExit = 0.5f;      // ... and speech this sure: back to the main voice at once
     float useHead = 1;          // 0 = ignore the head
+    float headMaxVoiced = 25;   // the head alone: at most this many voiced frames (of ~98) ...
+    float headNote = 0.3f;      // ... or this share of them note-like ...
+    float headYamSpeech = 0;    // ... or YAMNet's speech below this (0: no); and always YAMNet's speech below
+    float headYamMax = 0.9f;
+    float unvoicedHops = 3;     // a piece with no voiced frame: only after this many sure breaths in a row
+    float tuneSpeech = 1.01f;   // without a head: a tune by its pitch alone below this YAMNet speech score
 private:
     bool on = false;
-    int runBreath = 0, runOff = 0, dwell = 0;
+    int runBreath = 0, runOff = 0, dwell = 0, runUnvoiced = 0;
 };
 
 }  // namespace soundsorter
