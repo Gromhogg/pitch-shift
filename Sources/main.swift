@@ -266,7 +266,8 @@ let changerArg: ChangerOptions? = {
                       "aiHissCross", "aiGainCap", "aiPauseDb", "aiLimit", "aiSlowChip",
                       // 3.4 (VoiceModel.h; "hum34=0" = 3.3's voice changer, VoiceChanger.cpp too)
                       "aiHumLiftDb", "aiHumLevelDb"]  // Realistic mode's test keys (voicestream_tune)
-        let unknown = changerTuneArg.filter { voicechanger_tune(probe, $0.0, $0.1) == 0 && !aiKeys.contains($0.0) && !isVoiceShifterTuneKey($0.0) }.map(\.0)
+        let unknown = changerTuneArg.filter { voicechanger_tune(probe, $0.0, $0.1) == 0 && !aiKeys.contains($0.0) && !isVoiceShifterTuneKey($0.0)
+            && voicestream_second_key($0.0) == 0 }.map(\.0)  // (3.5: the second voice's keys)
         voicechanger_delete(probe)
         let gate = soundgate_new(48000)  // 3.4: "aiSounds" and SoundGate's "sg..." keys
         let stillUnknown = unknown.filter { key in key != "aiSounds" && soundgate_tune(gate, key, changerTuneArg.first { $0.0 == key }?.1 ?? 0) == 0 }

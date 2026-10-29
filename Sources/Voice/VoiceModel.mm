@@ -2015,3 +2015,12 @@ void voicestream_get_passed(const VoiceStream *, int64_t *sounds, int64_t *whist
 }  // extern "C"
 
 #endif
+
+// 3.5: the second voice's tune keys (both chips: the command line checks its keys before anything starts).
+extern "C" int voicestream_second_key(const char *key) {
+    if (!key) return 0;
+    const std::string k = key;
+    if (k == "aiSecond" || k == "aiSecondBlendMs" || k == "aiSecondBackFrames") return 1;
+    soundsorter::Rule probe;
+    return k.rfind("sv", 0) == 0 && probe.tune(k, 0) ? 1 : 0;
+}

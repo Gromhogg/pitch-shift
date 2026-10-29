@@ -180,6 +180,9 @@ void voicestream_push2(VoiceStream *stream, const float *mic, int frames, const 
                        const float *f0In, const uint8_t *flags, int n);
 // Pieces made with the second voice, switches between the voices, and pieces made with both (blends) so far.
 void voicestream_get_second(const VoiceStream *stream, int64_t *pieces, int64_t *switches, int64_t *blends);
+// 1 if KEY is one of 3.5's voicestream_tune keys ("aiSecond", "aiSecondBlendMs", "aiSecondBackFrames", "sv..."), so
+// the command line can check --changer-tune before anything starts (any Mac).
+int voicestream_second_key(const char *key);
 
 #ifdef __cplusplus
 }
