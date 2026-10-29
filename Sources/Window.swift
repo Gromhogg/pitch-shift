@@ -64,8 +64,7 @@ final class GradientSwitch: NSView {
             if oldValue != isEnabled { onEnabled(looksEnabled) }
         }
     }
-    // Looks greyed out but still works (for example "Deeper when slow" while the Voice changer is on: turning it on
-    // turns the changer off).
+    // Looks greyed out but still works.
     var dimmed = false {
         didSet {
             guard oldValue != dimmed else { return }
@@ -1115,7 +1114,7 @@ final class ShiftCard: NSView {
     var onToggle: (Bool) -> Void = { _ in }
     var onAmount: (Float) -> Void = { _ in }
     var keyViews: [NSView] { showsAmount ? [toggle, amount, minus, zero, plus, picker] : [toggle, picker] }
-    // A tooltip for − 0 + in place of their own (for example while the Voice changer sets the pitch).
+    // A tooltip for − 0 + in place of their own.
     var buttonsTip: String? {
         didSet {
             guard oldValue != buttonsTip else { return }
@@ -1536,7 +1535,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 }
             }
             voice.changer.realism = realisticOffered ? realism : 0
-            if voice.changer.on { voice.halfSteps = 0; voice.slowDeeper = false }  // as it would be (nothing saved)
+            previewVoice = preview.contains("voice-on") && !voice.changer.on  // only one at a time: the changer wins
             return
         }
         // The Voice changer is part of Pitch Shift Pro: off while it's locked (what was saved is kept for later).
@@ -1554,18 +1553,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         // Not set yet: the slider's default (the AI voice with the least delay that speaks smoothly).
         let realism = (defaults.object(forKey: Keys.changerRealism) as? NSNumber)?.floatValue ?? ChangerSettings.defaultRealism
         voice.changer.realism = realisticOffered && realism.isFinite ? max(0, min(1, realism)) : 0
-        // Only one at a time: saved with a pitch change too (an older version allowed both), the changer wins.
-        if voice.changer.on && (voice.halfSteps != 0 || voice.slowDeeper) { clearPitchChange() }
-    }
-
-    // The voice changer replaces the pitch change: the amount goes to 0 and "Deeper when slow" off (both saved; they
-    // stay so when the changer goes off).
-    func clearPitchChange() {
-        voice.halfSteps = 0
-        voice.slowDeeper = false
-        guard preview == nil else { return }  // pictures change nothing
-        defaults.set(Float(0), forKey: Keys.voiceSteps)
-        defaults.set(false, forKey: Keys.voiceSlowDeeper)
     }
 
     // Realistic voices need Apple silicon (the Intel half of the app has no AI). Pictures: changer-intel shows the
@@ -1593,6 +1580,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     var hearCard: ShiftCard!
     var voiceCard: ShiftCard!
     var changerCard: ShiftCard!
+    private var previewVoice = false  // pictures: Your voice shown on (nothing runs)
     // The Voice changer's Strength (0 = light, 1 = full) and its "Faster ↔ More real" slider (0 = Natural, then the AI
     // voice, Apple silicon, hearing further ahead), with the delay it gives under it.
     let strength = GradientSlider(left: "Light", right: "Full", name: "Strength") { value in
@@ -1671,8 +1659,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         // Show the window first: the first time, macOS asks for permission to grab sound and waits for an answer.
         DispatchQueue.main.async { [self] in
             if defaults.object(forKey: Keys.hearOn) as? Bool ?? true { hear.start() }
-            if defaults.bool(forKey: Keys.voiceOn) {
-                setVoice(true)  // asks for mic permission again if needed (each update looks like a new app to macOS)
+            // Each asks for mic permission again if needed (each update looks like a new app to macOS). Saved both on
+            // (an older version allowed it): the changer wins, Your voice goes off.
+            if voice.changer.on {
+                setChanger(true)
+            } else if defaults.bool(forKey: Keys.voiceOn) {
+                setVoice(true)
             } else {
                 DefaultMic.giveBack()  // in case the app didn't close cleanly last time
             }
@@ -1864,7 +1856,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             guard let self else { return }
             voice.halfSteps = value
             if preview == nil { defaults.set(value, forKey: Keys.voiceSteps) }
-            if value != 0 && voice.changer.on { setChanger(false) }  // only one at a time
             refresh()
         }
 
@@ -2021,7 +2012,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             voice.fastHigher = AppDelegate.savedFastHigher(defaults)
             for (uid, tilt) in AppDelegate.savedTones(defaults) { hear.setTone(tilt, for: uid) }
             for (uid, eq) in AppDelegate.savedAutoEQs(defaults) { hear.setAutoEQ(on: eq.on, offsets: eq.offsets, for: uid) }
-            restoreChanger()  // the Voice changer as saved (and if it's on, it sets the pitch: only one at a time)
+            restoreChanger()  // the Voice changer as saved; if it's on, it starts (and Your voice goes off)
+            if voice.changer.on && preview == nil { setChanger(true) }
         } else {
             voice.cartoon = Free.cartoon
             voice.slowDeeper = Free.slowDeeper
@@ -2029,6 +2021,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             for uid in hear.tones.keys { hear.setTone(Free.tone, for: uid) }
             for uid in hear.autoEQs.keys { hear.setAutoEQ(on: false, offsets: [], for: uid) }
             voice.changer.on = false
+            voice.stopChanger()
+            if preview == nil && !voice.running { DefaultMic.giveBack() }
             if soundboard.isOpen { soundboard.close() }
         }
         buildMenu()
@@ -2442,7 +2436,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     func slowPicked(_ on: Bool) {
         voice.slowDeeper = on
         if preview == nil { defaults.set(on, forKey: Keys.voiceSlowDeeper) }  // pictures change nothing
-        if on && voice.changer.on { setChanger(false) }  // only one at a time
         refresh()
     }
 
@@ -2466,19 +2459,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
         soundboard.open(beside: window)
         guard preview == nil else { return }  // pictures change nothing
-        // Sounds go out through the voice chain, so with the voice off it runs as if the voice were on with no
-        // pitch change, and Pitch Shift Mic becomes the Mac's default mic (like turning the voice on).
+        // Sounds go out through the voice chain, so with Your voice and the Voice changer off it runs as if the voice
+        // were on with no pitch change, and Pitch Shift Mic becomes the Mac's default mic (like turning the voice on).
         soundsOff?.cancel()
         soundsOff = nil
         voice.keepForSounds(true)
-        if !voice.isOn { DefaultMic.takeOver() }
+        if !voice.isOn && !voice.changerIsOn { DefaultMic.takeOver() }
         refresh()
     }
 
     private var soundsOff: DispatchWorkItem?
 
-    // The Soundboard closed: with the voice off, the chain stops and the real mic is given back a second later
-    // (like when an app stops listening; a sound that was just stopped fades out first).
+    // The Soundboard closed: with Your voice and the Voice changer off, the chain stops and the real mic is given back
+    // a second later (like when an app stops listening; a sound that was just stopped fades out first).
     func soundboardClosed() {
         guard preview == nil else { return }
         soundsOff?.cancel()
@@ -2486,7 +2479,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             guard let self else { return }
             soundsOff = nil
             voice.keepForSounds(false)
-            if !voice.isOn { DefaultMic.giveBack() }
+            if !voice.running { DefaultMic.giveBack() }
             refresh()
         }
         soundsOff = work
@@ -2534,14 +2527,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     // MARK: Voice changer
 
-    // Turning the Voice changer on also turns Your voice on, and sets the amount to 0 and "Deeper when slow" off
-    // (only one at a time: the changer sets the pitch).
+    // On its own, the Voice changer runs the mic like Your voice does: Pitch Shift Mic gets the changed voice and
+    // becomes the Mac's default mic. Only one at a time: turning it on turns Your voice off, and turning Your voice on
+    // turns it off; the card that goes off keeps all its settings.
     func setChanger(_ on: Bool) {
         voice.changer.on = on
-        if on { clearPitchChange() }
-        guard preview == nil else { refresh(); return }  // pictures change nothing
+        guard preview == nil else {  // pictures change nothing
+            if on { previewVoice = false }
+            refresh()
+            return
+        }
         defaults.set(on, forKey: Keys.changerOn)
-        if on && !voice.isOn { setVoice(true) }
+        guard on else {
+            voice.stopChanger()  // with the Soundboard open, its sounds still go out (the voice unchanged)
+            if !voice.running { DefaultMic.giveBack() }
+            refresh()
+            return
+        }
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            voice.startChanger()
+            DefaultMic.takeOver()
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .audio) { granted in
+                DispatchQueue.main.async { granted ? self.setChanger(true) : self.micDenied() }
+            }
+        default:
+            micDenied()
+        }
+        // Once the changer runs, so the chain and the default mic carry on. (Also for "both on" saved by an older
+        // version.)
+        if voice.isOn || defaults.bool(forKey: Keys.voiceOn) { setVoice(false) }
         refresh()
     }
 
@@ -2597,10 +2613,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     func setVoice(_ on: Bool) {
-        guard preview == nil else { refresh(); return }  // pictures: see setHear
+        guard preview == nil else {  // pictures: see setHear
+            previewVoice = on
+            if on && voice.changer.on { setChanger(false) }  // only one at a time
+            refresh()
+            return
+        }
         guard on else {
-            voice.stop()  // with the Soundboard open, its sounds still go out (the voice unchanged)
-            if !voice.runsForSounds { DefaultMic.giveBack() }
+            voice.stop()  // with the Voice changer on or the Soundboard open, the chain keeps going
+            if !voice.running { DefaultMic.giveBack() }
             defaults.set(false, forKey: Keys.voiceOn)
             refresh()
             return
@@ -2617,11 +2638,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         default:
             micDenied()
         }
+        // Only one at a time: the Voice changer goes off once Your voice runs, so the chain and the default mic carry on.
+        if voice.changer.on { setChanger(false) }
         refresh()
     }
 
+    // Without the mic neither Your voice nor the Voice changer can run.
     private func micDenied() {
         defaults.set(false, forKey: Keys.voiceOn)
+        if voice.changer.on {
+            voice.changer.on = false
+            defaults.set(false, forKey: Keys.changerOn)
+        }
         refresh()
         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")!)
     }
@@ -2636,12 +2664,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         guard error == nil else { return }
         // The Mac's sound system restarted; reconnect everything.
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [self] in
-            let hearOn = hear.isOn, voiceOn = voice.isOn, sounds = voice.runsForSounds
+            let hearOn = hear.isOn, voiceOn = voice.isOn, changerOn = voice.changerIsOn, sounds = voice.runsForSounds
             hear.stop()
             voice.stopAll()
             if hearOn { hear.start() }
-            if voiceOn || sounds {
+            if voiceOn || changerOn || sounds {
                 if voiceOn { voice.start() }
+                if changerOn { voice.startChanger() }
                 voice.keepForSounds(sounds)
                 DefaultMic.takeOver()
             }
@@ -2655,8 +2684,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     // For screenshots (--preview hear-on,voice-on,waiting,typing,recording,playing,listening,hover,menu,roll,
     // resize,no-driver,advanced-alert,sounds,rename,volume,drop,light,tone,slow,eq,changer,changer-man,
     // changer-realistic,changer-loading,changer-fallback,changer-slider-natural|fast|default|max|NN,changer-intel,
-    // pro-locked,pro-unlock,pro-typo,pro-paste,pro-done,pro-alone,pro-unlocked [--size 800x400]): shows a state, no
-    // sound. Any changer state also shows Your voice on.
+    // pro-locked,pro-unlock,pro-typo,pro-paste,pro-done,pro-alone,pro-unlocked,click-voice,click-vc [--size 800x400]):
+    // shows a state, no sound. With a changer state, Your voice shows off (only one at a time).
     func showPreview() {
         guard let preview else { return }
         // With Pitch Shift Pro locked (pro-locked, pro-unlock), the paid controls keep the free version's values.
@@ -2681,6 +2710,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             hear.setAutoEQ(on: preview.contains("eq") && pro, offsets: pro ? autoEQArg.offsets.map(Float.init) : [], for: outputUID)
         }
         refresh()
+        // Half a second in, Your voice's switch (click-voice) or the Voice changer's (click-vc; a name with "changer"
+        // in it would start with the changer on) is turned on, as a click would: the other one goes off.
+        if preview.contains("click-voice") { DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.voiceCard.onToggle(true) } }
+        if preview.contains("click-vc") { DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.changerCard.onToggle(true) } }
         // The unlock window (with pro-typo: a key with a typo; pro-paste: a key pasted from an email, line breaks and
         // all; pro-done: unlocked; pro-alone: as its own window).
         if previewStates.contains("pro-unlock") {
@@ -2764,7 +2797,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     func refresh() {
         guard hearCard != nil else { return }
         let hearOn = preview.map { $0.contains("hear-on") } ?? hear.isOn
-        let voiceOn = preview.map { $0.contains("voice-on") || $0.contains("changer") } ?? voice.isOn
+        let voiceOn = preview == nil ? voice.isOn : previewVoice
         let waiting = preview.map { $0.contains("waiting") } ?? (hear.state == .waiting)
         hearCard.show(on: hearOn, value: hear.halfSteps, active: hearOn, waiting: waiting)
         if advancedAlert == nil { advancedSwitch.isOn = hear.advanced }  // stays on while the alert asks
@@ -2801,35 +2834,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         let installed = driverInstalled
         let hasMic = !Mics.list().isEmpty
         let voiceActive = voiceOn && installed && hasMic
-        // With a voice from the Voice changer on, it sets the pitch and style (only one at a time): the number and
-        // − 0 + still work, and a pitch change turns the changer off (the tooltip says so); "Deeper when slow" is
-        // greyed out but works the same way; the Natural ... Cartoon slider is dimmed.
-        let changerActive = voice.changer.on && voiceActive
-        let changerTip = changerActive ? "Voice changer is on" : nil
-        let amountTip = changerActive ? "Changing the pitch turns the voice changer off" : nil
+        let changerActive = voice.changer.on && installed && hasMic
         voiceCard.show(on: voiceOn, value: voice.halfSteps, active: voiceActive)
-        voiceCard.buttonsTip = amountTip
         voiceCard.toggle.isEnabled = installed && hasMic
         voiceCard.picker.isEnabled = installed && hasMic
         if hasMic { showCurrentMic() }
         style.value = voice.cartoon
-        style.isEnabled = voiceOn && installed && !changerActive
-        style.toolTip = locked ? "Pitch Shift Pro" : changerTip
+        style.isEnabled = voiceOn && installed
+        style.toolTip = locked ? "Pitch Shift Pro" : nil
         slowSwitch.isOn = voice.slowDeeper
         slowSwitch.isEnabled = voiceOn && installed
-        slowSwitch.dimmed = changerActive
-        slowSwitch.toolTip = locked ? "Pitch Shift Pro" : changerActive ? "Turning this on turns the voice changer off" : nil
+        slowSwitch.toolTip = locked ? "Pitch Shift Pro" : nil
         // Higher when fast works only with Deeper when slow on (so never with the Voice changer: only one at a time).
         fastSlider.value = voice.fastHigher / SpeakingRate.maxUp
         fastSlider.isEnabled = voiceOn && installed && voice.slowDeeper
         fastLabel.textColor = fastSlider.isEnabled && !locked ? .secondaryLabelColor : .tertiaryLabelColor
         fastLabel.toolTip = locked ? "Pitch Shift Pro" : nil
         soundsButton.isEnabled = installed && hasMic  // the Soundboard works with the voice off too
-        if case .problem(let message) = voice.state { voiceCard.amount.toolTip = message } else { voiceCard.amount.toolTip = amountTip }
+        if case .problem(let message) = voice.state { voiceCard.amount.toolTip = message } else { voiceCard.amount.toolTip = nil }
         showChanger(active: changerActive, usable: installed && hasMic, locked: locked)
 
         let listening = preview.map { $0.contains("listening") } ?? voice.listening
-        dot.isLive = (voiceOn || voice.runsForSounds) && installed && listening
+        dot.isLive = (voiceOn || voice.changer.on || voice.runsForSounds) && installed && listening
         footer.toolTip = dot.isLive ? "An app is using Pitch Shift Mic" : "Choose Pitch Shift Mic as the microphone in Discord, Zoom or any app"
         micName.setAccessibilityValue(dot.isLive ? "Pitch Shift Mic, in use" : "Pitch Shift Mic, not in use")
 
@@ -2845,7 +2871,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             testButton.title = "Test"
             testButton.bezelColor = Theme.purple
             testButton.setAccessibilityLabel("Test")
-            testButton.isEnabled = voiceOn && installed && hasMic
+            testButton.isEnabled = (voiceOn || voice.changer.on) && installed && hasMic  // records the changed voice too
         case .recording(let left):
             testButton.title = "● \(left)"
             testButton.bezelColor = .systemRed
@@ -2859,7 +2885,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
     }
 
-    // The Voice changer card: on while its switch and Your voice are on (`active`); the switch and picker work while
+    // The Voice changer card: on while its switch is on (`active`); the switch and picker work while
     // Pitch Shift Mic and a mic are there (`usable`). Under "Faster ↔ More real": the delay, a spinner while the
     // realistic voice gets ready, a small warning sign when Natural is standing in (the tooltip says why). While
     // Pitch Shift Pro is locked (`locked`), it's off and everything in it shows a lock and opens the unlock window.

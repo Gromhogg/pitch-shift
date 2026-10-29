@@ -1324,14 +1324,16 @@ enum VoiceState: Equatable {
 }
 
 // Decides when the voice chain runs, which mic it uses, and rebuilds it when devices change. It runs while "Your
-// voice" is on, and also while the Soundboard is open with the voice off: then the mic goes into Pitch Shift Mic
-// unchanged (no pitch change, so Rubber Band isn't used and there's almost no delay), with the sounds mixed in.
+// voice" or the Voice changer is on, and also while the Soundboard is open with both off: then the mic goes into
+// Pitch Shift Mic unchanged (no pitch change, so Rubber Band isn't used and there's almost no delay), with the sounds
+// mixed in.
 final class VoiceShifter {
     var halfSteps: Float { didSet { pushParams() } }
     var cartoon: Float { didSet { pushParams() } }  // voice style: 0 = Natural, 1 = Cartoon
     var slowDeeper: Bool { didSet { pushParams() } }  // "Deeper when slow"
     var fastHigher: Float { didSet { pushParams() } }  // "Higher when fast": 0 (off) ... 8 half-steps, used while slowDeeper is on
-    // The voice changer card. Used only while "Your voice" is on (never in the Soundboard-only pass-through).
+    // The voice changer card. Used while its switch is on (the command-line checks turn it on with "Your voice"),
+    // never in the Soundboard-only pass-through.
     var changer = ChangerSettings() { didSet { if changer != oldValue { pushParams() } } }
     private(set) var changerState: ChangerState = .off
     var changerTune: [(String, Float)] = []  // --changer-tune (command line only; used when the chain is made)
@@ -1353,8 +1355,9 @@ final class VoiceShifter {
     private(set) var chain: VoiceChain?
     let params: OSAllocatedUnfairLock<VoiceParams>
     let sounds = OSAllocatedUnfairLock(uncheckedState: SoundPlay())  // the Soundboard's sound, for the chain
-    private var running = false      // the chain may run (the voice is on, or the Soundboard is open)
-    private var voiceSwitch = false  // "Your voice" is on
+    private(set) var running = false  // the chain may run (Your voice or the Voice changer is on, or the Soundboard is open)
+    private var voiceSwitch = false    // "Your voice" is on
+    private var changerSwitch = false  // the Voice changer is on
     private(set) var runsForSounds = false  // the Soundboard is open (with the voice off: no pitch change)
     private var holdCount = 0
     private var listeners: [Listener] = []
@@ -1378,6 +1381,7 @@ final class VoiceShifter {
     }
 
     var isOn: Bool { voiceSwitch }
+    var changerIsOn: Bool { changerSwitch }
     var currentMic: AudioDeviceID? { Mics.resolve(micUID) }
 
     // "Your voice" on.
@@ -1387,24 +1391,40 @@ final class VoiceShifter {
         begin()
     }
 
-    // "Your voice" off. With the Soundboard open, the chain keeps going with no pitch change.
+    // "Your voice" off. With the Voice changer on or the Soundboard open, the chain keeps going.
     func stop() {
         guard voiceSwitch else { return }
         voiceSwitch = false
         pushParams()
-        if runsForSounds { onChange() } else { end() }
+        if changerSwitch || runsForSounds { onChange() } else { end() }
+    }
+
+    // The Voice changer on: the chain runs for it on its own, with "Your voice" off.
+    func startChanger() {
+        guard !changerSwitch else { return }
+        changerSwitch = true
+        begin()
+    }
+
+    // The Voice changer off. With "Your voice" on or the Soundboard open, the chain keeps going.
+    func stopChanger() {
+        guard changerSwitch else { return }
+        changerSwitch = false
+        pushParams()
+        if voiceSwitch || runsForSounds { onChange() } else { end() }
     }
 
     // The Soundboard opened or closed: while it's open the chain runs even with the voice off.
     func keepForSounds(_ on: Bool) {
         guard on != runsForSounds else { return }
         runsForSounds = on
-        if on { begin() } else if !voiceSwitch { end() }
+        if on { begin() } else if !voiceSwitch && !changerSwitch { end() }
     }
 
     // Everything off (quitting).
     func stopAll() {
         runsForSounds = false
+        changerSwitch = false
         stop()
         end()
     }
@@ -1455,12 +1475,11 @@ final class VoiceShifter {
         return ms / 1000
     }
 
-    // With the voice off (only the Soundboard running) the voice goes through unchanged, and the voice changer only
-    // runs while "Your voice" is on.
+    // With Your voice and the Voice changer off (only the Soundboard running) the voice goes through unchanged.
     private func pushParams() {
-        let voice = voiceSwitch && changer.on ? VoiceLibrary.shared.voice(changer.voiceID)?.natural : nil
+        let voice = changerPlays ? VoiceLibrary.shared.voice(changer.voiceID)?.natural : nil
         // Only one at a time (the owner's rule): with a changer voice on, the changer alone sets the pitch, so the
-        // amount and "Deeper when slow" are not sent (the window also sets them to 0 / off).
+        // amount and "Deeper when slow" are not sent (the window turns Your voice off when the changer goes on).
         let steps = voiceSwitch && voice == nil ? halfSteps : 0, cartoon = cartoon
         let slowDeeper = voiceSwitch && voice == nil && slowDeeper
         let new = VoiceParams(halfSteps: steps, cartoon: cartoon, slowDeeper: slowDeeper,
@@ -1473,6 +1492,8 @@ final class VoiceShifter {
         updateChangerState(voiceFound: voice != nil)
     }
 
+    private var changerPlays: Bool { changer.on && (changerSwitch || voiceSwitch) }
+
     // "Higher when fast" as the sound thread may use it: 0 ... SpeakingRate.maxUp half-steps.
     static func cleanFastHigher(_ value: Float) -> Float { value.isFinite ? max(0, min(SpeakingRate.maxUp, value)) : 0 }
 
@@ -1480,7 +1501,7 @@ final class VoiceShifter {
     // (some pieces came late in the last 10 s; Natural filled in), or unavailable (why; Natural plays).
     private func updateChangerState(voiceFound: Bool) {
         var new: ChangerState = .off
-        if changer.on && voiceSwitch {
+        if changerPlays {
             if !voiceFound {
                 new = .unavailable("no voice \"\(changer.voiceID)\"")
             } else if changer.realistic {
@@ -1533,7 +1554,7 @@ final class VoiceShifter {
     // The voice the AI is wanted for now (nil = Realistic is off, or this Mac can't run it).
     private var realisticWanted: VoiceEntry? {
         #if arch(arm64)
-        guard voiceSwitch && changer.on && changer.realistic, let entry = VoiceLibrary.shared.voice(changer.voiceID),
+        guard changerPlays && changer.realistic, let entry = VoiceLibrary.shared.voice(changer.voiceID),
               entry.manifest.realistic != nil else { return nil }
         return entry
         #else

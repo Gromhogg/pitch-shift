@@ -120,17 +120,19 @@ func arg(_ name: String) -> String? {
 // [--strength 0.6]: show the window in a state for screenshots, without touching any sound or settings, and without
 // switching apps (states: hear-on, voice-on, waiting, typing, recording, playing, listening, hover, menu, roll, resize,
 // no-driver, advanced-alert, sounds, rename, volume, drop, light, tone, slow, eq, changer, changer-man,
-// changer-realistic, changer-loading, changer-fallback, changer-slider-natural|fast|default|max|NN, changer-intel;
+// changer-realistic, changer-loading, changer-fallback, changer-slider-natural|fast|default|max|NN, changer-intel,
+// click-voice, click-vc;
 // --cartoon-amount sets the voice style slider; sounds opens the Soundboard with example names, rename shows the first
 // name being changed, volume the first sound's volume slider and drop files being dragged over it; "tone" shows
 // Advanced processing on, and --tone-amount sets the Bass ↔ Treble slider; slow turns on "Deeper when slow"; eq turns
 // on Auto EQ, and --eq-offsets sets its five sliders, which show only the offsets since no sound plays; without eq,
-// Auto EQ shows off; changer turns on the Voice changer (and Your voice) with Woman, changer-man with Man (--voice
-// NAME: that voice, an added one too), --strength sets its Strength slider, changer-realistic/-loading/-fallback show
-// the AI voice (the slider's default) working/getting ready/standing in with Natural, changer-slider-* puts the
-// "Faster ↔ More real" slider at Natural, the first AI step, the default, the far right or NN percent, changer-intel
-// the card as on an Intel Mac (the slider stays at Natural); resize drags the window's corner through the three
-// layouts; pro-locked shows Pitch Shift Pro locked, pro-unlocked unlocked (the default for pictures), pro-unlock the
+// Auto EQ shows off; changer turns on the Voice changer with Woman (Your voice then shows off, even with voice-on:
+// only one at a time), changer-man with Man (--voice NAME: that voice, an added one too), --strength sets its
+// Strength slider, changer-realistic/-loading/-fallback show the AI voice (the slider's default) working/getting
+// ready/standing in with Natural, changer-slider-* puts the "Faster ↔ More real" slider at Natural, the first AI
+// step, the default, the far right or NN percent, changer-intel the card as on an Intel Mac (the slider stays at
+// Natural); click-voice / click-vc turn Your voice's / the Voice changer's switch on half a second in, as a click
+// would (the other one goes off); resize drags the window's corner through the three layouts; pro-locked shows Pitch Shift Pro locked, pro-unlocked unlocked (the default for pictures), pro-unlock the
 // unlock window, with pro-typo a key with a typo in it, with pro-paste a key pasted from an email (line breaks and
 // spaces in it), with pro-done the "Unlocked" message, with pro-alone as its own window instead of a sheet).
 let preview = arg("--preview")

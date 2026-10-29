@@ -59,20 +59,20 @@ More help: [windows/README.md](windows/README.md).
 - Press **Test** to record 5 seconds of your shifted voice and hear it back. With the AI voice changer on, Test waits for the AI voice's delay before it stops, so you hear all 5 seconds in the AI voice.
 - Press **Sounds** for the Soundboard (Mac): add sound files with **+**, then click one to play it into your call. You hear it too; on your Mac's own speakers your voice is muted while it plays, so it can't echo.
 - Drag sound files onto the Soundboard to add them. Right-click a sound to rename it, change its volume or remove it.
-- The Soundboard works with **Your voice** off too: your mic then goes into the call unchanged.
+- The Soundboard works with **Your voice** off too: your mic then goes into the call unchanged (or through the voice changer, if it's on).
 - Use headphones in calls. If your voice cuts out, turn off the call app's noise suppression (like Krisp).
 
 **Voice changer** (Mac)
 
-- Turn it on and pick **Woman** (for a man's voice) or **Man** (for a woman's voice). It turns on **Your voice** too.
+- Turn it on and pick **Woman** (for a man's voice) or **Man** (for a woman's voice). It works on its own: **Your voice** doesn't need to be on. Choose **Pitch Shift Mic** in your call app, as for **Your voice**.
 - Slide from **Light** to **Full** to choose how strong the change is.
 - Slide **Faster ↔ More real** to choose between speed and realism. All the way to **Faster** is the plain voice changer, with almost no delay. Anywhere to the right, an AI voice says your words again in the new voice, so it sounds like a real person (Macs with Apple silicon). The further right, the more of what you say next it hears before it speaks, so words come out clearer and steadier, but your voice reaches the call later: the card shows the delay ("Delay: about 0.46 s"), up to about one second all the way right. It starts a quarter of the way along: the least delay that speaks smoothly. The first time, the AI voice takes up to a minute to get ready; the plain voice changer plays meanwhile. Whenever the plain voice changer stands in for the AI voice, the card says **backup voice** next to the delay. With the AI voice, the **Light**…**Full** slider moves only the pitch, from **Your pitch** to the voice's. Moving the slider changes the delay at your next short pause (so nothing is cut or repeated), or within 1.5 seconds if you don't pause. Claps, finger snaps, knocks, clicks and whistles come through as they really sound instead of being turned into a voice; everything your voice makes (words, laughs, coughs, breaths) stays the AI voice.
 - Holding a note ("aaah") keeps its pitch steady in both the plain and the AI voice changer.
 - Since 3.3, the AI **Woman** and **Man** voices are trained on real recordings (8 speakers each), so they sound clearer and much cleaner in a noisy room. After updating, the first time you use each voice it again takes up to a minute to get ready.
-- Only one at a time: a voice sets your pitch, so turning one on puts the amount at 0 and turns **Deeper when slow** off. Changing the amount or turning **Deeper when slow** on turns the voice changer off. The **Natural**…**Cartoon** slider is not used while a voice is on. **Test** and the Soundboard still work.
+- Only one at a time: turning the voice changer on turns **Your voice** off, and turning **Your voice** on turns the voice changer off. Each keeps its own settings (pitch, sliders, **Deeper when slow**, voice) for next time. The mic menu, **Test**, **Sounds** and the Pitch Shift Mic light in the **Your voice** card work with either one on.
 - Add your own voices with the **⋯** button next to the voice menu (see [Your own voices](#your-own-voices)).
 
-All of them can be on at the same time. Closing the window keeps Pitch Shift running. Quit it with ⌘Q.
+**What you hear** can be on at the same time as either of the other two. Closing the window keeps Pitch Shift running. Quit it with ⌘Q.
 
 **Pitch Shift Pro ($5, Mac)**
 
