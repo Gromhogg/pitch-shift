@@ -3,7 +3,8 @@
 // using Natural mode.
 //   sound thread: voicestream_push (copies the mic + the pitch from voicechanger_analyse) and voicestream_pull (takes
 //   the finished AI voice, a fixed delay later; while loading, on a late piece or an error it plays Natural mode's
-//   sound delayed to the same fixed delay instead, crossfaded; never the raw mic). A new stream plays at its fixed
+//   sound delayed to the same fixed delay instead, crossfaded; never the raw mic, except (3.4) for sounds that are
+//   not a voice: claps, clicks, knocks, keys, whistles, which SoundGate.h lets through as they are). A new stream plays at its fixed
 //   delay from the start: silence until Natural's sound reaches it, then the AI voice from its first piece.
 //   worker thread (made by voicestream_new): resample, encoder, generator, crossfade into the output ring.
 //
@@ -132,6 +133,10 @@ void voicestream_set_intonation(VoiceStream *stream, float intonation);
 //   "aiHissCross" 0.3 [0]: hissy frames (zero crossings per sample above this) get no tone; "aiGainCap" 1 [0]: the
 //   loudness match lifts the AI voice only as far as the mic is above the room's noise (in pauses at most "aiPauseDb" -10 dB);
 //   "aiLimit" 0.6 [0]: a peak limiter on each finished piece (5 ms look-ahead, 80 ms release).
+// 3.4 keys ("hum34" 0 turns them off: 3.3's sound exactly, with VoiceChanger's "hum34"; "ai32=0" needs it too now):
+//   "aiHumLiftDb" 24 [0]: when the sound around a piece is a steady note (a hum), the speech reader hears it lifted
+//   toward "aiHumLevelDb" -20 (dBFS, the voiced frames' mean power) by at most this much (the trained voices lose the
+//   tone of a long, quiet hum); the output still follows the mic's loudness, and speech is never steady enough.
 // Returns 1 if the key is known.
 int voicestream_tune(VoiceStream *stream, const char *key, float value);
 
@@ -148,6 +153,12 @@ void voicestream_push(VoiceStream *stream, const float *mic, int frames, const f
 void voicestream_pull(VoiceStream *stream, const float *naturalNow, int naturalDelay, float *out, int frames);
 
 void voicestream_get_stats(const VoiceStream *stream, VoiceStreamStats *out);
+
+// 3.4: sounds that are not a voice (claps, finger snaps, knocks, taps, keys, mouse clicks, whistles) are heard as the
+// original mic sound at the same delay instead of the AI voice's version of them (SoundGate.h). voicestream_tune keys:
+// "aiSounds" 1 [0 = off, the AI voice for every sound; "ai32=0" turns it off too], "sg..." (how it decides,
+// SoundGate.cpp). This says what was heard as the original so far: short sounds, whistles, and for how long.
+void voicestream_get_passed(const VoiceStream *stream, int64_t *sounds, int64_t *whistles, double *seconds);
 
 #ifdef __cplusplus
 }

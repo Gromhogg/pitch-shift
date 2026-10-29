@@ -6,6 +6,7 @@
 #include "Voice/VoiceChanger.h"
 #include "Voice/PulseShifter.h"
 #include "Voice/VoiceModel.h"
+#include "Voice/SoundGate.h"
 #include <libproc.h>
 #include <sys/proc_info.h>
 

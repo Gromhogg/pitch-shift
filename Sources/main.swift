@@ -36,7 +36,9 @@
 //                                              with the voice changer (the amount, style and --slow-deeper are then
 //                                              ignored: only one at a time;
 //                                              --changer-stats prints what it does once per second of sound;
-//                                              --changer-tune ai32=0: the AI voice exactly as in 3.1.1, see VoiceModel.h)
+//                                              --changer-tune ai32=0: the AI voice exactly as in 3.1.1, see VoiceModel.h;
+//                                              aiSounds=0: claps, clicks and whistles changed by the AI too, as
+//                                              before 3.4)
 //                [--live-sim [--buffer 128]]   instead: the live chain's steps in callback-sized pieces (with the
 //                                              waiting sound), printing the delay they add (no devices)
 //   --list-voices [--voices-dir DIR]           the voice changer's voices (and files that were skipped)
@@ -130,7 +132,9 @@ func arg(_ name: String) -> String? {
 // the card as on an Intel Mac (the slider stays at Natural); resize drags the window's corner through the three
 // layouts; pro-locked shows Pitch Shift Pro locked, pro-unlocked unlocked (the default for pictures), pro-unlock the
 // unlock window, with pro-typo a key with a typo in it, with pro-paste a key pasted from an email (line breaks and
-// spaces in it), with pro-done the "Unlocked" message, with pro-alone as its own window instead of a sheet).
+// spaces in it), with pro-done the "Unlocked" message, with pro-alone as its own window instead of a sheet;
+// switch-flip shows the switches slowed down 10 times: the first card's goes on and turns back halfway, the second
+// card's is held down). --steps 3,-2 sets the two cards' big numbers (one number: both).
 let preview = arg("--preview")
 let previewStates = Set((preview ?? "").split(separator: ",").map(String.init))
 
@@ -256,10 +260,15 @@ let changerArg: ChangerOptions? = {
                       // 3.2 (VoiceModel.h): "ai32=0" = 3.1.1's AI voice
                       "aiSplit", "aiAheadMax", "aiAutoChip", "aiStartChip", "aiGraceMs", "aiRealtime", "aiLeftMs",
                       "aiFadeAdapt", "aiJoinGains", "aiGainTwoSided", "aiNearMs", "aiBridgeStrict", "aiShortRunMs",
-                      "aiHissCross", "aiGainCap", "aiPauseDb", "aiLimit", "aiSlowChip"]  // Realistic mode's test keys (voicestream_tune)
+                      "aiHissCross", "aiGainCap", "aiPauseDb", "aiLimit", "aiSlowChip",
+                      // 3.4 (VoiceModel.h; "hum34=0" = 3.3's voice changer, VoiceChanger.cpp too)
+                      "aiHumLiftDb", "aiHumLevelDb"]  // Realistic mode's test keys (voicestream_tune)
         let unknown = changerTuneArg.filter { voicechanger_tune(probe, $0.0, $0.1) == 0 && !aiKeys.contains($0.0) && !isVoiceShifterTuneKey($0.0) }.map(\.0)
         voicechanger_delete(probe)
-        if !unknown.isEmpty { print("--changer-tune: unknown keys \(unknown.joined(separator: ", "))"); exit(1) }
+        let gate = soundgate_new(48000)  // 3.4: "aiSounds" and SoundGate's "sg..." keys
+        let stillUnknown = unknown.filter { key in key != "aiSounds" && soundgate_tune(gate, key, changerTuneArg.first { $0.0 == key }?.1 ?? 0) == 0 }
+        soundgate_delete(gate)
+        if !stillUnknown.isEmpty { print("--changer-tune: unknown keys \(stillUnknown.joined(separator: ", "))"); exit(1) }
     }
     let strength = arg("--strength").flatMap(Float.init).map { max(0, min(1, $0)) } ?? 1
     return ChangerOptions(voice: natural, strength: strength, tune: changerTuneArg, stats: args.contains("--changer-stats"))

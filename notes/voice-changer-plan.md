@@ -649,3 +649,68 @@ measurably less smooth (audibility unknown); Man at the default slider was the o
 less American to the accent model; at release, upload `woman_us_t200_ahead.mlmodelc.zip` and
 `man_t200_ahead.mlmodelc.zip` (in `research/voicechanger/models/`) and put the tag in place of PLACEHOLDER in
 `voices/models.txt`.
+
+## 3.4: steady hums stay steady, hummed tunes keep their tune (2026-10-27)
+
+The owner: a steady, comfortable hum "sounds funny, like the voice jumps unnaturally. more obvious on longer tests";
+"sighs, laughter and even humming can sound a bit unnatural (humming a tune with lips closed sometimes comes across
+differently, such as using lip movement to make the notes)". Measured offline on the owner's own recording (68 s: a
+10 s hum, a hummed tune, laughs, a sigh, a whistle, claps, typing; never in git), VocalSet songs and long notes
+(CC BY 4.0), 18 free laugh and sigh recordings (Wikimedia Commons: CC0, CC BY, public domain) and the 3.3 speech sets.
+Full report: `research/voicechanger/results/hum.md`.
+
+**Causes, in order:**
+1. **A hum longer than ~4.6 s became "room noise" (code; both voices, every slider position).** A frame is voiced only
+   10 dB above the noise floor, and the floor was the quietest 10 % of the last ~5 s of *all* frames. A steady hum
+   fills those 5 s, so the floor rose to the hum itself and from ~4.6 s on the AI voice was told "no pitch": it
+   whispered, broke up and pumped for the rest of the hum. This is why longer tests were worse.
+2. **The trained Woman voice itself wavers on a long, quiet hum (model).** Told a steady 200 Hz it stays on it only
+   55 % of the owner's hum (the rest: an octave or a twelfth low, or no pitch); the 3.2 blend with the same code: 100 %.
+   Louder input helps.
+3. **Tunes: the Woman's livelier melody stretched the steps and squashed the top (code).** The AI pitch moves 1.7× as
+   far as the speaker's (good for speech): a hummed tune's steps came out 1.5-1.7× too big, and anything high was
+   pressed into the band's top (444 Hz): a man singing a song came out on one note.
+4. **Soft note ends dropped out (code, quiet mic).** Nothing under -50 dBFS was voiced; the owner's hum ends and soft
+   tune notes sit at -50 … -54 dBFS.
+5. Laughs and sighs (not changed): mostly breathy (the tracker calls 0-47 % of a laugh voiced), squeals above 600 Hz
+   are not tracked, voiced laugh peaks sit at the band's top (15-100 % of their frames), the model's laugh output is
+   choppy whatever the limiter or loudness cap does; the 0.6 limiter holds loud laughs at -4.4 dBFS peak (without it
+   up to +10 dBFS). "Higher when fast" is never used while a changer voice is on (one at a time).
+
+**What changed** (`--changer-tune hum34=0` = 3.3 exactly: check1 14/14 and 10/10 renders sample-identical):
+- `VoiceChanger.cpp`: the noise floor learns only from frames that are not voiced (`floorMode`; after 20 s of voice
+  with no 0.3 s pause they count again, so a steady tone in the room still becomes the floor: `floorVoiceS`,
+  `floorGapFrames`); a voice already going on may fade to -58 dBFS and 6 dB above the floor (`voicedKeepDb` 8,
+  `voicedKeepFloorDb` 4); sung passages (`singMode`: more than 45 % of the last 200 voiced frames note-like, i.e. the
+  last 15 voiced frames within 1 half-step; off below 30 %; speech stays under 38 % on every set tried): the AI pitch
+  keeps the tune's steps (intonation 1, gliding over 0.5 s, never while a note is held), a passage sung more than
+  5 half-steps above the speaker's median (its 1 s mean) moves down as a whole, the medians don't learn from it.
+- `VoiceModel.mm`: when the sound around a piece is a steady note (≥ 30 voiced frames within ±0.4 s, 80 % within
+  0.75 half-steps), the speech reader hears its window lifted toward -20 dBFS (≤ 24 dB, 2 dB per piece, peaks under
+  0.9; `aiHumLiftDb`, `aiHumLevelDb`). The output still follows the mic's loudness; speech never qualifies.
+
+**Numbers** (offline, CPU, Woman, "More real" 1 unless noted; 3.3.0 → 3.4):
+- Owner's hum: output with a clear pitch 68 → 95 % (second half 42 → 92 %), pitch jumps 49 → 12 per 10 s, breaks
+  51 → 9 per 10 s, level jumps 200 → 52 per 10 s; on the pitch asked for 767 of 940 frames (3.3.0: 404, it stopped
+  asking after 4.7 s). Slider 0.25 the same (95 %, 11 jumps, 8 breaks).
+- Owner's tune: steps 1.54× → 1.08× the sung size, AI range 141-443 → 145-374 Hz, breaks 12 → 9 per 10 s, octave
+  flips 10 → 4, poor joins 28 → 15 %.
+- Songs (VocalSet): men → Woman note steps 0.57× → 0.89×, voiced output 76 → 85 %, breaks 8.1 → 1.8 per 10 s;
+  women → Man 0.77× → 0.97×.
+- Speech (the 3.3 sets, same method as `results/trained.md`; 3.3.0 numbers reproduced exactly): MOS, voice print,
+  buzz, flatness, pitch follow, joins and stutter counts equal (paired MOS +0.001…-0.008, ranges ±0.006-0.015);
+  word errors +1 to +5 words of 284-457 (1-3 clips). The steady-note lift changes no man's clip (all 70
+  sample-identical at both sliders) and 9-14 of the 40 women's only slightly (-35 … -46 dB, a few monotone moments).
+- Real time (stream test program, 128-sample callbacks, CPU, 60 s, speech then the owner's hum + tune looped, 2
+  rounds): 0 late pieces in all 8 runs (3.3.0 and 3.4, sliders 0.25 and 1); delay 435.5 / 985.5 ms as before; pieces
+  36-49 ms on average, worst 50-58 ms (the Mac was busy with other renders).
+- Changer off byte-identical to main 14/14; 36 warnings as main; app and driver both chips.
+
+**Tried and left out** (numbers in the report): the crossfade searching ±2.5 ms for the best fit (`aiSolaMode=3`):
+joins on the hum 20 → 10 % poor, on the tune 15 → 6 %, on speech 15.0 → 13.1 %, but sudden sound changes on speech
+29 → 41: no. Lifting the speech reader's level all the time (not only on steady notes): hum on pitch 84 %, but quiet
+speech MOS -0.06 (±0.04): no.
+
+**Left:** the trained Woman still wavers on ~1 in 5 frames of a long quiet hum (model; the next training run adds
+hums); a passage sung high slides down to its place over the first 1-2 s; laughs and sighs unchanged; nobody has
+listened; no live mic test. Listening folder `~/Downloads/Pitch Shift 3.4 hum compare/`.
