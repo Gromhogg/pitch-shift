@@ -116,6 +116,7 @@ struct SoundGate {
     int64_t n16 = 0, n8 = 0;
     int64_t frames = 0;                      // 10 ms frames measured
     std::vector<float> e10, floorScratch;
+    std::vector<double> pitchSound, pitchSums;  // the pitch check's sound in order, and its sum per lag
     std::vector<uint8_t> voiced, tonal;
     std::vector<float> toneHz, toneShare, toneH2, flat;
     float floorDb = -120;
@@ -174,6 +175,8 @@ struct SoundGate {
         x8.assign(k8Ring, 0.0f);
         e10.assign(kFrameRing, -120.0f);
         floorScratch.assign(kFloorFrames, 0.0f);
+        pitchSound.assign((size_t)(std::lround(0.04 * rate8) + std::ceil(rate8 / 60) + 1), 0.0);
+        pitchSums.assign((size_t)(std::ceil(rate8 / 60) + 1), 0.0);
         voiced.assign(kFrameRing, 0);
         tonal.assign(kFrameRing, 0);
         toneHz.assign(kFrameRing, 0.0f);
@@ -269,13 +272,34 @@ struct SoundGate {
             if (e0 > 1e-12) {
                 double el = 0;
                 for (int64_t q = end - W - lagLo; q < end - lagLo; q++) el += (double)at(q) * at(q);
+                // each lag's sum, eight lags side by side (each added up in the same order as one lag at a time)
+                double *x = pitchSound.data();  // x[i] = at(end - W - lagHi + i)
+                for (int i = 0; i < W + lagHi; i++) x[i] = at(end - W - lagHi + i);
+                const double *w = x + lagHi;    // the last W samples
+                for (int L = lagLo; L <= lagHi; L += 8) {
+                    const double *y[8];
+                    for (int u = 0; u < 8; u++) y[u] = w - std::min(L + u, lagHi);  // past lagHi: a spare copy, not used
+                    double c0 = 0, c1 = 0, c2 = 0, c3 = 0, c4 = 0, c5 = 0, c6 = 0, c7 = 0;
+                    for (int q = 0; q < W; q++) {
+                        const double v = w[q];
+                        c0 += v * y[0][q];
+                        c1 += v * y[1][q];
+                        c2 += v * y[2][q];
+                        c3 += v * y[3][q];
+                        c4 += v * y[4][q];
+                        c5 += v * y[5][q];
+                        c6 += v * y[6][q];
+                        c7 += v * y[7][q];
+                    }
+                    const double c[8] = {c0, c1, c2, c3, c4, c5, c6, c7};
+                    for (int u = 0; u < 8 && L + u <= lagHi; u++) pitchSums[(size_t)(L + u)] = c[u];
+                }
                 for (int L = lagLo; L <= lagHi; L++) {
                     if (L > lagLo) {  // slide the lagged window one sample back
                         const float in = at(end - W - L), out = at(end - L);
                         el += (double)in * in - (double)out * out;
                     }
-                    double c = 0;
-                    for (int64_t q = end - W; q < end; q++) c += (double)at(q) * at(q - L);
+                    const double c = pitchSums[(size_t)L];
                     const double r = c / std::sqrt(e0 * std::max(el, 1e-12));
                     best = std::max(best, r);
                 }
