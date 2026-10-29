@@ -13,6 +13,7 @@ final class VoiceModelStore {
     // on the GPU, the CPU if those can't be used.
     static var computeUnits: Int32 = Int32(VOICEMODEL_COMPUTE_AUTO)
 
+    // (The ids are VoiceEntry.modelKey: "woman", or "woman+quiet" with "Block background sounds" on.)
     enum Status: Equatable {
         case none
         case loading(String)          // voice id
@@ -27,37 +28,41 @@ final class VoiceModelStore {
     private let queue = DispatchQueue(label: "Pitch Shift AI voice loading", qos: .userInitiated)
 
     // True until this voice has been loaded once on this Mac (then macOS keeps the prepared models).
-    func firstTime(_ entry: VoiceEntry) -> Bool { !UserDefaults.standard.bool(forKey: Self.preparedKey(entry)) }
+    func firstTime(_ entry: VoiceEntry, quiet: Bool = false) -> Bool {
+        !UserDefaults.standard.bool(forKey: Self.preparedKey(entry, quiet: quiet))
+    }
 
     // What the window can say while loading.
-    func loadingNote(_ entry: VoiceEntry?) -> String {
-        guard let entry, firstTime(entry) else { return "Getting the AI voice ready…" }
+    func loadingNote(_ entry: VoiceEntry?, quiet: Bool = false) -> String {
+        guard let entry, firstTime(entry, quiet: quiet) else { return "Getting the AI voice ready…" }
         return "Getting the AI voice ready. The first time can take up to a minute."
     }
 
     // Asks for a voice's models (main thread). Loads in the background unless they are loaded or loading already.
-    func want(_ entry: VoiceEntry) {
-        wanted = entry.id
+    func want(_ entry: VoiceEntry, quiet: Bool = false) {
+        let id = entry.modelKey(quiet: quiet)
+        wanted = id
         switch status {
-        case .ready(let id) where id == entry.id, .loading(let id) where id == entry.id: return
+        case .ready(let ready) where ready == id, .loading(let ready) where ready == id: return
         default: break
         }
-        guard let encoder = entry.encoderURL?.path, let voice = entry.modelURL?.path else {
-            setStatus(.failed(entry.id, "\(entry.name) has no AI voice"))
+        guard let encoder = entry.encoderURL?.path, let voice = entry.modelURL(quiet: quiet)?.path else {
+            setStatus(.failed(id, "\(entry.name) has no AI voice"))
             return
         }
         guard FileManager.default.fileExists(atPath: encoder), FileManager.default.fileExists(atPath: voice) else {
-            setStatus(.failed(entry.id, "the AI voice files are missing"))
+            setStatus(.failed(id, "the AI voice files are missing"))
             return
         }
         if let model { retired.append(model) }  // another voice was loaded: a running chain may still use it
         model = nil
-        setStatus(.loading(entry.id))
-        let id = entry.id, units = Self.computeUnits, key = Self.preparedKey(entry)
+        setStatus(.loading(id))
+        let units = Self.computeUnits, key = Self.preparedKey(entry, quiet: quiet), second = Self.secondFiles(entry)
         queue.async { [weak self] in
             var err = [CChar](repeating: 0, count: 200)
             let made = voicemodel_load(encoder, voice, units, &err, Int32(err.count))
             let why = String(cString: err)
+            if let made { Self.addSecond(made, second) }
             DispatchQueue.main.async {
                 guard let self else { voicemodel_free(made); return }
                 guard self.wanted == id, self.status == .loading(id) else { voicemodel_free(made); return }  // no longer wanted
@@ -94,8 +99,8 @@ final class VoiceModelStore {
     }
 
     // Loads right here and waits (for --render-voice). The caller frees it with voicemodel_free.
-    static func loadNow(_ entry: VoiceEntry) throws -> OpaquePointer {
-        guard let encoder = entry.encoderURL?.path, let voice = entry.modelURL?.path,
+    static func loadNow(_ entry: VoiceEntry, quiet: Bool = false) throws -> OpaquePointer {
+        guard let encoder = entry.encoderURL?.path, let voice = entry.modelURL(quiet: quiet)?.path,
               FileManager.default.fileExists(atPath: encoder), FileManager.default.fileExists(atPath: voice) else {
             throw Problem(message: "\(entry.name): the AI voice files are missing")
         }
@@ -103,8 +108,24 @@ final class VoiceModelStore {
         guard let made = voicemodel_load(encoder, voice, computeUnits, &err, Int32(err.count)) else {
             throw Problem(message: "Realistic mode: \(String(cString: err))")
         }
-        UserDefaults.standard.set(true, forKey: preparedKey(entry))
+        UserDefaults.standard.set(true, forKey: preparedKey(entry, quiet: quiet))
+        addSecond(made, secondFiles(entry))
         return made
+    }
+
+    // 3.5: the second voice (hums, laughs, sighs, singing) and the sound sorter, if the voice has them.
+    static func secondFiles(_ entry: VoiceEntry) -> (voice: String, sorter: String)? {
+        guard let voice = entry.soundsURL?.path, let sorter = VoiceLibrary.sorterURL(for: entry)?.path,
+              FileManager.default.fileExists(atPath: voice), FileManager.default.fileExists(atPath: sorter) else { return nil }
+        return (voice, sorter)
+    }
+
+    static func addSecond(_ model: OpaquePointer, _ files: (voice: String, sorter: String)?) {
+        guard let files else { return }
+        var err = [CChar](repeating: 0, count: 200)
+        if voicemodel_add_second(model, files.voice, files.sorter, &err, Int32(err.count)) == 0 {
+            print("Second voice not used: \(String(cString: err))")
+        }
     }
 
     private func setStatus(_ new: Status) {
@@ -115,12 +136,12 @@ final class VoiceModelStore {
 
     // Changes when the model files change (size of the voice file, and its name when it isn't "<id>.mlmodelc", as for
     // Woman's woman_us.mlmodelc, which has the old Woman's size), so a new version counts as "first time" again.
-    private static func preparedKey(_ entry: VoiceEntry) -> String {
-        let size = entry.modelURL.flatMap { url -> Int? in
+    private static func preparedKey(_ entry: VoiceEntry, quiet: Bool = false) -> String {
+        let size = entry.modelURL(quiet: quiet).flatMap { url -> Int? in
             let weights = url.appendingPathComponent("weights/weight.bin")
             return (try? FileManager.default.attributesOfItem(atPath: weights.path)[.size] as? Int) ?? nil
         } ?? 0
-        let model = entry.manifest.realistic?.model ?? ""
+        let model = (quiet && entry.quietURL != nil ? entry.manifest.realistic?.quiet : entry.manifest.realistic?.model) ?? ""
         let name = model == "\(entry.id).mlmodelc" || model.isEmpty ? "" : ".\(model)"
         return "aiVoicePrepared.\(entry.id)\(name).\(size)"
     }
@@ -138,12 +159,15 @@ func computeUnits(named name: String) -> Int32? {
     }
 }
 
-// Hands the mic sound and the pitch frames voicechanger_analyse just made to the AI voice (sound thread).
+// Hands the mic sound and the pitch frames voicechanger_analyse just made to the AI voice (sound thread). (3.5: with
+// each frame's tracked pitch and flags, for the choice between the main and the second voice.)
 func voicestreamPush(_ stream: OpaquePointer, _ mic: UnsafePointer<Float>, _ frames: Int, _ pitch: UnsafeMutablePointer<VoiceChangerPitch>) {
     let raw = UnsafeMutableRawPointer(pitch)
     let hz = (raw + MemoryLayout<VoiceChangerPitch>.offset(of: \VoiceChangerPitch.frameHz)!).assumingMemoryBound(to: Float.self)
     let pos = (raw + MemoryLayout<VoiceChangerPitch>.offset(of: \VoiceChangerPitch.framePos)!).assumingMemoryBound(to: Int64.self)
-    voicestream_push(stream, mic, Int32(frames), hz, pos, pitch.pointee.newFrames)
+    let f0In = (raw + MemoryLayout<VoiceChangerPitch>.offset(of: \VoiceChangerPitch.frameF0In)!).assumingMemoryBound(to: Float.self)
+    let flags = (raw + MemoryLayout<VoiceChangerPitch>.offset(of: \VoiceChangerPitch.frameFlags)!).assumingMemoryBound(to: UInt8.self)
+    voicestream_push2(stream, mic, Int32(frames), hz, pos, f0In, flags, pitch.pointee.newFrames)
 }
 
 // One line about the AI voice for --watch and --render-voice --quality realistic.
@@ -174,9 +198,10 @@ func renderRealisticFile(input: String, natural: [Float], rate: Double, output: 
     for c in 0..<used { for i in 0..<length { mono[i] += source.floatChannelData![c][i] / Float(used) } }
 
     let started = Date()
-    let model = try VoiceModelStore.loadNow(entry)
+    let model = try VoiceModelStore.loadNow(entry, quiet: options.quiet)
     defer { voicemodel_free(model) }
     print(String(cString: voicemodel_describe(model)))
+    if options.quiet, let quiet = entry.manifest.realistic?.quiet { print("Block background sounds (3.5): main voice \(quiet)") }
     let block = 128
     var config = VoiceStreamConfig(hopMs: 160, contextMs: 480, crossfadeMs: 40, solaMs: 10, reserveMs: 70, lookaheadMs: Int32(lookaheadMs))
     guard let stream = voicestream_new(model, rate, Int32(block), 1, &config) else { throw Problem(message: "Could not start the AI voice.") }
@@ -226,6 +251,11 @@ func renderRealisticFile(input: String, natural: [Float], rate: Double, output: 
     var sounds: Int64 = 0, whistles: Int64 = 0, passed = 0.0
     voicestream_get_passed(stream, &sounds, &whistles, &passed)
     print(String(format: "Other sounds heard as they are (3.4): %lld short sounds, %lld whistles, %.2f s", sounds, whistles, passed))
+    if voicemodel_has_second(model) != 0 {
+        var pieces: Int64 = 0, switches: Int64 = 0, blends: Int64 = 0
+        voicestream_get_second(stream, &pieces, &switches, &blends)
+        print(String(format: "Second voice (3.5): %lld of %lld pieces, %lld switches (%lld blended)", pieces, stats.hops, switches, blends))
+    }
     let aligned = Array(result[min(latency, result.count)..<min(latency + length, result.count)])
     guard let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1),
           let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(max(1, aligned.count))) else {

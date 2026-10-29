@@ -38,7 +38,9 @@
 //                                              --changer-stats prints what it does once per second of sound;
 //                                              --changer-tune ai32=0: the AI voice exactly as in 3.1.1, see VoiceModel.h;
 //                                              aiSounds=0: claps, clicks and whistles changed by the AI too, as
-//                                              before 3.4)
+//                                              before 3.4; aiSecond=0: no second voice for laughs and hums;
+//                                              --block-background: "Block background sounds" on, the AI voice's
+//                                              main voice is its quiet version, here and in --test-voice/-button)
 //                [--live-sim [--buffer 128]]   instead: the live chain's steps in callback-sized pieces (with the
 //                                              waiting sound), printing the delay they add (no devices)
 //   --list-voices [--voices-dir DIR]           the voice changer's voices (and files that were skipped)
@@ -121,7 +123,7 @@ func arg(_ name: String) -> String? {
 // switching apps (states: hear-on, voice-on, waiting, typing, recording, playing, listening, hover, menu, roll, resize,
 // no-driver, advanced-alert, sounds, rename, volume, drop, light, tone, slow, eq, changer, changer-man,
 // changer-realistic, changer-loading, changer-fallback, changer-slider-natural|fast|default|max|NN, changer-intel,
-// click-voice, click-vc;
+// changer-second-off, changer-quiet-on, changer-card-off, click-voice, click-vc;
 // --cartoon-amount sets the voice style slider; sounds opens the Soundboard with example names, rename shows the first
 // name being changed, volume the first sound's volume slider and drop files being dragged over it; "tone" shows
 // Advanced processing on, and --tone-amount sets the Bass ↔ Treble slider; slow turns on "Deeper when slow"; eq turns
@@ -131,7 +133,9 @@ func arg(_ name: String) -> String? {
 // Strength slider, changer-realistic/-loading/-fallback show the AI voice (the slider's default) working/getting
 // ready/standing in with Natural, changer-slider-* puts the "Faster ↔ More real" slider at Natural, the first AI
 // step, the default, the far right or NN percent, changer-intel the card as on an Intel Mac (the slider stays at
-// Natural); click-voice / click-vc turn Your voice's / the Voice changer's switch on half a second in, as a click
+// Natural), changer-second-off / changer-quiet-on the two 3.5 switches off / on, changer-card-off the card with its
+// switch off (its settings as given); click-voice / click-vc turn Your voice's / the Voice changer's switch on half
+// a second in, as a click
 // would (the other one goes off); resize drags the window's corner through the three layouts; pro-locked shows
 // Pitch Shift Pro locked, pro-unlocked unlocked (the default for pictures), pro-unlock the unlock window, with pro-typo
 // a key with a typo in it, with pro-paste a key pasted from an email (line breaks and spaces in it), with pro-done
@@ -163,7 +167,7 @@ if asFree {
         print("\(why): your own voices are part of Pitch Shift Pro, so \(mode) doesn't run (free version)."); exit(1)
     }
     // The Voice changer, Natural ↔ Cartoon, Deeper when slow and Higher when fast, Bass ↔ Treble, Auto EQ.
-    let paid = ["--voice", "--strength", "--realism", "--quality", "--changer-tune", "--changer-stats",
+    let paid = ["--voice", "--strength", "--realism", "--quality", "--changer-tune", "--changer-stats", "--block-background",
                 "--cartoon", "--cartoon-amount", "--cartoon-at", "--slow-deeper", "--fast-higher",
                 "--tone-db", "--tone-amount", "--tone-at", "--as-device", "--auto-eq", "--eq-offsets"].filter(args.contains)
     if !paid.isEmpty { print("\(why): \(paid.joined(separator: ", ")) ignored (free version).") }
@@ -266,7 +270,8 @@ let changerArg: ChangerOptions? = {
                       "aiHissCross", "aiGainCap", "aiPauseDb", "aiLimit", "aiSlowChip",
                       // 3.4 (VoiceModel.h; "hum34=0" = 3.3's voice changer, VoiceChanger.cpp too)
                       "aiHumLiftDb", "aiHumLevelDb"]  // Realistic mode's test keys (voicestream_tune)
-        let unknown = changerTuneArg.filter { voicechanger_tune(probe, $0.0, $0.1) == 0 && !aiKeys.contains($0.0) && !isVoiceShifterTuneKey($0.0) }.map(\.0)
+        let unknown = changerTuneArg.filter { voicechanger_tune(probe, $0.0, $0.1) == 0 && !aiKeys.contains($0.0) && !isVoiceShifterTuneKey($0.0)
+            && voicestream_second_key($0.0) == 0 }.map(\.0)  // (3.5: the second voice's keys)
         voicechanger_delete(probe)
         let gate = soundgate_new(48000)  // 3.4: "aiSounds" and SoundGate's "sg..." keys
         let stillUnknown = unknown.filter { key in key != "aiSounds" && soundgate_tune(gate, key, changerTuneArg.first { $0.0 == key }?.1 ?? 0) == 0 }
@@ -274,7 +279,9 @@ let changerArg: ChangerOptions? = {
         if !stillUnknown.isEmpty { print("--changer-tune: unknown keys \(stillUnknown.joined(separator: ", "))"); exit(1) }
     }
     let strength = arg("--strength").flatMap(Float.init).map { max(0, min(1, $0)) } ?? 1
-    return ChangerOptions(voice: natural, strength: strength, tune: changerTuneArg, stats: args.contains("--changer-stats"))
+    let quiet = args.contains("--block-background")
+    if quiet && entry.quietURL == nil { print("Note: \(entry.name) has no \"Block background sounds\" voice; its usual AI voice is used.") }
+    return ChangerOptions(voice: natural, strength: strength, tune: changerTuneArg, stats: args.contains("--changer-stats"), quiet: quiet)
 }()
 // Only one at a time (the owner's rule, as in the window): with --voice the voice changer sets the pitch, so --steps
 // and --slow-deeper are left out.
@@ -758,7 +765,7 @@ if args.contains("--test-voice") {
     let voice = VoiceShifter(halfSteps: steps, cartoon: cartoonArg ?? 0, slowDeeper: slowDeeperArg, fastHigher: fastHigherArg, micUID: micUID)
     if let changerArg, let entry = arg("--voice").flatMap({ VoiceLibrary.shared.voice($0) }) {  // --voice: the voice changer on
         voice.changerTune = changerArg.tune
-        voice.changer = ChangerSettings(on: true, voiceID: entry.id, strength: changerArg.strength, realism: realismArg)
+        voice.changer = ChangerSettings(on: true, quiet: changerArg.quiet, voiceID: entry.id, strength: changerArg.strength, realism: realismArg)
     }
     guard let mic = voice.currentMic, let virtualMic = Mics.virtualMic else { print("No mic or Pitch Shift Mic not installed"); exit(1) }
     let rate = nominalRate(mic)
@@ -983,7 +990,7 @@ if args.contains("--test-button") {
     }
     if let changerArg, let entry = arg("--voice").flatMap({ VoiceLibrary.shared.voice($0) }) {  // --voice: the voice changer on
         voice.changerTune = changerArg.tune
-        voice.changer = ChangerSettings(on: true, voiceID: entry.id, strength: changerArg.strength, realism: realismArg)
+        voice.changer = ChangerSettings(on: true, quiet: changerArg.quiet, voiceID: entry.id, strength: changerArg.strength, realism: realismArg)
         print("voice changer: \(entry.name), \(realisticArg && realisticUnavailable == nil ? "Realistic (look-ahead \(lookaheadArg) ms)" : "Natural")")
     }
     let test = VoiceTest(voice: voice)
@@ -1069,7 +1076,7 @@ if let path = arg("--test-sounds") {
     // the tone then comes out at the voice's pitch, not at --steps).
     if !voiceOff, let changerArg, let entry = arg("--voice").flatMap({ VoiceLibrary.shared.voice($0) }) {
         voice.changerTune = changerArg.tune
-        voice.changer = ChangerSettings(on: true, voiceID: entry.id, strength: changerArg.strength, realism: realismArg)
+        voice.changer = ChangerSettings(on: true, quiet: changerArg.quiet, voiceID: entry.id, strength: changerArg.strength, realism: realismArg)
     }
     if voiceOff { voice.keepForSounds(true) } else { voice.start() }
     voice.hold(true)  // runs the chain like the Test button does (no app is listening yet)

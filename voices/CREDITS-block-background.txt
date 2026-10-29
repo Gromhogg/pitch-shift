@@ -1,0 +1,194 @@
+Sounds used to train Pitch Shift's "Block background sounds" voices (3.5; woman_us_r4_ahead and man_r4_ahead).
+These sounds were mixed UNDER the VCTK speech on the voice's input side only (the voice learned to make the clean
+speech without them); they are never in the voice's output and are not part of the app. Plus made-up hiss and hum.
+FSD50K: Fonseca, Favory, Pons, Font, Serra, "FSD50K: an open dataset of human-labeled sound events" (2020/2022),
+dev split, clips from Freesound. CC BY: Creative Commons Attribution (https://creativecommons.org/licenses/by/3.0/
+and the 4.0 version); CC0: no rights reserved. VCTK: CSTR VCTK Corpus 0.92, University of Edinburgh, CC BY 4.0.
+
+== 185 FSD50K clips (115 CC0, 70 CC BY 3.0): typing and keyboards, knocks, taps and ticks, claps, finger snaps,
+== writing, crumpling, zippers, drawers, fans, hiss and buzz
+"001_keyboard.wav" by JL_barrett (freesound.org/s/152702), CC0
+"017_House_Keyboard.wav" by RicardoFM (freesound.org/s/334963), CC BY 3.0
+"03_psani_perem_kratke.wav" by 13GPanska_Markova_Lucie (freesound.org/s/379886), CC0
+"110920_07 water on hotplate.WAV" by toiletrolltube (freesound.org/s/181482), CC0
+"110920_09 water on hotplate.WAV" by toiletrolltube (freesound.org/s/181480), CC0
+"120110_13 hot plate, cold water (1).WAV" by toiletrolltube (freesound.org/s/181486), CC0
+"1243_pressure_cooker.wav" by reinsamba (freesound.org/s/66364), CC BY 3.0
+"20. Choque de manos .wav" by juanj105 (freesound.org/s/430716), CC0
+"229 - Acoustic Memory - Claps_03.wav" by AcousticMemory (freesound.org/s/371657), CC BY 3.0
+"38.wav" by adcbicycle (freesound.org/s/13890), CC0
+"50.wav" by adcbicycle (freesound.org/s/13902), CC0
+"8.wav" by adcbicycle (freesound.org/s/13860), CC0
+"A Clap" by maycuddlepie (freesound.org/s/330296), CC0
+"Adhesive_Tape.wav" by MaxDemianAGL (freesound.org/s/130042), CC BY 3.0
+"BS_Hit_2.wav" by eardeer (freesound.org/s/337369), CC BY 3.0
+"CASHIER-REGISTER-KEYBOARD-BEEP-CALC.wav" by newagesoup (freesound.org/s/348240), CC0
+"Cherry MX Brown Mechanical Keyboard Sound.mp3" by NickTHH (freesound.org/s/432432), CC0
+"Clap 2 - Ultra Reverse Reverb.wav" by datwilightz (freesound.org/s/194264), CC BY 3.0
+"Clap 3 - Reverse Reverb and Delay.wav" by datwilightz (freesound.org/s/194271), CC BY 3.0
+"Clap, Single, 1.wav" by InspectorJ (freesound.org/s/404542), CC BY 3.0
+"Clap5.wav" by HerbertBoland (freesound.org/s/28229), CC BY 3.0
+"Clatter wood_09.wav" by Adam_N (freesound.org/s/349272), CC0
+"Clatter wood_11.wav" by Adam_N (freesound.org/s/349273), CC0
+"Click / Finger Snap" by OwlStorm (freesound.org/s/151214), CC BY 3.0
+"Computer Keys .wav" by zmadyun (freesound.org/s/343799), CC0
+"Computer typing.mp3" by Caitlin_100 (freesound.org/s/365490), CC0
+"Crumpling Newspaper.aif" by settings (freesound.org/s/429508), CC0
+"Cupboard1_O.mp3" by Taira Komori (freesound.org/s/211902), CC BY 3.0
+"Desk drawer open slam.wav" by kathol (freesound.org/s/37992), CC0
+"Door - Cupboard 06.wav" by JarredGibb (freesound.org/s/219486), CC0
+"Door Knock - 11.wav" by Ligidium (freesound.org/s/193827), CC0
+"Door Knock - 26.wav" by Ligidium (freesound.org/s/193863), CC0
+"Door Knock - 29.wav" by Ligidium (freesound.org/s/193848), CC0
+"Door Knock" by pbharri (freesound.org/s/426372), CC0
+"Enter Key Soft.wav" by suspensiondigital (freesound.org/s/389702), CC0
+"Extractor Fan 02.wav" by JarredGibb (freesound.org/s/219488), CC0
+"FAN 3 (Slow Stop).wav" by temawas (freesound.org/s/179245), CC BY 3.0
+"Fan med far.wav" by Adam_N (freesound.org/s/330265), CC0
+"FanBuzz.wav" by melliug (freesound.org/s/245835), CC0
+"FanRear.wav" by Otakua (freesound.org/s/219929), CC BY 3.0
+"Finger Snap 01" by chaosportal (freesound.org/s/137105), CC0
+"Finger Snap 02" by chaosportal (freesound.org/s/137104), CC0
+"Finger Snap.m4a" by Clurky (freesound.org/s/426255), CC0
+"Finger click 3.wav" by Adam_N (freesound.org/s/325263), CC0
+"Finger click 4.wav" by Adam_N (freesound.org/s/325262), CC0
+"Fingersnapping.wav" by 377434 (freesound.org/s/425670), CC0
+"GlassHit_02.wav" by Faulkin (freesound.org/s/336493), CC0
+"Grince Plac MiLg Couine 3.aif" by beskhu (freesound.org/s/70374), CC BY 3.0
+"Grince Plac MiLg Md-Lo.aif" by beskhu (freesound.org/s/70381), CC BY 3.0
+"Handclap-04-four.aif" by meisterleise (freesound.org/s/377781), CC0
+"Helsinki Sibelius monument tapping 2" by Vortichez (freesound.org/s/432576), CC BY 3.0
+"Hiss/Spray Burst" by zerolagtime (freesound.org/s/231550), CC BY 3.0
+"Hit basement 05.wav" by LG (freesound.org/s/73087), CC BY 3.0
+"Jimmy's 4x4 Hand Claps Comp" by jimmygu3 (freesound.org/s/338182), CC0
+"KEYBOARD, TYPING.wav" by xtrgamr (freesound.org/s/252715), CC BY 3.0
+"Keyboard Fast Typing.wav" by VeronicaStratton (freesound.org/s/388485), CC0
+"Keyboard Typing" by Trollarch2 (freesound.org/s/331656), CC0
+"Keyboard" by Piulapiu (freesound.org/s/265486), CC0
+"Keyboard.mp3" by Taira Komori (freesound.org/s/212522), CC BY 3.0
+"Knock on a door, 3 times" by meisterjaan (freesound.org/s/323481), CC BY 3.0
+"Knock on office door" by chrillz3r (freesound.org/s/360481), CC0
+"Knock on the door 2" by HunteR4708 (freesound.org/s/256512), CC0
+"Knocking_13.wav" by Adam_N (freesound.org/s/349302), CC0
+"LaptopKeyboard.wav" by tiptoe84 (freesound.org/s/155910), CC0
+"Loud air condition/ventilator" by askeseverin (freesound.org/s/372548), CC0
+"Mechanical Keyboard" by greenvwbeetle (freesound.org/s/423648), CC0
+"Mezerník.wav" by 13FPanska_Beringer_David (freesound.org/s/379100), CC0
+"Opening Coke Bottle" by kwahmah_02 (freesound.org/s/274256), CC BY 3.0
+"Opening/Closing Drawer #1.MP3" by SoundsForHim (freesound.org/s/413026), CC0
+"Pencil Scribbles.m4a" by chancelombardo (freesound.org/s/412155), CC0
+"Plastic Drawers Opening.m4a" by Clurky (freesound.org/s/426266), CC0
+"Pressing Spacebar" by HunteR4708 (freesound.org/s/256438), CC0
+"Real Snap 1.wav" by lafashion (freesound.org/s/361746), CC0
+"Real Snap 5.wav" by lafashion (freesound.org/s/361769), CC0
+"Real Snap 7.wav" by lafashion (freesound.org/s/361767), CC0
+"Rolling drawer open/close" by freemaster2 (freesound.org/s/237397), CC BY 3.0
+"Rotor done" by cabled_mess (freesound.org/s/332438), CC0
+"RucksackReissverschluesse.wav" by hannagreen (freesound.org/s/332008), CC0
+"Rummaging through Luggage" by DapperDaniel (freesound.org/s/180686), CC0
+"SNAKE.flac" by qubodup (freesound.org/s/182789), CC BY 3.0
+"SNARE4.wav" by Snapper4298 (freesound.org/s/179181), CC BY 3.0
+"Shower Clap - Closed.wav" by Ligidium (freesound.org/s/192229), CC BY 3.0
+"Simple 2.wav" by lafashion (freesound.org/s/361708), CC0
+"Simple 35.wav" by lafashion (freesound.org/s/361734), CC0
+"Simple 5.wav" by lafashion (freesound.org/s/361710), CC0
+"Snap_1234.wav" by Snapper4298 (freesound.org/s/177497), CC BY 3.0
+"Snapping Fingers.wav" by RutgerMuller (freesound.org/s/50758), CC0
+"Snare Clap Loop 1" by Stereo Surgeon (freesound.org/s/266081), CC0
+"SteamLoopStart.wav" by kingof_thelab (freesound.org/s/340254), CC BY 3.0
+"SteamOneShot.wav" by kingof_thelab (freesound.org/s/340251), CC BY 3.0
+"Subway ticket machine, tap screen.wav" by SpliceSound (freesound.org/s/369855), CC0
+"Tapping away on a smartphone" by pfranzen (freesound.org/s/326728), CC BY 3.0
+"Tastatur.wav" by DARKNESSEATER (freesound.org/s/353609), CC0
+"Teletype.flac" by Halleck (freesound.org/s/19488), CC BY 3.0
+"Thud_01" by Artmasterrich (freesound.org/s/345440), CC0
+"Thump; close.wav" by TylerAM (freesound.org/s/389665), CC0
+"Triple Finger Snap" by chaosportal (freesound.org/s/137148), CC0
+"Tss Hiss" by retropttam (freesound.org/s/176157), CC BY 3.0
+"Tunnel 1 Impulse-Response reverb clap closeby high-pitch clap" by jorickhoofd (freesound.org/s/160131), CC BY 3.0
+"Typing External Keyboard 2.wav" by BigKahuna360 (freesound.org/s/155568), CC0
+"Typing Laptop Keyboard 1.wav" by BigKahuna360 (freesound.org/s/155570), CC0
+"Typing on a Laptop Keyboard" by AndreasWebdev (freesound.org/s/257259), CC0
+"Typing on keyboard.wav" by xtrgamr (freesound.org/s/257788), CC BY 3.0
+"Typing.mp3" by noblerinthemind (freesound.org/s/364116), CC0
+"Typing.wav" by brainwaves8 (freesound.org/s/216005), CC0
+"Typing_Fast.wav" by jaredpass24 (freesound.org/s/235254), CC0
+"Typing_Slow.wav" by jaredpass24 (freesound.org/s/235253), CC0
+"Typing_Smartphone_24bit_96kHz_BWF_Mono.wav" by Schacht (freesound.org/s/343427), CC BY 3.0
+"Typingphone.wav" by vsipereck (freesound.org/s/392159), CC0
+"Tür klopfen 02.WAV" by mark646 (freesound.org/s/209222), CC0
+"Tür klopfen 03.WAV" by mark646 (freesound.org/s/209221), CC0
+"Ultra Subs 012.wav" by striptheband (freesound.org/s/51851), CC BY 3.0
+"VSH-49-plastic-crack-bright-slam-med.wav" by newagesoup (freesound.org/s/369106), CC0
+"Vartanian_Méréthy_2016_2017_Typewriter.wav" by univ_lyon3 (freesound.org/s/367085), CC BY 3.0
+"Very quick typing.wav" by starinatwalls (freesound.org/s/331158), CC BY 3.0
+"Video Game Controller.aiff" by spudwaffle (freesound.org/s/97437), CC0
+"ZIPPER 1.wav" by rafaelawho (freesound.org/s/393457), CC0
+"ZIPPER 7.wav" by rafaelawho (freesound.org/s/393458), CC0
+"Zip.wav" by aboxinghelena (freesound.org/s/401139), CC BY 3.0
+"Zipper Open & Close.wav" by jyoung20 (freesound.org/s/125422), CC0
+"Zipper.m4a" by Margaridsg (freesound.org/s/425064), CC0
+"Zipper5.wav" by pagancow (freesound.org/s/15417), CC0
+"abanico off.wav" by davilcol (freesound.org/s/404070), CC BY 3.0
+"abanico on.wav" by davilcol (freesound.org/s/404071), CC0
+"bathroom vent at work 2" by ChrisReierson (freesound.org/s/384016), CC BY 3.0
+"box crash.mp3" by animationIsaac (freesound.org/s/149899), CC0
+"breathump_B_1.L.aif" by batchku (freesound.org/s/10756), CC0
+"breathump_C_4.L.aif" by batchku (freesound.org/s/10770), CC0
+"clap5.wav" by guillem_abello (freesound.org/s/190802), CC BY 3.0
+"clap8.wav" by Godowan (freesound.org/s/231894), CC BY 3.0
+"clapping.wav" by anagar (freesound.org/s/267930), CC0
+"click.wav" by satrebor (freesound.org/s/113218), CC0
+"computer fan" by Sevin7 (freesound.org/s/269744), CC0
+"crumpling paper.wav" by 13GPanska_Langerova_Lucie (freesound.org/s/378286), CC0
+"door knock 3.wav" by ERH (freesound.org/s/32297), CC BY 3.0
+"drum1.wav" by Snapper4298 (freesound.org/s/180981), CC BY 3.0
+"echoclap5.wav" by stomachache (freesound.org/s/187972), CC BY 3.0
+"emptyhand-08.wav" by wuola (freesound.org/s/175045), CC0
+"finger snap 02.aiff" by SoundCollectah (freesound.org/s/109400), CC0
+"finger-snap-stereo-03.wav" by newagesoup (freesound.org/s/364724), CC0
+"finger-snap-stereo-08-triple.wav" by newagesoup (freesound.org/s/364729), CC0
+"finger-snap-stereo-09.wav" by newagesoup (freesound.org/s/364728), CC0
+"fingersnap20.wav" by Dizzy Banjo (freesound.org/s/346804), CC BY 3.0
+"fingersnap25.wav" by Dizzy Banjo (freesound.org/s/346813), CC BY 3.0
+"fingersnap3.wav" by Dizzy Banjo (freesound.org/s/346799), CC BY 3.0
+"found matress hit.wav" by apinasaundi (freesound.org/s/405705), CC0
+"gt02.aif" by lsprice (freesound.org/s/88901), CC BY 3.0
+"handclaps.wav" by plingativator (freesound.org/s/188864), CC BY 3.0
+"iPhone_typing_JTC.wav" by jamestcampbell (freesound.org/s/410427), CC0
+"keyboard-rhymtic.wav" by Anton (freesound.org/s/136), CC BY 3.0
+"keyboard-typing.wav" by Anton (freesound.org/s/137), CC BY 3.0
+"keyboard_typing.wav" by j1987 (freesound.org/s/79388), CC0
+"kick thump.wav" by dflee4 (freesound.org/s/278984), CC0
+"knocking GOOD A_5.aif" by bcimmet (freesound.org/s/218988), CC BY 3.0
+"living room clap 1.wav" by toiletrolltube (freesound.org/s/180769), CC0
+"marker-whiteboard-phrase08" by newagesoup (freesound.org/s/335945), CC0
+"mechanical keyboard.wav" by NicoTech (freesound.org/s/404298), CC0
+"nervous_programmer.wav" by Zabuhailo (freesound.org/s/174433), CC BY 3.0
+"patio_door02.wav" by wjoojoo (freesound.org/s/277205), CC BY 3.0
+"random12 - ticks.wav" by SophronsineSoundDesign (freesound.org/s/260831), CC BY 3.0
+"single_clap_1.wav" by pj123pj (freesound.org/s/99026), CC0
+"sizzle1-water-into-hot-pan.wav" by davidh4976 (freesound.org/s/405756), CC0
+"sizzle4-water-into-hot-pan.wav" by davidh4976 (freesound.org/s/405753), CC0
+"snap certain times.wav" by erikschenkel (freesound.org/s/257918), CC BY 3.0
+"snap1.wav" by Godowan (freesound.org/s/235276), CC0
+"snap3.wav" by stomachache (freesound.org/s/187958), CC BY 3.0
+"snap_3.wav" by Snapper4298 (freesound.org/s/177494), CC BY 3.0
+"snap_9.wav" by Snapper4298 (freesound.org/s/177504), CC BY 3.0
+"snapping fingers 3.wav" by erikschenkel (freesound.org/s/257915), CC BY 3.0
+"sot09.aif" by lsprice (freesound.org/s/89915), CC BY 3.0
+"sot10.aif" by lsprice (freesound.org/s/89916), CC BY 3.0
+"sound 20 - keyboard.mp3" by musicboy9000 (freesound.org/s/232831), CC0
+"steam train 02.wav" by klankbeeld (freesound.org/s/174203), CC BY 3.0
+"typewriter_electric_return.wav" by magedu (freesound.org/s/319945), CC BY 3.0
+"typewriter_electric_typing_01.wav" by magedu (freesound.org/s/277721), CC BY 3.0
+"typewriter_manual_spacebar.wav" by magedu (freesound.org/s/277299), CC BY 3.0
+"typing on a smartphone.mp3" by HochfeldOnline (freesound.org/s/428634), CC0
+"typing_phrase.wav" by jwestbury (freesound.org/s/144106), CC BY 3.0
+"using the computer.wav" by forseti1121 (freesound.org/s/319326), CC0
+"ventilator.flac" by Halleck (freesound.org/s/19427), CC BY 3.0
+"walletzipper.wav" by labailey (freesound.org/s/79208), CC0
+"weird impact.wav" by Reitanna (freesound.org/s/244757), CC0
+"wooden frog slow.flac" by arseniiv (freesound.org/s/327822), CC0
+"writing - pencil - wide 03.wav" by Anthousai (freesound.org/s/337091), CC0
+"writing-long-sketch-06" by newagesoup (freesound.org/s/335512), CC0

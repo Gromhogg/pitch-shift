@@ -15,6 +15,8 @@
   },
   "realistic": {
     "model": "woman_us_t200_ahead.mlmodelc",
+    "sounds": "woman_us_t200_sv3_ahead.mlmodelc",
+    "quiet": "woman_us_r4_ahead.mlmodelc",
     "encoder": "contentvec_ahead.mlmodelc",
     "rate": 48000,
     "eqAmount": 0.5
