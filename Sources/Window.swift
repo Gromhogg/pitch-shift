@@ -1216,6 +1216,7 @@ final class ShiftCard: NSView {
     private var active: Bool?
     private var numberActive: Bool?
     private var accessoryScale: ((CGFloat) -> Void)?  // sizes the views next to the picker (addPickerAccessory)
+    var keepsLook: [NSView] = []  // rows that look the same while the card is off (they don't belong to its switch)
 
     // The title, with a small lock after it while Pitch Shift Pro is locked.
     private func showTitle() {
@@ -1430,8 +1431,8 @@ final class ShiftCard: NSView {
     // Call when a row is shown or hidden.
     func forgetHeights() { heights = [:] }
 
-    // Updates the number and buttons; `active` dims the card when it's off (the number and − 0 + still work then,
-    // a little fainter: the amount is used when the card is turned on), `waiting` fades just the number (on, but the
+    // Updates the number and buttons; `active` shows the card off (everything in it still works then, a little
+    // fainter: the settings are used when the card is turned on), `waiting` fades just the number (on, but the
     // chosen app isn't making sound), `amountActive: false` dims just the number and − 0 + (the Voice changer sets
     // the pitch instead).
     func show(on: Bool, value: Float, active: Bool, waiting: Bool = false, amountActive: Bool? = nil) {
@@ -1458,6 +1459,12 @@ final class ShiftCard: NSView {
         self.active = active
         let target: CGFloat = active ? 1 : 0
         if isShowing { Theme.animate(0.25) { animator().glow = target } } else { glow = target }
+        // A card with the number that's off: everything in it still works, a little fainter (like the number).
+        guard showsAmount else { return }
+        let soft = active ? 1 : Self.offStrength
+        for view in [buttons, picker] + rows where !keepsLook.contains(view) {
+            if isShowing { Theme.animate(0.25) { view.animator().alphaValue = soft } } else { view.alphaValue = soft }
+        }
     }
 
     // The card: rounded, a soft shadow, and the purple-pink edge while on.
@@ -1738,7 +1745,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         Pro.shared.onChange = { [weak self] in self?.proChanged() }
         hear.onChange = { [weak self] in self?.refresh() }
         voice.onChange = { [weak self] in self?.refresh() }
-        test.onChange = { [weak self] in self?.refresh() }
+        test.onChange = { [weak self] in self?.endTestAlone(); self?.refresh() }
         board.onChange = { [weak self] in self?.soundboard.update() }
         soundboard.onClose = { [weak self] in self?.soundboardClosed() }
         deviceListeners = [kAudioHardwarePropertyDevices, kAudioHardwarePropertyDefaultInputDevice, kAudioHardwarePropertyDefaultOutputDevice].map {
@@ -1934,6 +1941,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         voiceCard = ShiftCard(title: "Input pitch shifter", extraRows: [styleRow, slowRow])
         voiceCard.addRow(fastRow, tight: true)
         voiceCard.addRow(footer)
+        voiceCard.keepsLook = [footer]  // Pitch Shift Mic and the Soundboard work whether the voice is on or off
         voiceCard.picker.menu?.delegate = self
         voiceCard.picker.target = self
         voiceCard.picker.action = #selector(micPicked)
@@ -2533,7 +2541,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
     @objc func testClicked() {
         guard preview == nil else { return }  // pictures: see setHear
+        // With Input pitch shifter off, the voice runs with the card's settings just for the test: the switch stays
+        // off, the Mac's default mic is left as it is, and the voice stops again once the test is done.
+        if test.phase == .idle && !voice.isOn {
+            switch AVCaptureDevice.authorizationStatus(for: .audio) {
+            case .authorized:
+                testAlone = true
+                testSounds = voice.runsForSounds
+                voice.start()
+            case .notDetermined:
+                AVCaptureDevice.requestAccess(for: .audio) { granted in
+                    DispatchQueue.main.async { granted ? self.testClicked() : self.micDenied() }
+                }
+                return
+            default:
+                micDenied()
+                return
+            }
+        }
         test.click()
+        endTestAlone()  // (if it couldn't start)
+    }
+
+    private var testAlone = false   // the voice runs only for Test (see testClicked)
+    private var testSounds = false  // the Soundboard was open when that test started
+
+    private func endTestAlone() {
+        guard testAlone, test.phase == .idle else { return }
+        testAlone = false
+        voice.stop()
+        // The Soundboard opened or closed during the test (it leaves the default mic alone while the voice runs):
+        // Pitch Shift Mic is the default mic only while something still runs.
+        if testSounds && !voice.runsForSounds && voice.state == .off { DefaultMic.giveBack() }
+        if !testSounds && voice.runsForSounds { DefaultMic.takeOver() }
     }
 
     // Opens the Soundboard next to the window, or closes it.
@@ -2686,6 +2726,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
+            testAlone = false  // a test going on keeps going, with the card on now
             voice.start()
             DefaultMic.takeOver()
             defaults.set(true, forKey: Keys.voiceOn)
@@ -2858,7 +2899,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     func refresh() {
         guard hearCard != nil else { return }
         let hearOn = preview.map { $0.contains("hear-on") } ?? hear.isOn
-        let voiceOn = preview.map { $0.contains("voice-on") || $0.contains("changer") } ?? voice.isOn
+        let voiceOn = preview.map { $0.contains("voice-on") || $0.contains("changer") } ?? (voice.isOn && !testAlone)
         let waiting = preview.map { $0.contains("waiting") } ?? (hear.state == .waiting)
         hearCard.show(on: hearOn, value: hear.halfSteps, active: hearOn, waiting: waiting)
         if advancedAlert == nil { advancedSwitch.isOn = hear.advanced }  // stays on while the alert asks
@@ -2869,15 +2910,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         slowSwitch.locked = locked
         fastSlider.locked = locked
         tone.value = (((hear.tones[outputUID] ?? 0) + 1) / 2 * 100).rounded() / 100
-        tone.isEnabled = hear.advanced && hearOn
+        tone.isEnabled = hear.advanced
         tone.toolTip = locked ? "Pitch Shift Pro" : outputName.isEmpty ? nil : "For \(outputName)"
         // Auto EQ: off while Pitch Shift Pro is locked (its sliders show only while it's on).
         autoEQSwitch.locked = locked
         let eq = hear.autoEQ(for: outputUID)
         autoEQSwitch.isOn = eq.on
-        autoEQSwitch.isEnabled = hear.advanced && hearOn
+        autoEQSwitch.isEnabled = hear.advanced
         autoEQStrip.offsets = eq.offsets
-        autoEQStrip.isEnabled = hear.advanced && hearOn
+        autoEQStrip.isEnabled = hear.advanced
         if autoEQRow.isHidden == eq.on {  // the sliders show while Auto EQ is on
             Theme.crossfade(hearCard, 0.2)
             autoEQRow.isHidden = !eq.on
@@ -2907,15 +2948,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         voiceCard.picker.isEnabled = installed && hasMic
         if hasMic { showCurrentMic() }
         style.value = voice.cartoon
-        style.isEnabled = voiceOn && installed && !changerActive
+        style.isEnabled = installed && !changerActive
         style.toolTip = locked ? "Pitch Shift Pro" : changerTip
         slowSwitch.isOn = voice.slowDeeper
-        slowSwitch.isEnabled = voiceOn && installed
+        slowSwitch.isEnabled = installed
         slowSwitch.dimmed = changerActive
         slowSwitch.toolTip = locked ? "Pitch Shift Pro" : changerActive ? "Turning this on turns the voice changer off" : nil
         // Higher when fast works only with Deeper when slow on (so never with the Voice changer: only one at a time).
         fastSlider.value = voice.fastHigher / SpeakingRate.maxUp
-        fastSlider.isEnabled = voiceOn && installed && voice.slowDeeper
+        fastSlider.isEnabled = installed && voice.slowDeeper
         fastLabel.textColor = fastSlider.isEnabled && !locked ? .secondaryLabelColor : .tertiaryLabelColor
         fastLabel.toolTip = locked ? "Pitch Shift Pro" : nil
         soundsButton.isEnabled = installed && hasMic  // the Soundboard works with the voice off too
@@ -2939,7 +2980,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             testButton.title = "Test"
             testButton.bezelColor = Theme.purple
             testButton.setAccessibilityLabel("Test")
-            testButton.isEnabled = voiceOn && installed && hasMic
+            testButton.isEnabled = installed && hasMic
         case .recording(let left):
             testButton.title = "● \(left)"
             testButton.bezelColor = .systemRed

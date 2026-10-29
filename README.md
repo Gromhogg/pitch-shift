@@ -45,19 +45,21 @@ More help: [windows/README.md](windows/README.md).
 **Output pitch shifter** (what you hear)
 
 - Pick an app, or **All sound**.
-- Click the big number to type an exact amount, like `2.5` or `-1.25`. 12 is one octave. Or use **−**, **0** and **+**. You can set it while the card is off too (Mac); it's used when you turn the card on.
+- Click the big number to type an exact amount, like `2.5` or `-1.25`. 12 is one octave. Or use **−**, **0** and **+**.
 - Turn on **Advanced processing** for music at bigger amounts: going up, the bass stays deep; going down, the top stays bright. A new amount takes a moment longer to kick in.
 - With Advanced processing on, slide from **Bass** to **Treble** to suit your headphones (Mac). Pitch Shift remembers it for each pair of headphones or speakers.
 - Turn on **Auto EQ** (Mac, with Advanced processing on) to keep the deep bass, mids and highs balanced like the original song. Its five small sliders move by themselves; drag one to nudge it, and double-click it or press **Auto** to go back. It's remembered for each pair of headphones or speakers too.
+- Everything on the card can be set while it's off too (Mac): it's used when you turn the card on.
 
 **Input pitch shifter** (your voice)
 
 - Pick your mic, turn it on, and slide from **Natural** (sounds like a different person) to **Cartoon** (chipmunk or monster). On Windows, choose Natural or Cartoon.
-- Set how much higher or lower with the big number or **−**, **0** and **+**, the same way (also while the card is off, on Mac).
+- Set how much higher or lower with the big number or **−**, **0** and **+**, the same way.
 - Turn on **Deeper when slow** and your voice goes lower while you talk slowly, then back when you talk normally (Mac).
 - With it on, **Higher when fast** makes your voice go higher while you talk fast: the slider sets how much, from **Off** to **+8** half-steps (starts at +4).
 - In Discord, Zoom or any other app, choose **Pitch Shift Mic** as your microphone.
 - Press **Test** to record 5 seconds of your shifted voice and hear it back. With the AI voice changer on, Test waits for the AI voice's delay before it stops, so you hear all 5 seconds in the AI voice.
+- Everything on the card can be set while it's off too (Mac): it's used when you turn the card on. **Test** works while it's off as well: your voice is changed just for the test, and the card stays off.
 - Press **Sounds** for the Soundboard (Mac): add sound files with **+**, then click one to play it into your call. You hear it too; on your Mac's own speakers your voice is muted while it plays, so it can't echo.
 - Drag sound files onto the Soundboard to add them. Right-click a sound to rename it, change its volume or remove it.
 - The Soundboard works with **Input pitch shifter** off too: your mic then goes into the call unchanged.
