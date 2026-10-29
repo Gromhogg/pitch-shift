@@ -154,6 +154,7 @@ struct PulseShifter {
     double pitchNow = 1, shapeNow = 1;
     // Output.
     float *acc = nullptr;
+    float *unvoicedWindow = nullptr;  // the window of an unvoiced piece, for whole-sample steps -unvoiced ... unvoiced
     int accMask = 0;
     int64_t outRead = 0;   // next sample to hand out
     int64_t outFinal = 0;  // samples before this are complete
@@ -181,7 +182,8 @@ struct PulseShifter {
         setMask = 2047;
         acc = new (std::nothrow) float[inSize]();
         accMask = inSize - 1;
-        if (!in || !low || !span || !diff || !frames || !marks || !settings || !acc) return false;
+        unvoicedWindow = new (std::nothrow) float[2 * std::max(4, (int)std::lround(0.020 * rate)) + 1]();  // (see setUp)
+        if (!in || !low || !span || !diff || !frames || !marks || !settings || !acc || !unvoicedWindow) return false;
         setUp();
         reset();
         return true;
@@ -196,6 +198,7 @@ struct PulseShifter {
         delete[] marks;
         delete[] settings;
         delete[] acc;
+        delete[] unvoicedWindow;
     }
 
     void setUp() {
@@ -217,6 +220,8 @@ struct PulseShifter {
         holdFrames = std::max(0, (int)std::lround(t.holdMs / t.hopMs));
         latency = (int)std::lround(t.latencyMs / 1000 * rate);
         unvoiced = std::max(4, (int)std::lround(t.unvoicedMs / 1000 * rate));
+        const double toSide = M_PI / unvoiced;  // as layDown works it out
+        for (int k = -unvoiced; k <= unvoiced; ++k) unvoicedWindow[k + unvoiced] = 0.5f + 0.5f * (float)std::cos(k * toSide);
         setGrain = std::max(32, (int)(rate / 1500));
         const double cutoff = std::min(2000.0, 0.35 * trackRate);
         lp1.lowpass(rate, cutoff, 0.5412);
@@ -282,6 +287,13 @@ struct PulseShifter {
             for (int j = mid - halfWin; j <= mid + halfWin; ++j) energy += (double)span[j] * span[j];
             const float levelDb = (float)(10 * std::log10(energy / (2 * halfWin + 1) + 1e-20));
             peakDb = std::max(levelDb, peakDb - 3.0f * t.hopMs / 1000);  // the loudest fades 3 dB a second
+            // too quiet to be voiced or held (the tests below): no pitch needed (the same frame either way)
+            if (!(levelDb > std::max(t.floorDb, peakDb - t.rangeDb)) && !(levelDb > std::max(t.floorDb, peakDb - t.holdRangeDb))) {
+                lastTau = 0;
+                frames[frameCount & frameMask] = Frame{c * decim + decim - 1 + delayFix, 0.0f};
+                ++frameCount;
+                continue;
+            }
             // difference per lag (symmetric around the centre), then cumulative-mean normalised
             const int n = 2 * halfWin + 1;
             diff[0] = 1;
@@ -372,17 +384,51 @@ struct PulseShifter {
         return at;
     }
 
-    // How well the sound around `b` matches the sound around `a` (normalised cross-correlation, -1 ... 1), over
-    // `half` samples on each side, every `stride`-th sample.
-    double match(int64_t a, int64_t b, int half, int stride) const {
-        double ab = 0, aa = 0, bb = 0;
+    // How well the sound around each of the four spots `b` matches the sound around `a` (normalised
+    // cross-correlation, -1 ... 1), over `half` samples on each side, every `stride`-th sample. The four sums run side
+    // by side, each added up in the same order as one spot at a time (so the numbers are the same, only sooner), and
+    // the sound around `a` is summed once.
+    void match4(int64_t a, const int64_t *b, int half, int stride, double *out) const {
+        double aa = 0;
         for (int j = -half; j < half; j += stride) {
-            const float x = in[(a + j) & inMask], y = in[(b + j) & inMask];
-            ab += (double)x * y;
+            const float x = in[(a + j) & inMask];
             aa += (double)x * x;
-            bb += (double)y * y;
         }
-        return aa > 0 && bb > 0 ? ab / std::sqrt(aa * bb) : 0.0;
+        double ab0 = 0, ab1 = 0, ab2 = 0, ab3 = 0, bb0 = 0, bb1 = 0, bb2 = 0, bb3 = 0;
+        for (int j = -half; j < half; j += stride) {
+            const float x = in[(a + j) & inMask];
+            const float y0 = in[(b[0] + j) & inMask], y1 = in[(b[1] + j) & inMask];
+            const float y2 = in[(b[2] + j) & inMask], y3 = in[(b[3] + j) & inMask];
+            ab0 += (double)x * y0;
+            bb0 += (double)y0 * y0;
+            ab1 += (double)x * y1;
+            bb1 += (double)y1 * y1;
+            ab2 += (double)x * y2;
+            bb2 += (double)y2 * y2;
+            ab3 += (double)x * y3;
+            bb3 += (double)y3 * y3;
+        }
+        const double ab[4] = {ab0, ab1, ab2, ab3}, bb[4] = {bb0, bb1, bb2, bb3};
+        for (int q = 0; q < 4; ++q) out[q] = aa > 0 && bb[q] > 0 ? ab[q] / std::sqrt(aa * bb[q]) : 0.0;
+    }
+
+    // The spot among from, from + step, ... (up to `to`) whose sound best matches the sound around `a` (see match4),
+    // looked at in that order: a better match than `best` takes over (`first`: the first spot takes over whatever
+    // `best` was).
+    void bestMatch(int64_t a, int64_t from, int64_t to, int step, int half, int stride, bool first, double &best,
+                   int64_t &at) const {
+        for (int64_t k = from; k <= to; k += 4 * step) {
+            int64_t spots[4];
+            for (int q = 0; q < 4; ++q) spots[q] = std::min(k + q * step, to);  // past `to`: a spare copy, not used
+            double m[4];
+            match4(a, spots, half, stride, m);
+            for (int q = 0; q < 4 && k + q * step <= to; ++q) {
+                if ((first && k == from && q == 0) || m[q] > best) {
+                    best = m[q];
+                    at = k + q * step;
+                }
+            }
+        }
     }
 
     void placeMarks() {
@@ -406,21 +452,9 @@ struct PulseShifter {
                 if (hi + half + 2 >= inCount) return;  // wait for more sound
                 double best = -2;
                 int64_t at = lo;
-                for (int64_t k = lo; k <= hi; k += 2) {  // coarse: every other lag and sample
-                    const double m = match(last.pos, k, half, 2);
-                    if (m > best) {
-                        best = m;
-                        at = k;
-                    }
-                }
+                bestMatch(last.pos, lo, hi, 2, half, 2, false, best, at);  // coarse: every other lag and sample
                 const int64_t c = at;
-                for (int64_t k = std::max(lo, c - 2); k <= std::min(hi, c + 2); ++k) {  // fine
-                    const double m = match(last.pos, k, half, 1);
-                    if (k == std::max(lo, c - 2) || m > best) {
-                        best = m;
-                        at = k;
-                    }
-                }
+                bestMatch(last.pos, std::max(lo, c - 2), std::min(hi, c + 2), 1, half, 1, true, best, at);  // fine
                 if (best >= t.minMatch && last.pos - half > inCount - inMask) pos = at;
             }
             if (pos < 0) {  // a voiced stretch starts (or the train was lost): the strongest pulse near the expected spot
@@ -497,9 +531,11 @@ struct PulseShifter {
             const int64_t j0 = std::max(outFinal, (int64_t)std::ceil(s - left));
             const int64_t j1 = (int64_t)std::floor(s + halfLen);
             const double toLeft = M_PI / left, toRight = M_PI / halfLen;
+            // an unvoiced piece at full width on a whole sample: its window is the same every time (from the table)
+            const float *same = !m.voiced && left == halfLen && s == std::floor(s) ? unvoicedWindow + unvoiced : nullptr;
             for (int64_t j = j0; j <= j1; ++j) {
                 const double u = j - s;
-                const float w = 0.5f + 0.5f * (float)std::cos(u * (u < 0 ? toLeft : toRight));
+                const float w = same ? same[(int64_t)u] : 0.5f + 0.5f * (float)std::cos(u * (u < 0 ? toLeft : toRight));
                 acc[j & accMask] += gain * w * interp(m.pos + u * shape);
             }
             lastStart = s - left;
