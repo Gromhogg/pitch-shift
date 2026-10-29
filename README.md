@@ -45,19 +45,21 @@ More help: [windows/README.md](windows/README.md).
 **Output pitch shifter** (what you hear)
 
 - Pick an app, or **All sound**.
-- Click the big number to type an exact amount, like `2.5` or `-1.25`. 12 is one octave. Or use **−**, **0** and **+**. You can set it while the card is off too (Mac); it's used when you turn the card on.
+- Click the big number to type an exact amount, like `2.5` or `-1.25`. 12 is one octave. Or use **−**, **0** and **+**.
 - Turn on **Advanced processing** for music at bigger amounts: going up, the bass stays deep; going down, the top stays bright. A new amount takes a moment longer to kick in.
 - With Advanced processing on, slide from **Bass** to **Treble** to suit your headphones (Mac). Pitch Shift remembers it for each pair of headphones or speakers.
 - Turn on **Auto EQ** (Mac, with Advanced processing on) to keep the deep bass, mids and highs balanced like the original song. Its five small sliders move by themselves; drag one to nudge it, and double-click it or press **Auto** to go back. It's remembered for each pair of headphones or speakers too.
+- Everything on the card can be set while it's off too (Mac): it's used when you turn the card on.
 
 **Input pitch shifter** (your voice)
 
 - Pick your mic, turn it on, and slide from **Natural** (sounds like a different person) to **Cartoon** (chipmunk or monster). On Windows, choose Natural or Cartoon.
-- Set how much higher or lower with the big number or **−**, **0** and **+**, the same way (also while the card is off, on Mac).
+- Set how much higher or lower with the big number or **−**, **0** and **+**, the same way.
 - Turn on **Deeper when slow** and your voice goes lower while you talk slowly, then back when you talk normally (Mac).
 - With it on, **Higher when fast** makes your voice go higher while you talk fast: the slider sets how much, from **Off** to **+8** half-steps (starts at +4).
 - In Discord, Zoom or any other app, choose **Pitch Shift Mic** as your microphone.
 - Press **Test** to record 5 seconds of your shifted voice and hear it back. With the AI voice changer on, Test waits for the AI voice's delay before it stops, so you hear all 5 seconds in the AI voice.
+- Everything on the card can be set while it's off too (Mac): it's used when you turn the card on. **Test** works while it's off as well: your voice is changed just for the test, and the card stays off.
 - Press **Sounds** for the Soundboard (Mac): add sound files with **+**, then click one to play it into your call. You hear it too; on your Mac's own speakers your voice is muted while it plays, so it can't echo.
 - Drag sound files onto the Soundboard to add them. Right-click a sound to rename it, change its volume or remove it.
 - The Soundboard works with **Input pitch shifter** off too: your mic then goes into the call unchanged (or through the voice changer, if it's on).
@@ -70,7 +72,7 @@ More help: [windows/README.md](windows/README.md).
 - Slide **Faster ↔ More real** to choose between speed and realism. All the way to **Faster** is the plain voice changer, with almost no delay. Anywhere to the right, an AI voice says your words again in the new voice, so it sounds like a real person (Macs with Apple silicon). The further right, the more of what you say next it hears before it speaks, so words come out clearer and steadier, but your voice reaches the call later: the card shows the delay ("Delay: about 0.46 s"), up to about one second all the way right. It starts a quarter of the way along: the least delay that speaks smoothly. The first time, the AI voice takes up to a minute to get ready; the plain voice changer plays meanwhile. Whenever the plain voice changer stands in for the AI voice, the card says **backup voice** next to the delay. With the AI voice, the **Light**…**Full** slider moves only the pitch, from **Your pitch** to the voice's. Moving the slider changes the delay at your next short pause (so nothing is cut or repeated), or within 1.5 seconds if you don't pause. Claps, finger snaps, knocks, clicks and whistles come through as they really sound instead of being turned into a voice; everything your voice makes (words, laughs, coughs, breaths) stays the AI voice.
 - Holding a note ("aaah") keeps its pitch steady in both the plain and the AI voice changer.
 - Since 3.3, the AI **Woman** and **Man** voices are trained on real recordings (8 speakers each), so they sound clearer and much cleaner in a noisy room. After updating, the first time you use each voice it again takes up to a minute to get ready.
-- Only one at a time: turning the voice changer on turns **Input pitch shifter** off, and turning **Input pitch shifter** on turns the voice changer off. Each keeps its own settings (pitch, sliders, **Deeper when slow**, voice) for next time. The mic menu, **Test**, **Sounds** and the Pitch Shift Mic light in the **Input pitch shifter** card work with either one on.
+- Only one at a time: turning the voice changer on turns **Input pitch shifter** off, and turning **Input pitch shifter** on turns the voice changer off. Each keeps its own settings (pitch, sliders, **Deeper when slow**, voice) for next time. The mic menu, **Test**, **Sounds** and the Pitch Shift Mic light in the **Input pitch shifter** card work with either one on; with the voice changer on, **Test** plays the changed voice.
 - Add your own voices with the **⋯** button next to the voice menu (see [Your own voices](#your-own-voices)).
 
 **Output pitch shifter** can be on at the same time as either of the other two. Closing the window keeps Pitch Shift running. Quit it with ⌘Q.
