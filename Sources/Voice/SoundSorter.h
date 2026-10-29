@@ -84,11 +84,11 @@ public:
     float tuneStay = 0.3f, tuneStayMin = 20;    // ... and once in, it stays while this holds
     float quietDb = 8;          // no voice and less than this above the room's noise, ...
     float quietMaxDb = -60;     // ... or quieter than this (dBFS): keep the choice (silence decides nothing)
-    float exitHops = 1, minHops = 2;  // pieces with nothing to stay for; pieces to stay at least
+    float exitHops = 3, minHops = 2;  // pieces with nothing to stay for; pieces to stay at least
     float speechExit = 0.6f;    // speech this sure (YAMNet; the head's speech when there is a head): back at once
     float headEnter = 0.7f;     // the head: laugh + sigh + hum + singing (+ coughs) this sure ...
     float headSpeech = 0.2f;    // ... and speech below this: the second voice
-    float headExit = 0.5f;      // ... and speech this sure: back to the main voice at once
+    float headExit = 0.4f;      // ... and speech this sure: back to the main voice at once
     float useHead = 1;          // 0 = ignore the head
     float headMaxVoiced = 25;   // the head alone: at most this many voiced frames (of ~98) ...
     float headNote = 0.3f;      // ... or this share of them note-like ...
