@@ -724,11 +724,19 @@ struct VoiceChanger {
         levelAt = (levelAt + 1) % cap;
     }
 
-    // YIN on `lin` (span samples). Returns pitch (Hz), aperiodicity and level (dBFS) of the middle.
-    void yin(float &f0, float &ap, float &levelDb) {
+    // YIN on `lin` (span samples). Returns pitch (Hz), aperiodicity and level (dBFS) of the middle. At or below
+    // `quietDb` only the level is worked out (pitch 0, aperiodicity 1): the frame is too quiet for them to be used.
+    void yin(float &f0, float &ap, float &levelDb, float quietDb) {
         const int W = window, T = tauMax;
         energy[0] = 0;
         for (int i = 0; i < span; ++i) energy[i + 1] = energy[i] + (double)lin[i] * lin[i];
+        const int mid = T / 2;
+        levelDb = (float)(10 * std::log10((energy[mid + W] - energy[mid]) / W + 1e-12));
+        if (levelDb <= quietDb) {
+            f0 = 0;
+            ap = 1;
+            return;
+        }
         const double e0 = energy[W];
         diff[0] = 0;
         double sum = 0;
@@ -763,15 +771,14 @@ struct VoiceChanger {
         }
         f0 = (float)(analysisRate / (tau + frac));
         ap = diff[tau];
-        const int mid = T / 2;
-        levelDb = (float)(10 * std::log10((energy[mid + W] - energy[mid]) / W + 1e-12));
     }
 
     // Every 10 ms of thinned sound: track, fix octave jumps, then decide the frame before (median of 3) and map it.
     void analyseHop(float extra, VoiceChangerPitch *out) {
         for (int i = 0; i < span; ++i) lin[i] = dec[(decCount - span + i) & (decSize - 1)];
         float f0, ap, level;
-        yin(f0, ap, level);
+        // (at or below both lowest levels, levelOk below and frameLevelOk at the next frame, the pitch is never used)
+        yin(f0, ap, level, std::min(tuning.voicedMinDb, tuning.voicedMinDb - (octAge <= 2 ? tuning.voicedKeepDb : 0.0f)));
         const bool floorVoice = tuning.floorMode >= 0.5f;  // 3.4 (0 = 3.3: every frame counts toward the noise floor)
         if (!floorVoice) pushLevel(level);
         const float floorDb = noiseFloor();
