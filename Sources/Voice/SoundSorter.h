@@ -67,7 +67,7 @@ class Rule {
 public:
     // One piece: 1 = the second voice, 0 = the main voice. `why` (may be null) gets a short reason for traces.
     int decide(const Features &f, const char **why = nullptr);
-    void reset() { on = false; runBreath = runOff = dwell = runUnvoiced = 0; }
+    void reset() { on = false; runBreath = runOff = runOn = dwell = runUnvoiced = 0; }
     bool tune(const std::string &key, float value);
     bool isOn() const { return on; }
     // settings ("sv..." tune keys)
@@ -84,6 +84,7 @@ public:
     float tuneStay = 0.3f, tuneStayMin = 20;    // ... and once in, it stays while this holds
     float quietDb = 8;          // no voice and less than this above the room's noise, ...
     float quietMaxDb = -60;     // ... or quieter than this (dBFS): keep the choice (silence decides nothing)
+    float enterHops = 2;        // pieces in a row that want the second voice before it switches (one alone: a flicker)
     float exitHops = 3, minHops = 2;  // pieces with nothing to stay for; pieces to stay at least
     float speechExit = 0.6f;    // speech this sure (YAMNet; the head's speech when there is a head): back at once
     float headEnter = 0.7f;     // the head: laugh + sigh + hum + singing (+ coughs) this sure ...
@@ -98,7 +99,7 @@ public:
     float tuneSpeech = 1.01f;   // without a head: a tune by its pitch alone below this YAMNet speech score
 private:
     bool on = false;
-    int runBreath = 0, runOff = 0, dwell = 0, runUnvoiced = 0;
+    int runBreath = 0, runOff = 0, runOn = 0, dwell = 0, runUnvoiced = 0;
 };
 
 }  // namespace soundsorter

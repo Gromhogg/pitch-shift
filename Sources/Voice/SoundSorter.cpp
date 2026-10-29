@@ -147,8 +147,11 @@ int Rule::decide(const Features &f, const char **why) {
         runBreath = 0;
     }
     dwell++;
-    if (!hold) runOff = want ? 0 : runOff + 1;
-    if (!on && want) {
+    if (!hold) {
+        runOff = want ? 0 : runOff + 1;
+        runOn = want ? runOn + 1 : 0;
+    }
+    if (!on && want && runOn >= (int)enterHops) {
         on = true;
         dwell = 0;
     } else if (on && !want && !hold && ((runOff >= (int)exitHops && dwell >= (int)minHops) || blocked ||
@@ -169,7 +172,7 @@ bool Rule::tune(const std::string &k, float v) {
         {"svWhistle", &Rule::whistle}, {"svClickMax", &Rule::clickMax}, {"svScreamMax", &Rule::screamMax},
         {"svTuneEnter", &Rule::tuneEnter}, {"svTuneMin", &Rule::tuneMin}, {"svTuneStay", &Rule::tuneStay},
         {"svTuneStayMin", &Rule::tuneStayMin}, {"svQuietDb", &Rule::quietDb}, {"svQuietMaxDb", &Rule::quietMaxDb},
-        {"svExitHops", &Rule::exitHops}, {"svMinHops", &Rule::minHops}, {"svSpeechExit", &Rule::speechExit},
+        {"svEnterHops", &Rule::enterHops}, {"svExitHops", &Rule::exitHops}, {"svMinHops", &Rule::minHops}, {"svSpeechExit", &Rule::speechExit},
         {"svHeadEnter", &Rule::headEnter}, {"svHeadSpeech", &Rule::headSpeech}, {"svHeadExit", &Rule::headExit},
         {"svUseHead", &Rule::useHead}, {"svTuneSpeech", &Rule::tuneSpeech}, {"svHeadMaxVoiced", &Rule::headMaxVoiced},
         {"svHeadNote", &Rule::headNote}, {"svHeadYamSpeech", &Rule::headYamSpeech}, {"svHeadYamMax", &Rule::headYamMax},
