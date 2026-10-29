@@ -132,7 +132,9 @@ func arg(_ name: String) -> String? {
 // the card as on an Intel Mac (the slider stays at Natural); resize drags the window's corner through the three
 // layouts; pro-locked shows Pitch Shift Pro locked, pro-unlocked unlocked (the default for pictures), pro-unlock the
 // unlock window, with pro-typo a key with a typo in it, with pro-paste a key pasted from an email (line breaks and
-// spaces in it), with pro-done the "Unlocked" message, with pro-alone as its own window instead of a sheet).
+// spaces in it), with pro-done the "Unlocked" message, with pro-alone as its own window instead of a sheet;
+// switch-flip shows the switches slowed down 10 times: the first card's goes on and turns back halfway, the second
+// card's is held down). --steps 3,-2 sets the two cards' big numbers (one number: both).
 let preview = arg("--preview")
 let previewStates = Set((preview ?? "").split(separator: ",").map(String.init))
 

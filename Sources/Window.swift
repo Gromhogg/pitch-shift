@@ -1,7 +1,7 @@
-// The window: three cards ("What you hear", "Your voice" and "Voice changer"), each with an on/off switch and a
-// picker; the first two also have a big number you can click and type into, and − 0 + buttons. No extra text. The
-// window can be resized: the cards sit in a row, in two columns, or one above the other, and everything grows with
-// the window.
+// The window: three cards ("Output pitch shifter" for what you hear, "Input pitch shifter" for your voice, and "Voice
+// changer"), each with an on/off switch and a picker; the first two also have a big number you can click and type
+// into, and − 0 + buttons (they work while the card is off too). No extra text. The window can be resized: the cards
+// sit in a row, in two columns, or one above the other, and everything grows with the window.
 import AppKit
 import AVFoundation
 import CoreAudio
@@ -1172,6 +1172,7 @@ final class CardPicker: NSPopUpButton {
 // `showsAmount: false` (the Voice changer) has no big number and no − 0 +.
 final class ShiftCard: NSView {
     static let baseWidth: CGFloat = 266  // card width in the smallest window
+    static let offStrength: CGFloat = 0.65  // how strong the number looks while the card is off
     let toggle = GradientSwitch()
     let amount = AmountField()
     let minus = NSButton()
@@ -1248,7 +1249,7 @@ final class ShiftCard: NSView {
         header.distribution = .equalSpacing
         toggle.setAccessibilityLabel(text)
         toggle.onChange = { [weak self] in self?.onToggle($0) }
-        amount.setAccessibilityLabel("\(text) pitch")
+        amount.setAccessibilityLabel("\(text) amount")
         amount.onCommit = { [weak self] in self?.onAmount($0) }
         let parts = [(minus, #selector(lower), "Lower", "Down 1"), (zero, #selector(reset), "Back to 0", "Back to 0"), (plus, #selector(higher), "Higher", "Up 1")]
         for (button, action, name, tip) in parts {
@@ -1429,20 +1430,21 @@ final class ShiftCard: NSView {
     // Call when a row is shown or hidden.
     func forgetHeights() { heights = [:] }
 
-    // Updates the number and buttons; `active` dims everything when the card is off, `waiting` fades just the
-    // number (on, but the chosen app isn't making sound), `amountActive: false` dims just the number and − 0 +
-    // (the Voice changer sets the pitch instead).
+    // Updates the number and buttons; `active` dims the card when it's off (the number and − 0 + still work then,
+    // a little fainter: the amount is used when the card is turned on), `waiting` fades just the number (on, but the
+    // chosen app isn't making sound), `amountActive: false` dims just the number and − 0 + (the Voice changer sets
+    // the pitch instead).
     func show(on: Bool, value: Float, active: Bool, waiting: Bool = false, amountActive: Bool? = nil) {
         let faded = self.active != nil && active != self.active  // everything crossfades
         show(on: on, active: active)
         amount.value = value
-        let numberActive = amountActive ?? active
+        let numberActive = amountActive ?? true
         if numberActive != self.numberActive {
             if self.numberActive != nil && !faded { Theme.crossfade(buttons, 0.25) }
             self.numberActive = numberActive
         }
         amount.isEnabled = numberActive
-        amount.strength = numberActive ? (waiting ? 0.5 : 1) : 0.4
+        amount.strength = numberActive ? (active ? (waiting ? 0.5 : 1) : Self.offStrength) : 0.4
         minus.isEnabled = numberActive && value > -24
         plus.isEnabled = numberActive && value < 24
         zero.isEnabled = numberActive && value != 0
@@ -1828,7 +1830,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
 
     func buildWindow() {
-        hearCard = ShiftCard(title: "What you hear")
+        hearCard = ShiftCard(title: "Output pitch shifter")
         hearCard.picker.pullsDown = true  // a menu of apps to tick, not a single choice
         hearCard.picker.menu?.delegate = self
         hearCard.picker.target = self
@@ -1929,7 +1931,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             fastRow.spacing = (10 * scale).rounded()
         }
 
-        voiceCard = ShiftCard(title: "Your voice", extraRows: [styleRow, slowRow])
+        voiceCard = ShiftCard(title: "Input pitch shifter", extraRows: [styleRow, slowRow])
         voiceCard.addRow(fastRow, tight: true)
         voiceCard.addRow(footer)
         voiceCard.picker.menu?.delegate = self
@@ -2732,8 +2734,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     // For screenshots (--preview hear-on,voice-on,waiting,typing,recording,playing,listening,hover,menu,roll,
     // resize,no-driver,advanced-alert,sounds,rename,volume,drop,light,tone,slow,eq,changer,changer-man,
     // changer-realistic,changer-loading,changer-fallback,changer-slider-natural|fast|default|max|NN,changer-intel,
-    // pro-locked,pro-unlock,pro-typo,pro-paste,pro-done,pro-alone,pro-unlocked [--size 800x400]): shows a state, no
-    // sound. Any changer state also shows Your voice on.
+    // pro-locked,pro-unlock,pro-typo,pro-paste,pro-done,pro-alone,pro-unlocked,switch-flip [--size 800x400]
+    // [--steps 3,-2]): shows a state, no sound. Any changer state also shows Your voice on.
     func showPreview() {
         guard let preview else { return }
         // With Pitch Shift Pro locked (pro-locked, pro-unlock), the paid controls keep the free version's values.
@@ -2751,6 +2753,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             if preview.contains("drop") { soundboard.showDropping() }  // sound files dragged over it
         }
         if let cartoonArg, pro { voice.cartoon = cartoonArg }  // where the style slider is (--cartoon-amount 0.5)
+        if let steps = arg("--steps")?.split(separator: ",").compactMap({ Float($0) }), let first = steps.first {
+            hear.halfSteps = AmountField.clamp(first)  // the two big numbers (--steps 3,-2)
+            voice.halfSteps = AmountField.clamp(steps.last ?? first)
+        }
         if preview.contains("tone") { hear.advanced = true }  // Advanced processing on (nothing runs in pictures)
         if let toneArg, !outputUID.isEmpty, pro { hear.setTone(toneArg, for: outputUID) }  // the tone slider (--tone-amount -0.4)
         if preview.contains("slow"), pro { voice.slowDeeper = true }  // "Deeper when slow" on
@@ -2783,6 +2789,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 self.testButton.title = "● 5"
                 self.testButton.bezelColor = .systemRed
             }
+        }
+        // Slowed down 10 times: the first card's switch goes on, and turns back halfway (a quick second click); the
+        // second card's switch is held down.
+        if preview.contains("switch-flip") {
+            window.contentView?.layer?.speed = 0.1
+            if let press = NSEvent.mouseEvent(with: .leftMouseDown, location: .zero, modifierFlags: [], timestamp: 0,
+                                              windowNumber: window.windowNumber, context: nil, eventNumber: 0, clickCount: 1, pressure: 1) {
+                voiceCard.toggle.mouseDown(with: press)
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { self.hearCard.toggle.isOn = true }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self.hearCard.toggle.isOn = false }
         }
         if preview.contains("menu") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { self.hearCard.picker.performClick(nil) }
