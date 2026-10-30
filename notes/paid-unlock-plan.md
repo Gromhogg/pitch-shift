@@ -86,6 +86,13 @@ are kept for later and are not what the app does today. Section 10 is done (bran
     locked), or edit the app file to skip the check (then the app's signature breaks and macOS warns again, but it can
     be done); share a key (a key works on any number of Macs, and there's no server to turn one off). What they can't
     do any more: make new keys from what's inside the app.
+- **7-day free trial (2026-10-30):** the first normal open starts it by itself, also for people already on the free
+  version; Terminal modes and pictures never do. Dates go in `Pro.json` (`trialStart`, `lastSeen`, `trialEndShown`),
+  since a signed key can't carry an end date. `Pro.unlocked` includes the trial; `Pro.purchased` tells it from a key,
+  and a key beats the trial. A clock more than an hour behind `lastSeen` means no trial until it's right again.
+  Deleting `Pro.json` starts a new trial (accepted for a $5 app with nothing online). The end applies at launch, or in
+  an open app once no app is listening and Test isn't running; the unlock window then comes up once. Checks:
+  `--pro-trial-test tools/pro-keys-test.txt --pro-file F`, `--pro-open`, `--pro-clock`, `--preview pro-trial`.
 - **Later, with Stripe:** sections 5, 6 and 9 still apply, but the server would have to make keys the new way (or
   the app learn both kinds) and the app would need its `/activate` call back. `server/README.md` says the folder is
   not used yet.

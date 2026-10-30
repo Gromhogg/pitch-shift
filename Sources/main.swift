@@ -94,20 +94,26 @@
 //                                              A copy with Pitch Shift Pro locked always plays this way, like the
 //                                              window ("Pitch Shift Pro is locked: ... ignored (free version)").
 // Pitch Shift Pro (Sources/Pro.swift, notes/paid-unlock-plan.md):
-//   --pro-status                               locked or unlocked, and why
+//   --pro-status                               locked, in the free trial or unlocked, and why
 //   --pro-key KEY                              unlocks with a key, like the unlock window (checks it on this Mac, no
 //                                              internet, and keeps it)
-//   --pro-reset                                locks Pro again (forgets the key)
+//   --pro-reset                                forgets the key (the free trial's dates stay)
 //                [--pro-file F] [--pro-public-key HEX] [--pro-old-keys ISSUED]
 //                                              checks only: keep the key in F (any mode); check keys with another
 //                                              public key (64 hex characters) and/or the older keys listed in ISSUED
 //                                              (lines like issued.txt's), not this build's (only with --pro-key /
-//                                              --pro-status and --pro-file, or --pro-check: they never unlock the
-//                                              sound or the window)
+//                                              --pro-status / --pro-open and --pro-file, or --pro-check: they never
+//                                              unlock the sound or the window)
 //   --pro-check F [--pro-public-key HEX] [--pro-old-keys ISSUED]
 //                                              checks only: each key in F (one per line): unlocks, typo or wrong
 //   --pro-test tools/pro-keys-test.txt         checks only: the app accepts the same fixed test keys as
 //                                              tools/pro-keys.sh, and only those
+//   --pro-open --pro-file F [--pro-clock DAYS] checks only: what a normal open does to F (it starts the free trial),
+//                                              with no window. --pro-clock (also with --pro-status --pro-file F): as
+//                                              if the Mac's clock were DAYS ahead, or behind if negative
+//   --pro-trial-test tools/pro-keys-test.txt --pro-file F
+//                                              checks only: a trial in an open app, day by day, with the test keys.
+//                                              Replaces F
 import AppKit
 import AVFoundation
 import CoreAudio
@@ -139,7 +145,8 @@ func arg(_ name: String) -> String? {
 // would (the other one goes off); resize drags the window's corner through the three layouts; pro-locked shows
 // Pitch Shift Pro locked, pro-unlocked unlocked (the default for pictures), pro-unlock the unlock window, with pro-typo
 // a key with a typo in it, with pro-paste a key pasted from an email (line breaks and spaces in it), with pro-done
-// the "Unlocked" message, with pro-alone as its own window instead of a sheet;
+// the "Unlocked" message, with pro-alone as its own window instead of a sheet; pro-trial shows the free trial with 5
+// days left, pro-trial-1 with 1 day left, pro-trial-end its last day ending half a second in, with the unlock window;
 // switch-flip shows the switches slowed down 10 times: the first card's goes on and turns back halfway, the second
 // card's is held down). --steps 3,-2 sets the two cards' big numbers (one number: both).
 let preview = arg("--preview")
@@ -174,13 +181,20 @@ if asFree {
 }
 // Checks of the key code only: --pro-public-key HEX checks keys with that public key instead of this build's, and
 // --pro-old-keys ISSUED accepts the older keys listed in ISSUED (lines like issued.txt's) instead of this build's
-// list; with --pro-check F, or with --pro-key / --pro-status and --pro-file F (so the real Pro.json is never
-// touched). They're read after the lock above was worked out and never reach the sound or the window: a key pair
-// anyone can make must not unlock anything.
+// list; with --pro-check F, or with --pro-key / --pro-status / --pro-open and --pro-file F (so the real Pro.json is
+// never touched). They're read after the lock above was worked out and never reach the sound or the window: a key
+// pair anyone can make must not unlock anything. --pro-clock DAYS moves the free trial's clock the same way.
+if let text = arg("--pro-clock") {
+    guard let days = Double(text), days.isFinite, ["--pro-open", "--pro-status"].contains(where: args.contains), arg("--pro-file") != nil else {
+        print("--pro-clock: a number of days, only with --pro-open or --pro-status and --pro-file F")
+        exit(1)
+    }
+    Pro.shared.clockShift = days * 86_400
+}
 if arg("--pro-public-key") != nil || arg("--pro-old-keys") != nil {
-    guard ["--pro-check", "--pro-key", "--pro-status"].contains(where: args.contains),
+    guard ["--pro-check", "--pro-key", "--pro-open", "--pro-status"].contains(where: args.contains),
           arg("--pro-file") != nil || arg("--pro-check") != nil else {
-        print("--pro-public-key, --pro-old-keys: only with --pro-check F, or with --pro-key or --pro-status and --pro-file F")
+        print("--pro-public-key, --pro-old-keys: only with --pro-check F, or with --pro-key, --pro-open or --pro-status and --pro-file F")
         exit(1)
     }
     if let hex = arg("--pro-public-key") {
@@ -502,7 +516,16 @@ if args.contains("--pro-status") {
 
 if args.contains("--pro-reset") {
     Pro.shared.reset()
-    print("Pro: locked (removed \(Pro.shared.file.path))")
+    print("Key forgotten. \(Pro.shared.status)")
+    exit(0)
+}
+
+// Checks only: what a normal open does, on the file in --pro-file, with no window.
+if args.contains("--pro-open") {
+    guard arg("--pro-file") != nil else { print("--pro-open: only with --pro-file F"); exit(1) }
+    Pro.shared.load()
+    Pro.shared.opened()
+    print(Pro.shared.status)
     exit(0)
 }
 
@@ -568,6 +591,60 @@ if let path = arg("--pro-test") {
     }
     print("pro-test: \(good) of \(good + bad) checks pass")
     exit(bad == 0 && good > 0 ? 0 : 1)
+}
+
+// Checks only: a free trial in an open app, on a moved clock, with the test key pair and the file in --pro-file.
+if let path = arg("--pro-trial-test") {
+    guard arg("--pro-file") != nil, let text = try? String(contentsOfFile: path, encoding: .utf8) else {
+        print("--pro-trial-test: needs the test keys file and --pro-file F"); exit(1)
+    }
+    let words = text.split(whereSeparator: \.isNewline).map { $0.split(separator: " ").map(String.init) }
+    guard let publicKey = words.first(where: { $0.first == "public" })?.last,
+          let key = words.first(where: { $0.first == "signed" })?.last else { print("--pro-trial-test: no test keys in \(path)"); exit(1) }
+    let pro = Pro.shared
+    var changes = 0, good = 0, bad = 0
+    func result(_ ok: Bool, _ what: String) {
+        if ok { good += 1 } else { bad += 1 }
+        print("\(ok ? "ok" : "DIFFERENT"): \(what)")
+    }
+    func open(onDay day: Double) {
+        pro.clockShift = day * 86_400
+        pro.load()
+        pro.opened()
+    }
+    pro.publicKey = publicKey
+    pro.onChange = { changes += 1 }
+    try? FileManager.default.removeItem(at: pro.file)
+    open(onDay: 0)
+    result(pro.unlocked && !pro.purchased && pro.trialDaysLeft == 7, "day 0: the first open starts the trial, 7 days left")
+    open(onDay: 6)
+    result(pro.unlocked && pro.trialDaysLeft == 1, "day 6: 1 day left")
+    pro.clockShift = 8 * 86_400
+    pro.checkTrial(mayEnd: false)
+    result(pro.unlocked && changes == 0 && pro.trialDaysLeft == nil, "day 8 in a call: stays on, no days shown")
+    pro.checkTrial(mayEnd: true)
+    result(!pro.unlocked && changes == 1 && pro.trialEndDue, "day 8, the call ended: locks, the unlock window is due")
+    pro.trialEndSeen()
+    open(onDay: 9)
+    result(!pro.unlocked && !pro.trialEndDue, "next open: still locked, the unlock window doesn't come up again")
+    open(onDay: 2)
+    result(!pro.unlocked && !pro.trialEndDue, "clock set back to day 2: still locked")
+    try? FileManager.default.removeItem(at: pro.file)
+    open(onDay: 0)
+    open(onDay: 6)
+    open(onDay: 2)
+    result(!pro.unlocked && !pro.trialEndDue, "day 6, clock set back to day 2: locked, the unlock window isn't due")
+    open(onDay: 6.5)
+    result(pro.unlocked && pro.trialDaysLeft == 1, "the clock put right on day 6: the trial is back")
+    changes = 0
+    result(pro.activate(key) == .unlocked && pro.purchased && !pro.inTrial && changes == 1, "a key during the trial takes over")
+    open(onDay: 8)
+    result(pro.purchased && !pro.trialEndDue, "day 8 with a key: unlocked, no unlock window")
+    pro.reset()
+    open(onDay: 8.5)
+    result(!pro.unlocked, "the key forgotten: the trial's dates stayed, so no new trial")
+    print("pro-trial-test: \(good) of \(good + bad) checks pass")
+    exit(bad == 0 ? 0 : 1)
 }
 
 // Read only: once a second, the sound output's sample rate and streams, its own mic (Bluetooth headphones), and
@@ -1125,10 +1202,13 @@ if let path = arg("--test-sounds") {
 }
 
 // Pitch Shift Pro: pictures show the state asked for (unlocked unless pro-locked or the unlock window is asked for)
-// and touch no file; the app has read and checked its saved key at the top.
+// and touch no file; the app has read and checked its saved key at the top. A normal open starts the free trial.
 if preview != nil {
     let locked = previewStates.contains("pro-locked") || (previewStates.contains("pro-unlock") && !previewStates.contains("pro-unlocked"))
-    Pro.shared.pretend(unlocked: !locked)
+    let trialDays = previewStates.contains("pro-trial") ? 5 : ["pro-trial-1", "pro-trial-end"].contains(where: previewStates.contains) ? 1 : nil
+    Pro.shared.pretend(unlocked: !locked || trialDays != nil, trialDays: trialDays)
+} else {
+    Pro.shared.opened()
 }
 
 let app = NSApplication.shared

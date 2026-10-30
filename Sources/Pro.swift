@@ -3,7 +3,8 @@
 // is signed with the owner's private signing key, and the app holds only the public half, which can check a key but
 // can't make one (see ProKey). An accepted key is kept in ~/Library/Application Support/Pitch Shift/Pro.json and
 // checked again at every launch. While Pro is locked, the paid settings use the free version's values (Free); what
-// was saved is kept and comes back once Pro is unlocked.
+// was saved is kept and comes back once Pro is unlocked. Every copy gets a 7-day free trial of Pro, from its first
+// normal open (see "The free trial" below).
 import AppKit
 import CryptoKit
 
@@ -168,8 +169,11 @@ final class Pro {
     var enabled: Bool { pretending != nil || !publicKey.isEmpty }
     private var check: ProKeyCheck { ProKeyCheck(publicKey: publicKey, oldKeys: oldKeys) }
 
-    // Pro is unlocked: everything works. (Always true in a build without the public key.)
-    var unlocked: Bool { pretending ?? (publicKey.isEmpty || verified) }
+    // Pro is unlocked: everything works, with a key or during the free trial. (Always true in a build without the
+    // public key.)
+    var unlocked: Bool { pretending ?? (publicKey.isEmpty || verified || inTrial) }
+    // Unlocked for good, not just by the free trial.
+    var purchased: Bool { unlocked && !inTrial }
     private(set) var key: String?  // the saved key
     private var verified = false
     private var pretending: Bool?  // pictures (--preview) show a state and touch no file
@@ -188,37 +192,129 @@ final class Pro {
         + "MTDQ4-59W6A-SJ8M8-XQW3R-ENYZP-Z9ZKK-TU4AA-3GHXX"
 
     private struct Saved: Codable {
-        var key: String
+        var key: String?
         var unlocked: String?  // when (for people, not checked)
+        var trialStart: String?  // when the free trial started
+        var lastSeen: String?  // the latest date the app saw, to catch a clock set backward
+        var trialEndShown: Bool?  // the Unlock window already came up for the trial's end
     }
 
-    // For pictures: shows Pro locked or unlocked without reading or writing anything.
-    func pretend(unlocked: Bool) {
+    // For pictures: shows Pro locked, unlocked or in the free trial without reading or writing anything.
+    func pretend(unlocked: Bool, trialDays: Int? = nil) {
         pretending = unlocked
-        key = unlocked ? Self.exampleKey : nil
+        pretendedDays = trialDays
+        inTrial = trialDays != nil
+        key = unlocked && trialDays == nil ? Self.exampleKey : nil
     }
 
-    // At launch: reads the saved key and checks it (no internet).
+    // At launch: reads the saved key and checks it (no internet), and the free trial's dates. Writes nothing.
     func load() {
         guard pretending == nil, !publicKey.isEmpty else { return }
-        key = read()?.key
+        let saved = read()
+        key = saved?.key
         verified = key.map(check.works) ?? false
+        trialStart = saved?.trialStart.flatMap(Self.date)
+        lastSeen = saved?.lastSeen.flatMap(Self.date)
+        trialEndShown = saved?.trialEndShown ?? false
+        inTrial = !verified && trialRuns
     }
 
-    // Locks Pro again and forgets the key (--pro-reset).
+    // Locks Pro again and forgets the key (--pro-reset). The free trial's dates stay, so this starts no new trial.
     func reset() {
-        try? FileManager.default.removeItem(at: file)
+        if var saved = read(), saved.trialStart != nil {
+            saved.key = nil
+            saved.unlocked = nil
+            write(saved)
+        } else {
+            try? FileManager.default.removeItem(at: file)
+        }
         key = nil
         verified = false
+        inTrial = trialRuns
         onChange()
     }
+
+    // MARK: The free trial
+
+    // Seven days of Pro from the first normal open, also for people who used the free version before the trial came.
+    // A signed key can't carry an end date, so the dates live in Pro.json. Deleting that file starts a new trial: fine
+    // for a $5 app with nothing online.
+    static let trialDays = 7
+    private static let secondsPerDay: TimeInterval = 86_400
+    private static let clockSlack: TimeInterval = 3_600  // a Mac's clock may correct itself a little
+
+    // Changes at launch and in checkTrial, never just because time passed, so Pro can't lock in the middle of a call.
+    private(set) var inTrial = false
+    private var trialStart: Date?
+    private var lastSeen: Date?
+    private var trialEndShown = false
+    private var pretendedDays: Int?
+
+    // Checks only: --pro-clock DAYS.
+    var clockShift: TimeInterval = 0
+    private var now: Date { Date().addingTimeInterval(clockShift) }
+
+    private var trialEnd: Date? { trialStart?.addingTimeInterval(TimeInterval(Self.trialDays) * Self.secondsPerDay) }
+    // The clock is behind a date the app already saw. No trial until it's right again.
+    private var clockBack: Bool {
+        guard let latest = [trialStart, lastSeen].compactMap({ $0 }).max() else { return false }
+        return now < latest.addingTimeInterval(-Self.clockSlack)
+    }
+    private var trialRuns: Bool { !clockBack && trialEnd.map { now < $0 } == true }
+
+    // Days left, counting today. Nil out of the trial, and when it's over and only waits for a call to end.
+    var trialDaysLeft: Int? {
+        if let pretendedDays { return pretendedDays }
+        guard inTrial, trialRuns, let trialEnd else { return nil }
+        return Int((trialEnd.timeIntervalSince(now) / Self.secondsPerDay).rounded(.up))
+    }
+    var trialLeft: String? { trialDaysLeft.map { "\($0) \($0 == 1 ? "day" : "days") left" } }
+
+    // A normal open of the app, never a Terminal mode or a picture: starts the trial if it hasn't started yet.
+    func opened() {
+        guard !publicKey.isEmpty, !verified else { return }
+        if trialStart == nil { trialStart = now }
+        saveSeen()
+        inTrial = trialRuns
+    }
+
+    // While the app is open, which can be for days: notes the date, and ends a trial that's over once `mayEnd` says
+    // nothing would be cut off.
+    func checkTrial(mayEnd: Bool) {
+        guard inTrial else { return }
+        saveSeen()
+        if mayEnd && !trialRuns {
+            inTrial = false
+            onChange()
+        }
+    }
+
+    // The trial is over and the Unlock window hasn't come up for it yet (it comes up once).
+    var trialEndDue: Bool { trialStart != nil && !unlocked && !clockBack && !trialEndShown }
+
+    func trialEndSeen() {
+        trialEndShown = true
+        saveSeen()
+    }
+
+    private func saveSeen() {
+        lastSeen = max(lastSeen ?? now, now)
+        var saved = read() ?? Saved()
+        saved.trialStart = trialStart.map(Self.stamp)
+        saved.lastSeen = lastSeen.map(Self.stamp)
+        saved.trialEndShown = trialEndShown ? true : nil
+        write(saved)
+    }
+
+    private static func stamp(_ date: Date) -> String { ISO8601DateFormatter().string(from: date) }
+    private static func date(_ text: String) -> Date? { ISO8601DateFormatter().date(from: text) }
 
     // MARK: The saved file
 
     private func read() -> Saved? {
-        guard let data = try? Data(contentsOf: file), let saved = try? JSONDecoder().decode(Saved.self, from: data),
-              case .success(let key) = ProKey.read(saved.key) else { return nil }
-        return Saved(key: key, unlocked: saved.unlocked)
+        guard let data = try? Data(contentsOf: file), var saved = try? JSONDecoder().decode(Saved.self, from: data) else { return nil }
+        if case .success(let key)? = saved.key.map(ProKey.read) { saved.key = key } else { saved.key = nil }
+        return saved
     }
 
     private func write(_ saved: Saved) {
@@ -260,10 +356,14 @@ final class Pro {
         case .failure(let problem): return .problem(Self.message(for: problem))
         }
         guard check.works(key) else { return .problem(Self.wrongKey) }
-        write(Saved(key: key, unlocked: ISO8601DateFormatter().string(from: Date())))
+        var saved = read() ?? Saved()
+        saved.key = key
+        saved.unlocked = Self.stamp(Date())
+        write(saved)
         self.key = key
-        let was = unlocked
+        let was = purchased
         verified = true
+        inTrial = false
         if !was { onChange() }
         return .unlocked
     }
@@ -271,9 +371,11 @@ final class Pro {
     // For --pro-status.
     var status: String {
         guard !publicKey.isEmpty else { return "Pro: not set up in this build (nothing is locked)" }
-        guard let key else { return "Pro: locked (no key saved in \(file.path))" }
+        if let trialLeft, let trialEnd { return "Pro: free trial, \(trialLeft) (ends \(Self.stamp(trialEnd)))" }
+        let trial = trialStart == nil ? "" : clockBack ? ", and no free trial while the clock is set back" : ", and the free trial is over"
+        guard let key else { return "Pro: locked (no key saved in \(file.path)\(trial))" }
         let ending = (ProKey.kind(key) == .old ? "older key …-" : "key …-") + key.suffix(5)
-        return verified ? "Pro: unlocked (\(ending))" : "Pro: locked (\(ending) saved, but it doesn't work in this copy)"
+        return verified ? "Pro: unlocked (\(ending))" : "Pro: locked (\(ending) saved, but it doesn't work in this copy\(trial))"
     }
 }
 
@@ -350,7 +452,7 @@ final class ProSheet: NSObject, NSTextFieldDelegate {
         let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: width, height: 200), styleMask: [.titled], backing: .buffered, defer: false)
         panel.title = "Pitch Shift Pro"
         panel.appearance = window.appearance  // light or dark, like the main window
-        let content = Pro.shared.unlocked ? unlockedView() : lockedView()
+        let content = Pro.shared.purchased ? unlockedView() : lockedView()
         panel.contentView = content
         panel.setContentSize(content.fittingSize)
         self.panel = panel
@@ -361,7 +463,7 @@ final class ProSheet: NSObject, NSTextFieldDelegate {
             return
         }
         window.beginSheet(panel) { [weak self] _ in self?.panel = nil }
-        if !Pro.shared.unlocked { panel.makeFirstResponder(field) }
+        if !Pro.shared.purchased { panel.makeFirstResponder(field) }
     }
 
     @objc func close() {
