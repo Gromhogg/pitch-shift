@@ -304,6 +304,9 @@ final class PthFile {
             case 0x63:  // GLOBAL: two lines of text, only remembered here
                 let names = try [line(pickle, &at), line(pickle, &at)]
                 stack.append(.name(names.joined(separator: " ")))
+            case 0x62:  // BUILD: extra details on a saved dict (training checkpoints have some), left out here
+                _ = try pop()
+                guard case .dict? = stack.last else { throw Refused(why: .notVoice) }
             case 0x51:  // BINPERSID: ("storage", type, file, device, size)
                 guard case .list(let index) = try pop(), lists[index].count == 5,
                       case .text("storage") = lists[index][0], case .name(let type) = lists[index][1],
