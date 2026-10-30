@@ -71,7 +71,7 @@ struct EffectFilter {
 // delay line is made in init, freed with free()) and never waits.
 struct VoiceEffects {
     static let echoSeconds = 0.28
-    static let tailSeconds = 2.0        // Echo at full is gone by then (-50 dB)
+    static let tailSeconds = 2.0        // after this, Echo at full is over 50 dB under the voice
     private static let firstRepeat: Float = 0.5, nextRepeats: Float = 0.45  // at full
     private static let duck: Float = 0.4       // the part of the repeats taken away while talking
     private static let talkingAt: Float = 0.4  // the share of the recent loudness that counts as talking
