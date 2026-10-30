@@ -45,8 +45,8 @@
 //                                              waiting sound), printing the delay they add (no devices)
 //   --list-voices [--voices-dir DIR]           the voice changer's voices (and files that were skipped)
 //   --add-voice PATH [--pitch high|medium|low|HZ] [--voices-dir DIR]
-//                                              adds a voice folder or a .zip of one, as "Add Voice…" does (into DIR,
-//                                              else the Voices folder); --rename-voice ID NAME, --remove-voice ID
+//                                              adds a .pth, a voice folder or a .zip of either, as "Add Voice…" does
+//                                              (into DIR, else the Voices folder); --rename-voice ID NAME, --remove-voice ID
 //   --render-sounds VOICE OUT --sound FILE [--at 5,20] [--sound-volume 1] [--speakers] [--voice-db 0] [--shifted]
 //                [--buffer 128] [--sound-preset old]
 //                                              Soundboard, offline (no devices): VOICE as the mic, FILE clicked at each
@@ -344,8 +344,8 @@ if args.contains("--list-voices") {
     exit(0)
 }
 
-// --add-voice PATH [--pitch high|medium|low|HZ]: adds a voice folder (or a .zip of one) as "Add Voice…" does, into
-// --voices-dir DIR if given, else the Voices folder (--pitch: for a voice with no Natural settings; default medium).
+// --add-voice PATH [--pitch high|medium|low|HZ]: adds a .pth, a voice folder or a .zip of either as "Add Voice…" does,
+// into --voices-dir DIR if given, else the Voices folder (--pitch: for a voice with no Natural settings; default medium).
 // --rename-voice ID NAME, --remove-voice ID (to the Trash): an added voice in the same folder (never a built-in one).
 if let path = arg("--add-voice") {
     let folder = VoiceLibrary.extraFolder ?? VoiceLibrary.userFolder
@@ -367,6 +367,7 @@ if let path = arg("--add-voice") {
         let taken = Set(VoiceLibrary.shared.voices.map { $0.id.lowercased() })
         let id = try found.install(into: folder, pitch: pitch, taken: taken, names: Set(VoiceLibrary.shared.voices.map { $0.name.lowercased() }))
         print("Added \"\(found.name)\" as \(id) in \(folder.path)")
+        found.discard()  // (exit skips the defer)
         exit(0)
     } catch {
         print("Can't add this voice: \((error as? Problem)?.message ?? "\(error)")"); exit(2)

@@ -17,6 +17,9 @@ The AI voice is made in the look-ahead shape of Pitch Shift 3.1 (as research/voi
 Accepts RVC v2 voices made at 32, 40 or 48 kHz (RVC WebUI, Applio and their forks). Refuses RVC v1 voices and
 voices made without pitch. Usually run by tools/convert-voice.sh, which sets up Python and the packages first.
 
+The app does the same by itself for most voices (Sources/VoiceConverter.swift, byte for byte the same model.mil and
+weight.bin, from templates make_template.py makes here); this converter is for the rest. Keep the two in step.
+
 The model code below is re-written from RVC-Project/Retrieval-based-Voice-Conversion-WebUI (tag 2.2.231006,
 infer/lib/infer_pack/*.py, MIT License, Copyright (c) 2023 liujing04, 源文雨, Ftps), inference only: masks dropped
 (every frame of the fixed window is used), weight norm folded into plain weights, the NSF sine/noise source moved out
@@ -605,11 +608,9 @@ A voice folder holds:
   uses the plain voice changer.
 
 To add a voice:
-- Downloaded an RVC v2 voice (a .pth file, or a .zip with one inside)? Turn it into a voice folder with the one line
-  under "Your own voices" in Pitch Shift's README (https://github.com/Gromhogg/pitch-shift#your-own-voices). The new
-  voice lands in here.
-- Got a voice folder, or a .zip of one? In Pitch Shift's Voice changer, click the button next to the voice menu and
-  choose Add Voice..., or drop the folder in here.
+- Downloaded an RVC v2 voice (a .pth file, or a .zip with one inside)? Drag it onto Pitch Shift's window.
+- Got a voice folder, or a .zip of one? Drag that onto the window too, or drop the folder in here.
+- Or, in Pitch Shift's Voice changer, click the button next to the voice menu and choose Add Voice...
 
 To remove a voice, choose Remove in the same menu, or move its folder to the Trash.
 

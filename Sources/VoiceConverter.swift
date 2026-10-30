@@ -19,7 +19,7 @@ enum VoiceConverter {
               let text = try? String(contentsOf: template.appendingPathComponent("model.mil"), encoding: .utf8) else {
             throw Problem(message: "This copy of Pitch Shift is missing its voice files. Install it again.")
         }
-        var writer = try ModelWriter(voice)
+        var writer = try ModelWriter(voice, shown: shown)
         var layout = try writer.fill(text)
         var analytics = try Data(contentsOf: template.appendingPathComponent("analytics/coremldata.bin"))
         var hash = SHA256()
@@ -132,7 +132,7 @@ private struct RVCVoice {
 
     init(_ url: URL, shown: String) throws {
         let terminal = "Turn it into a voice with the one line under “Your own voices” in Pitch Shift's README (github.com/Gromhogg/pitch-shift)."
-        let notVoice = Problem(message: "“\(shown)” can't be read as an RVC voice.")
+        let notVoice = Problem(message: "“\(shown)” can't be read as an RVC voice. If you're sure it is one: \(terminal)")
         let unusual = Problem(message: "“\(shown)” has an unusual shape that Pitch Shift can't turn into a voice by itself. \(terminal)")
         if let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize, size > 2_000_000_000 {
             throw Problem(message: "“\(shown)” is too big to be a voice.")
@@ -268,16 +268,18 @@ private struct ModelWriter {
     }
 
     private let voice: RVCVoice
-    private let broken: Problem
+    private let broken: Problem   // parts missing or the wrong size
+    private let damaged: Problem  // numbers that can't be used
     private var sources: [String: Source] = [:]  // by the name model.mil gives each
     private var blobs = BlobFile()
     private var speakerOffsets: [String: [Float]] = [:]
     private var tables = 0  // position tables done
     private var lastWeight = ""
 
-    init(_ voice: RVCVoice) throws {
+    init(_ voice: RVCVoice, shown: String) throws {
         self.voice = voice
-        broken = Problem(message: "The voice's parts don't match RVC v2, so Pitch Shift can't use it.")
+        broken = Problem(message: "“\(shown)” has parts missing or the wrong size for an RVC v2 voice, so Pitch Shift can't use it.")
+        damaged = Problem(message: "“\(shown)” has broken numbers in it, so Pitch Shift can't use it.")
         for (key, tensor) in voice.tensors {
             if key.hasPrefix("enc_q.") || key.hasPrefix("dec.m_source.l_sin_gen") || key == "emb_g.weight" { continue }
             if key.hasSuffix("weight_v") || key.hasSuffix("parametrizations.weight.original1") { continue }
@@ -301,7 +303,7 @@ private struct ModelWriter {
         } else if name.hasPrefix("flow.flows.") {
             let parts = name.split(separator: ".", omittingEmptySubsequences: false)
             guard parts.count > 3, let flow = Int(parts[2]), flow % 2 == 0 else {
-                throw Problem(message: "The voice has an unusual flow layout, so Pitch Shift can't use it.")
+                throw Problem(message: "This voice has an unusual flow layout, so Pitch Shift can't use it.")
             }
             name = "flows.\(flow / 2)." + parts[3...].joined(separator: ".")
         } else if name.hasPrefix("dec.m_source.l_linear.") {
@@ -326,8 +328,8 @@ private struct ModelWriter {
             let shape = dims.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
             let name = String(line[close.upperBound..<space])
             let quantizing = name.hasSuffix("_quantized")
-            let numbers = try Self.half(try values(for: name, shape: shape), broken)
-            if quantizing, let quantized = try Self.quantized(numbers, shape, axis: Self.axis(in: line), broken: broken) {
+            let numbers = try Self.half(try values(for: name, shape: shape), damaged)
+            if quantizing, let quantized = try Self.quantized(numbers, shape, axis: Self.axis(in: line), damaged: damaged) {
                 let data = blobs.add(quantized.data, .byte), zero = blobs.add(quantized.zeros, .byte), scale = blobs.add(quantized.scales, .half)
                 let pieces = line.components(separatedBy: "(@)")
                 guard pieces.count == 4 else { throw broken }
@@ -347,8 +349,8 @@ private struct ModelWriter {
         out.removeLast()  // the template's last line ended in \n, so the split gave one empty line more
         for plain in staying { out = out.replacingOccurrences(of: plain + "_quantized", with: plain) }
         let weight = try take("dec_l_linear_weight", [1, 1]), bias = try take("dec_l_linear_bias", [1])
-        out = out.replacingOccurrences(of: "@WEIGHT@", with: try Self.written(weight[0], broken))
-        out = out.replacingOccurrences(of: "@BIAS@", with: try Self.written(bias[0], broken))
+        out = out.replacingOccurrences(of: "@WEIGHT@", with: try Self.written(weight[0], damaged))
+        out = out.replacingOccurrences(of: "@BIAS@", with: try Self.written(bias[0], damaged))
         guard sources.isEmpty else { throw broken }
         return (out, blobs.finished())
     }
@@ -356,20 +358,20 @@ private struct ModelWriter {
     private static func axis(in line: Substring) -> Int { line.contains("axis = tensor<int32, []>(1)") ? 1 : 0 }
 
     // As model.mil writes a number.
-    private static func written(_ value: Float, _ broken: Problem) throws -> String {
+    private static func written(_ value: Float, _ damaged: Problem) throws -> String {
         let number = Float16(value)
-        guard number.isFinite else { throw broken }
+        guard number.isFinite else { throw damaged }
         return String(format: "%a", Double(number))
     }
 
-    private static func half(_ values: [Float], _ broken: Problem) throws -> [Float16] {
+    private static func half(_ values: [Float], _ damaged: Problem) throws -> [Float16] {
         var finite = true
         let numbers = values.map { value -> Float16 in
             let number = Float16(value)
             finite = finite && number.isFinite
             return number
         }
-        guard finite else { throw broken }
+        guard finite else { throw damaged }
         return numbers
     }
 
@@ -491,8 +493,8 @@ private struct ModelWriter {
     // A weight's 8-bit form with a scale and zero point per channel, following coremltools' linear quantizer. numpy works
     // out every 16-bit sum in 32 bits and rounds it to 16, which is why every step here goes through Float.
     // nil: the weight has a nearly flat slice along some axis, so it stays 16-bit (convert_voice.py's quantize()).
-    private static func quantized(_ values: [Float16], _ shape: [Int], axis: Int, broken: Problem) throws -> (data: [Int8], zeros: [Int8], scales: [Float16])? {
-        guard shape.count == 2 || shape.count == 3 else { throw broken }
+    private static func quantized(_ values: [Float16], _ shape: [Int], axis: Int, damaged: Problem) throws -> (data: [Int8], zeros: [Int8], scales: [Float16])? {
+        guard shape.count == 2 || shape.count == 3 else { throw damaged }
         let a = shape[0], b = shape[1], c = shape.count == 3 ? shape[2] : 1
         // The smallest and largest number of each slice along each axis, in one list: axis 0, then 1, then 2.
         var lows = [Float16](repeating: .infinity, count: a + b + c), highs = [Float16](repeating: -.infinity, count: a + b + c)
@@ -522,7 +524,7 @@ private struct ModelWriter {
             let scale = Float16(Float(range) / 255)
             let top = Float16(-128 * Float(high)), bottom = Float16(127 * Float(low))
             let point = Float16(Float(Float16(Float(top) - Float(bottom))) / Float(range))
-            guard scale.isFinite, scale > 0, point.isFinite else { throw broken }
+            guard scale.isFinite, scale > 0, point.isFinite else { throw damaged }
             scales.append(scale)
             zeros.append(max(-128, min(127, point.rounded(.toNearestOrEven))))
         }

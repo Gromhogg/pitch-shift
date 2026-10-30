@@ -1,9 +1,9 @@
 // The voice changer's own voices: the Voices folder (~/Library/Application Support/Pitch Shift/Voices, with a
-// README.txt), "Add Voice…" (a voice folder or a .zip of one: copied in, a .mlpackage compiled, the model and its
-// voice.json checked, a Natural block written if it has none), Rename, Remove (to the Trash; never a built-in voice)
-// and a watcher that tells the window when the folder changes. --add-voice / --rename-voice / --remove-voice do the
-// same from the command line (main.swift). Downloaded RVC voices (.pth) are turned into voice folders by
-// tools/convert-voice.sh first.
+// README.txt), "Add Voice…" (a downloaded RVC voice, a voice folder or a .zip of either: a .pth turned into a voice
+// folder by VoiceConverter.swift, then copied in, a .mlpackage compiled, the model and its voice.json checked, a Natural
+// block written if it has none), Rename, Remove (to the Trash; never a built-in voice) and a watcher that tells the
+// window when the folder changes. --add-voice / --rename-voice / --remove-voice do the same from the command line
+// (main.swift). tools/convert-voice.sh is for the few .pth files the app can't turn into a voice by itself.
 import CoreML
 import Foundation
 
@@ -64,11 +64,9 @@ enum VoiceFolder {
       uses the plain voice changer.
 
     To add a voice:
-    - Downloaded an RVC v2 voice (a .pth file, or a .zip with one inside)? Turn it into a voice folder with the one line
-      under "Your own voices" in Pitch Shift's README (https://github.com/Gromhogg/pitch-shift#your-own-voices). The new
-      voice lands in here.
-    - Got a voice folder, or a .zip of one? In Pitch Shift's Voice changer, click the button next to the voice menu and
-      choose Add Voice..., or drop the folder in here.
+    - Downloaded an RVC v2 voice (a .pth file, or a .zip with one inside)? Drag it onto Pitch Shift's window.
+    - Got a voice folder, or a .zip of one? Drag that onto the window too, or drop the folder in here.
+    - Or, in Pitch Shift's Voice changer, click the button next to the voice menu and choose Add Voice...
 
     To remove a voice, choose Remove in the same menu, or move its folder to the Trash.
 
@@ -147,7 +145,13 @@ struct VoiceImport {
         let ext = url.pathExtension.lowercased()
         if !isDir.boolValue {
             switch ext {
+            case "pth":
+                return try converted(url, name: url.deletingPathExtension().lastPathComponent, scratch: nil)
             case "zip":
+                guard let listing = (try? Data(contentsOf: url, options: .alwaysMapped)).flatMap(ZipListing.init) else {
+                    throw Problem(message: "“\(shown)” can't be unpacked.")
+                }
+                if let problem = listing.problem(shown: shown) { throw problem }
                 let scratch = fm.temporaryDirectory.appendingPathComponent("pitch-shift-voice-\(UUID().uuidString)")
                 try fm.createDirectory(at: scratch, withIntermediateDirectories: true)
                 let unzip = Process()
@@ -182,25 +186,23 @@ struct VoiceImport {
 
     private static func unusable(_ ext: String, _ shown: String) -> Problem {
         switch ext {
-        case "pth":
-            return Problem(message: "“\(shown)” is an RVC voice file. Turn it into a Pitch Shift voice first with the one line under “Your own voices” in Pitch Shift's README; it lands in the Voices folder by itself.")
         case "index":
-            return Problem(message: "“\(shown)” is an RVC search index, not a voice. Pitch Shift needs the voice's .pth file, turned into a Pitch Shift voice with the converter (README, “Your own voices”).")
+            return Problem(message: "“\(shown)” is an RVC search index, not a voice. Pitch Shift needs the voice's .pth file.")
         case "onnx":
-            return Problem(message: "“\(shown)” is an .onnx voice, which Pitch Shift can't use. Look for the voice's .pth file and turn it into a Pitch Shift voice with the converter (README, “Your own voices”).")
+            return Problem(message: "“\(shown)” is an .onnx voice, which Pitch Shift can't use. Look for the voice's .pth file.")
         default:
-            return Problem(message: "“\(shown)” isn't a voice. Pick a voice folder (with a voice.json or a .mlmodelc inside) or a .zip of one.")
+            return Problem(message: "“\(shown)” isn't a voice. Pick a voice's .pth file, a voice folder (with a voice.json or a .mlmodelc inside) or a .zip of one.")
         }
     }
 
-    // The folder (at most 3 levels down) with a voice.json, else one with a model.
+    // The folder (at most 3 levels down) with a voice.json, else one with a model, else the biggest .pth.
     private static func found(in top: URL, shown: String, fallbackName: String, scratch: URL?) throws -> VoiceImport {
         let fm = FileManager.default
-        var level = [top], withModel: URL?, other: String?
+        var level = [top], withModel: URL?, other: String?, biggest: (file: URL, size: Int)?
         for _ in 0..<4 {
             var next: [URL] = []
             for dir in level {
-                let items = ((try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isDirectoryKey])) ?? [])
+                let items = ((try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey])) ?? [])
                     .filter { !$0.lastPathComponent.hasPrefix(".") && $0.lastPathComponent != "__MACOSX" }
                     .sorted { $0.lastPathComponent < $1.lastPathComponent }
                 if items.contains(where: { $0.lastPathComponent == "voice.json" }) {
@@ -209,7 +211,11 @@ struct VoiceImport {
                 for item in items {
                     let ext = item.pathExtension.lowercased()
                     if ext == "mlmodelc" || ext == "mlpackage" { withModel = withModel ?? dir; continue }
-                    if ["pth", "onnx", "index"].contains(ext) { other = other ?? ext }
+                    if ext == "pth" {
+                        let size = (try? item.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+                        if size > biggest?.size ?? -1 { biggest = (item, size) }
+                    }
+                    if ["onnx", "index"].contains(ext) { other = other ?? ext }
                     if (try? item.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true { next.append(item) }
                 }
             }
@@ -218,8 +224,24 @@ struct VoiceImport {
             }
             level = next
         }
+        if let biggest { return try converted(biggest.file, name: fallbackName, scratch: scratch) }
         if let other { throw unusable(other, shown) }
         throw Problem(message: "There's no voice in “\(shown)”. A voice folder has a voice.json file or a .mlmodelc AI voice inside.")
+    }
+
+    // Turns a .pth into a voice folder in `scratch` (a new one if nil, deleted by `discard`).
+    private static func converted(_ pth: URL, name: String, scratch: URL?) throws -> VoiceImport {
+        let fm = FileManager.default
+        let work = scratch ?? fm.temporaryDirectory.appendingPathComponent("pitch-shift-voice-\(UUID().uuidString)")
+        let folder = work.appendingPathComponent("converted-voice")
+        do {
+            try fm.createDirectory(at: folder, withIntermediateDirectories: true)
+            try VoiceConverter.convert(pth, shown: pth.lastPathComponent, name: String(name.prefix(60)), into: folder)
+            return try read(folder, shown: pth.lastPathComponent, fallbackName: name, scratch: work)
+        } catch {
+            if scratch == nil { try? fm.removeItem(at: work) }
+            throw error
+        }
     }
 
     private static func read(_ dir: URL, shown: String, fallbackName: String, scratch: URL?) throws -> VoiceImport {
@@ -349,7 +371,7 @@ struct VoiceImport {
             throw Problem(message: "“\(name)”'s AI voice can't be opened.")
         }
         let inputs = loaded.modelDescription.inputDescriptionsByName
-        let convert = "Turn the original .pth voice into a Pitch Shift voice with the converter (README, “Your own voices”)."
+        let convert = "Add the voice's original .pth file instead."
         guard let features = inputs["features"]?.multiArrayConstraint?.shape.map(\.intValue), features.count == 3,
               let pitch = inputs["pitch"]?.multiArrayConstraint?.shape.map(\.intValue), pitch.count == 2,
               inputs["source"] != nil, inputs["noise"] != nil, loaded.modelDescription.outputDescriptionsByName["audio"] != nil else {
@@ -368,7 +390,7 @@ struct VoiceImport {
         // The speech reader's window may be longer than the voice's (by an even number of frames), as VoiceModel.mm
         // allows: the 3.1 reader (look-ahead shape) also reads for voices made in the first shape.
         if let encoder, let frames = encoderFrames(encoder), frames < pitch[1] || (frames - pitch[1]) % 2 != 0 {
-            throw Problem(message: "“\(name)” was made for a different version of Pitch Shift. Turn the original .pth voice into a Pitch Shift voice again with the converter (README, “Your own voices”).")
+            throw Problem(message: "“\(name)” was made for a different version of Pitch Shift. Add the voice's original .pth file instead.")
         }
         return rate
     }
