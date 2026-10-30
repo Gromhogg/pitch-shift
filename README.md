@@ -83,6 +83,7 @@ More help: [windows/README.md](windows/README.md).
 
 - Free: **Output pitch shifter** with Advanced processing, and **Input pitch shifter** in the Cartoon style, with **Test**.
 - Pro adds the **Voice changer** (with your own voices), the **Natural ↔ Cartoon** and **Bass ↔ Treble** sliders, **Auto EQ**, **Deeper when slow** (with **Higher when fast**) and the **Soundboard**. They show a small lock until you unlock them.
+- **7 days free:** Pro starts by itself the first time you open the app, with nothing to sign up for. The button at the top right shows the days left. When they're up, the paid parts lock and the free version stays. Your settings are kept for when you unlock. It never locks while an app is using Pitch Shift Mic, so a call isn't cut off.
 - To get a key, click **Unlock Pro** at the top right, then **Email for a key** (or email cbsweetland@gmail.com). Copy the whole key from the email you get back (it's long, 4 lines; spaces and line breaks don't matter), paste it in and click **Unlock**. It works on all your Macs, for good, with no internet needed. Keys sent out before (25 characters) keep working.
 
 ## Your own voices (Mac)
