@@ -1728,7 +1728,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     let micName = NSTextField(labelWithString: "Pitch Shift Mic")
     let installButton = NSButton(title: "Install Pitch Shift Mic", target: nil, action: nil)
     var footer: CardRow!
-    // "Unlock Pro" in the title bar while Pitch Shift Pro is locked.
+    // "Unlock Pro" in the title bar until Pitch Shift Pro is bought.
     let unlockButton = NSButton(title: "Unlock Pro", target: nil, action: nil)
     let unlockAccessory = NSTitlebarAccessoryViewController()
     private var soundsSize: NSControl.ControlSize = .regular
@@ -1775,6 +1775,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 DefaultMic.giveBack()  // in case the app didn't close cleanly last time
             }
             refresh()
+            watchTrial()
         }
     }
 
@@ -1823,7 +1824,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
         // "Unlock Pitch Shift Pro…" (or "Pitch Shift Pro…" once unlocked) only in builds with the server set up.
         let pro: [(String, Selector, String, NSEvent.ModifierFlags)] = Pro.shared.enabled
-            ? [(Pro.shared.unlocked ? "Pitch Shift Pro…" : "Unlock Pitch Shift Pro…", #selector(showUnlock), "", []),
+            ? [(Pro.shared.purchased ? "Pitch Shift Pro…" : "Unlock Pitch Shift Pro…", #selector(showUnlock), "", []),
                ("-", #selector(showUnlock), "", [])]
             : []
         submenu("Pitch Shift", pro + [
@@ -2056,22 +2057,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         buildUnlockButton()
     }
 
-    // "Unlock Pro" at the right end of the title bar, shown only while Pitch Shift Pro is locked.
+    // "Unlock Pro" at the right end of the title bar, shown until Pitch Shift Pro is bought, with the days left during
+    // the free trial.
     private func buildUnlockButton() {
         unlockButton.bezelStyle = .rounded
         unlockButton.controlSize = .small
         unlockButton.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
-        unlockButton.attributedTitle = NSAttributedString(string: "Unlock Pro", attributes: [
-            .foregroundColor: Theme.mid, .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)])
         unlockButton.target = self
         unlockButton.action = #selector(showUnlock)
         unlockButton.toolTip = "Pitch Shift Pro"
-        unlockButton.sizeToFit()
-        let holder = NSView(frame: NSRect(x: 0, y: 0, width: unlockButton.frame.width + 10, height: unlockButton.frame.height))
-        unlockButton.frame.origin = .zero
+        let holder = NSView()
         holder.addSubview(unlockButton)
         unlockAccessory.view = holder
         unlockAccessory.layoutAttribute = .trailing
+        titleUnlockButton("Unlock Pro")
         showUnlockButton()
         // Light or dark mode changed: the locked Sounds button's lock gets the new color.
         appearanceWatch = window.observe(\.effectiveAppearance) { [weak self] _, _ in
@@ -2080,8 +2079,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     }
     private var appearanceWatch: NSKeyValueObservation?
 
+    private func titleUnlockButton(_ title: String) {
+        unlockButton.attributedTitle = NSAttributedString(string: title, attributes: [
+            .foregroundColor: Theme.mid, .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)])
+        unlockButton.sizeToFit()
+        unlockButton.frame.origin = .zero
+        unlockAccessory.view.frame = NSRect(x: 0, y: 0, width: unlockButton.frame.width + 10, height: unlockButton.frame.height)
+    }
+
     private func showUnlockButton() {
-        let wanted = !Pro.shared.unlocked
+        let title = Pro.shared.trialLeft.map { "Pro: \($0)" } ?? "Unlock Pro"
+        if unlockButton.attributedTitle.string != title {
+            // The title bar fits an accessory as it's added, so one that changes size goes out and back in.
+            if let index = window.titlebarAccessoryViewControllers.firstIndex(of: unlockAccessory) {
+                window.removeTitlebarAccessoryViewController(at: index)
+            }
+            titleUnlockButton(title)
+        }
+        let wanted = !Pro.shared.purchased
         if wanted && unlockAccessory.parent == nil {
             window.addTitlebarAccessoryViewController(unlockAccessory)
         } else if !wanted, let index = window.titlebarAccessoryViewControllers.firstIndex(of: unlockAccessory) {
@@ -2116,6 +2131,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     @objc func showUnlock() {
         guard Pro.shared.enabled else { return }
         ProSheet.shared.show(on: window)
+    }
+
+    // Every few minutes during the free trial, since the app can stay open for days: the days left, and the trial's
+    // end. Pro locks only while no app listens to Pitch Shift Mic and Test isn't running, so it never cuts a call. The
+    // unlock window comes up once, when the main window is there to hold it.
+    private func watchTrial() {
+        guard Pro.shared.inTrial || Pro.shared.trialEndDue else { return }
+        Pro.shared.checkTrial(mayEnd: !voice.listening && test.phase == .idle)
+        showUnlockButton()
+        if Pro.shared.trialEndDue && window.isVisible {
+            Pro.shared.trialEndSeen()
+            showUnlock()
+        }
+        // (the wall clock: a sleeping Mac's time counts)
+        DispatchQueue.main.asyncAfter(wallDeadline: .now() + 300) { [weak self] in self?.watchTrial() }
     }
 
     // Unlocked: the saved paid settings come back. Locked: the free version's values are used (nothing saved changes).
@@ -2848,8 +2878,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     // resize,no-driver,advanced-alert,sounds,rename,volume,drop,light,tone,slow,eq,changer,changer-man,
     // changer-realistic,changer-loading,changer-fallback,changer-slider-natural|fast|default|max|NN,changer-intel,
     // changer-second-off,changer-quiet-on,changer-card-off,pro-locked,pro-unlock,pro-typo,pro-paste,pro-done,pro-alone,
-    // pro-unlocked,switch-flip,click-voice,click-vc [--size 800x400] [--steps 3,-2]): shows a state, no sound. With a
-    // changer state, Your voice shows off (only one at a time).
+    // pro-unlocked,pro-trial,pro-trial-1,pro-trial-end,switch-flip,click-voice,click-vc [--size 800x400] [--steps 3,-2]):
+    // shows a state, no sound. With a changer state, Your voice shows off (only one at a time).
     func showPreview() {
         guard let preview else { return }
         // With Pitch Shift Pro locked (pro-locked, pro-unlock), the paid controls keep the free version's values.
@@ -2890,6 +2920,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 if previewStates.contains("pro-typo") { ProSheet.shared.showTypo() }
                 if previewStates.contains("pro-paste") { ProSheet.shared.showPasted() }
                 if previewStates.contains("pro-done") { ProSheet.shared.showUnlockedMessage() }
+            }
+        }
+        if previewStates.contains("pro-trial-end") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                Pro.shared.pretend(unlocked: false)
+                self.proChanged()
+                ProSheet.shared.show(on: self.window, alone: previewStates.contains("pro-alone"))
             }
         }
         if preview.contains("typing") {
