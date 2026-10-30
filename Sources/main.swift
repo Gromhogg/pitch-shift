@@ -73,6 +73,11 @@
 //                                              button), so its level in Pitch Shift Mic should be V x the file.
 //                                              --voice-off: as with "Your voice" off and the Soundboard open: the
 //                                              tone must come through at its own pitch (440 Hz), no shift.
+//                                              --close-sounds (with --voice-off): the Soundboard closes while the
+//                                              recording (an app listening) goes on, then the recording ends: the
+//                                              tone must keep coming until then, and the chain stop a second later.
+//   --check-sounds-close                       what closing the Soundboard does to the voice chain with no app
+//                                              listening (real code; opens no sound device; takes about 10 s)
 //   --test ... --advanced [--record-out F.wav] [--steps-at "3:8,6:-5"] [--tone-amount 0.5] [--tone-at "2:1,4:-1"]
 //              [--as-device UID] [--tone-db 6,-6] [--auto-eq] [--eq-offsets 0,0,0,0,0]
 //                                              "What you hear" with Advanced processing on (--watch prints the delay;
@@ -1019,6 +1024,70 @@ if args.contains("--test-button") {
 
 // Soundboard check: a quiet tone is the voice, FILE plays into Pitch Shift Mic 1 s in, Pitch Shift Mic is recorded.
 // --voice-off: as with "Your voice" off and the Soundboard open (the voice goes through unchanged).
+// With no app listening no chain is made, so no sound device is opened; their state is only read.
+if args.contains("--check-sounds-close") {
+    refuseIfMicsBusy()
+    guard Mics.driverInstalled else { print("Pitch Shift Mic is not installed"); exit(1) }
+    let voice = VoiceShifter(halfSteps: 0, cartoon: 0, micUID: nil)
+    var told = 0, failed = false
+    voice.onListenerGone = { told += 1 }
+    func check(_ name: String, running: Bool, waiting: Bool, calls: Int) {
+        let good = voice.running == running && voice.runsForListener == waiting && told == calls && voice.chain == nil
+        print("\(good ? "ok" : "FAILED"): \(name) (running \(voice.running), waiting for an app \(voice.runsForListener), told \(told))")
+        if !good { failed = true }
+    }
+    // Each step starts 1.3 s after the one before: longer than the chain's 1 second wait.
+    let steps: [() -> Void] = [
+        {
+            voice.keepForSounds(true)
+            check("Soundboard open", running: true, waiting: false, calls: 0)
+            voice.keepForSounds(false)
+            check("closed with no app listening: stops right away, as before", running: false, waiting: false, calls: 0)
+            voice.keepForListener()
+            check("kept on for an app", running: true, waiting: true, calls: 0)
+        }, {
+            check("no app listening: stopped a second later, and said so", running: false, waiting: false, calls: 1)
+            voice.keepForListener()
+            voice.keepForSounds(true)
+            check("Soundboard opened again: it keeps the chain on now", running: true, waiting: false, calls: 1)
+        }, {
+            check("still on for the Soundboard", running: true, waiting: false, calls: 1)
+            voice.keepForSounds(false)
+            check("closed again with no app listening", running: false, waiting: false, calls: 1)
+            voice.keepForListener()
+            voice.start()
+        }, {
+            check("Your voice on: keeps the chain on", running: true, waiting: true, calls: 1)
+            voice.stop()
+            check("Your voice off: a second's wait", running: true, waiting: true, calls: 1)
+        }, {
+            check("stopped after that wait", running: false, waiting: false, calls: 2)
+            voice.keepForListener()
+            voice.startChanger()
+        }, {
+            check("Voice changer on: keeps the chain on", running: true, waiting: true, calls: 2)
+            voice.stopChanger()
+            check("Voice changer off: a second's wait", running: true, waiting: true, calls: 2)
+        }, {
+            check("stopped after that wait", running: false, waiting: false, calls: 3)
+            voice.keepForListener()
+            voice.stopAll()
+            check("everything off", running: false, waiting: false, calls: 3)
+            voice.keepForListener()  // back on right after, like installing the driver
+        }, {
+            check("the first wait was dropped, the new one ended", running: false, waiting: false, calls: 4)
+            voice.start()
+            voice.stop(soundsClosed: true)
+            check("Test ends after the Soundboard closed, no app listening: stops right away, as before",
+                  running: false, waiting: false, calls: 4)
+            print(failed ? "FAILED" : "all ok")
+            exit(failed ? 1 : 0)
+        },
+    ]
+    for (i, step) in steps.enumerated() { DispatchQueue.main.asyncAfter(deadline: .now() + 1.3 * Double(i), execute: step) }
+    dispatchMain()
+}
+
 if let path = arg("--test-sounds") {
     let voiceOff = args.contains("--voice-off")
     let steps = voiceOff ? 0 : arg("--steps").flatMap(Float.init) ?? 3
@@ -1082,6 +1151,22 @@ if let path = arg("--test-sounds") {
     voice.hold(true)  // runs the chain like the Test button does (no app is listening yet)
     guard let chain = voice.chain else { print("voice did not start: \(voice.state)"); exit(1) }
     let recorder = try! Recorder(device: virtualMic, seconds: seconds)
+    if voiceOff && args.contains("--close-sounds") {
+        var ended = Date()
+        voice.onListenerGone = {
+            print(String(format: "the app stopped: chain off %.1f s later (running: %@)", Date().timeIntervalSince(ended), "\(voice.running)"))
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds - 3) {
+            voice.hold(false)
+            voice.keepForSounds(false)
+            print("Soundboard closed with an app listening: running \(voice.running), chain \(voice.chain != nil), waiting for the app \(voice.runsForListener)")
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds - 1.5) {
+            let last = recorder.finish().suffix(Int(recorder.sampleRate))  // the second before now: after the close
+            print(String(format: "tone level after the close: %.4f", sqrt(last.reduce(0) { $0 + $1 * $1 } / Float(max(1, last.count)))))
+            ended = Date()
+        }
+    }
     DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
         let asked = Date()
         board.play(clip, as: url.lastPathComponent, volume: soundVolume)
