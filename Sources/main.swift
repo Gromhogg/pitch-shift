@@ -78,6 +78,8 @@
 //                                              tone must keep coming until then, and the chain stop a second later.
 //   --check-sounds-close                       what closing the Soundboard does to the voice chain with no app
 //                                              listening (real code; opens no sound device; takes about 10 s)
+//   --check-hotkeys                            hotkeys: the key rules, saving, each step, and the push-to-talk fade
+//                                              (takes no key from the Mac; opens no sound device)
 //   --test ... --advanced [--record-out F.wav] [--steps-at "3:8,6:-5"] [--tone-amount 0.5] [--tone-at "2:1,4:-1"]
 //              [--as-device UID] [--tone-db 6,-6] [--auto-eq] [--eq-offsets 0,0,0,0,0]
 //                                              "What you hear" with Advanced processing on (--watch prints the delay;
@@ -128,7 +130,7 @@ func arg(_ name: String) -> String? {
 // switching apps (states: hear-on, voice-on, waiting, typing, recording, playing, listening, hover, menu, roll, resize,
 // no-driver, advanced-alert, sounds, rename, volume, drop, light, tone, slow, eq, changer, changer-man,
 // changer-realistic, changer-loading, changer-fallback, changer-slider-natural|fast|default|max|NN, changer-intel,
-// changer-second-off, changer-quiet-on, changer-card-off, click-voice, click-vc;
+// changer-second-off, changer-quiet-on, changer-card-off, click-voice, click-vc, hotkeys;
 // --cartoon-amount sets the voice style slider; sounds opens the Soundboard with example names, rename shows the first
 // name being changed, volume the first sound's volume slider and drop files being dragged over it; "tone" shows
 // Advanced processing on, and --tone-amount sets the Bass ↔ Treble slider; slow turns on "Deeper when slow"; eq turns
@@ -146,7 +148,9 @@ func arg(_ name: String) -> String? {
 // a key with a typo in it, with pro-paste a key pasted from an email (line breaks and spaces in it), with pro-done
 // the "Unlocked" message, with pro-alone as its own window instead of a sheet;
 // switch-flip shows the switches slowed down 10 times: the first card's goes on and turns back halfway, the second
-// card's is held down). --steps 3,-2 sets the two cards' big numbers (one number: both).
+// card's is held down; hotkeys shows the Hotkeys window with example keys, hotkeys-sound for one sound, hotkeys-catch
+// waiting for a key, hotkeys-press and hotkeys-bad after a good and a refused key).
+// --steps 3,-2 sets the two cards' big numbers (one number: both).
 let preview = arg("--preview")
 let previewStates = Set((preview ?? "").split(separator: ",").map(String.init))
 
@@ -1021,6 +1025,8 @@ if args.contains("--test-button") {
     press(waited: 0)
     dispatchMain()
 }
+
+if args.contains("--check-hotkeys") { exit(checkHotkeys() ? 0 : 1) }
 
 // Soundboard check: a quiet tone is the voice, FILE plays into Pitch Shift Mic 1 s in, Pitch Shift Mic is recorded.
 // --voice-off: as with "Your voice" off and the Soundboard open (the voice goes through unchanged).
