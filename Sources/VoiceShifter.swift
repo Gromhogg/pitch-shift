@@ -85,6 +85,7 @@ struct VoiceParams: @unchecked Sendable {
     var slowDeeper = false  // "Deeper when slow": talking slowly makes the voice lower
     var fastHigher: Float = 0  // ...and "Higher when fast": half-steps higher when talking fast (0 = off; only with slowDeeper)
     var silent: Bool        // during Test playback, so the replay isn't sent into a live call
+    var micHeld = false     // push-to-talk with its key up: the mic is silent, sounds still go out
     var changer: UnsafePointer<VoiceChangerVoice>? = nil  // the voice changer's voice (nil = off)
     var strength: Float = 1                               // the voice changer's strength, 0 ... 1
 }
@@ -273,9 +274,10 @@ struct SoundMix {
 // turn into clipped samples. With no sound playing nothing changes.
 struct CallMix {
     private(set) var mix: SoundMix
+    var micHeld: Bool             // push-to-talk with its key up
     private var muteMic = false   // the playing sound is on the Mac's speakers
     private var muteLeft = 0      // samples the mic stays muted after a sound on the speakers ends
-    private var micGain: Float = 1
+    private var micGain: Float
     private let fadeStep: Float   // 10 ms from full to nothing
     private let muteAfter: Int    // 150 ms
     private let limits: Bool      // the limiter is used (not as in 2.0.2)
@@ -286,9 +288,11 @@ struct CallMix {
     private let release: Float    // the part of the way back up taken each sample (150 ms)
 
     // `take`: the SoundPlay's take now (a sound already playing isn't picked up). `limits: false` (and `ends: false`
-    // for the sound's fades): as in 2.0.2, for --render-sounds --sound-preset old.
-    init(rate: Double, take: Int, limits: Bool = true, ends: Bool = true) {
+    // for the sound's fades): as in 2.0.2, for --render-sounds --sound-preset old. `micHeld`: the mic starts silent.
+    init(rate: Double, take: Int, limits: Bool = true, ends: Bool = true, micHeld: Bool = false) {
         mix = SoundMix(rate: rate, take: take, ends: ends)
+        self.micHeld = micHeld
+        micGain = micHeld ? 0 : 1
         fadeStep = Float(1 / (0.01 * rate))
         muteAfter = Int(rate * 0.15)
         self.limits = limits
@@ -308,9 +312,10 @@ struct CallMix {
     }
 
     // A sound playing on the Mac's speakers: the mic would hear it and send it into the call a second time, so the
-    // mic fades out (10 ms) while it plays and for 150 ms after. Headphones: nothing is muted.
+    // mic fades out (10 ms) while it plays and for 150 ms after. Headphones: nothing is muted. Push-to-talk fades it
+    // here too, before the AI voice's delay, so what was said before the key went up still comes out.
     mutating func muteIfNeeded(_ source: UnsafeMutablePointer<Float>, _ frames: Int) {
-        let muted = (mix.playing && muteMic) || muteLeft > 0
+        let muted = micHeld || (mix.playing && muteMic) || muteLeft > 0
         if muted || micGain < 1 {
             for i in 0..<frames {
                 micGain = muted ? max(0, micGain - fadeStep) : min(1, micGain + fadeStep)
@@ -981,7 +986,8 @@ final class VoiceChain {
         changerStats.initialize(to: VoiceChangerStats())
         speaking = SpeakingRate(sampleRate: rate)
         self.sounds = sounds
-        callMix = CallMix(rate: rate, take: sounds.withLock { $0.take })  // a sound already playing when the chain starts isn't sent
+        // A sound already playing when the chain starts isn't sent.
+        callMix = CallMix(rate: rate, take: sounds.withLock { $0.take }, micHeld: start.micHeld)
         piece = .allocate(capacity: maxPiece)
         ring = VoiceRing(rate: rate)
 
@@ -1107,6 +1113,7 @@ final class VoiceChain {
 
         // The Soundboard's sound; on the Mac's speakers the mic is muted while it plays (CallMix).
         if let play = sounds.withLockIfAvailable({ $0 }) { callMix.follow(play) }
+        callMix.micHeld = applied.micHeld
         callMix.muteIfNeeded(source, frames)
 
         if applied.slowDeeper {
@@ -1499,11 +1506,21 @@ final class VoiceShifter {
     // app is listening, the mic is closed right away.
     func hold(_ on: Bool) {
         holdCount = max(0, holdCount + (on ? 1 : -1))
+        sendMicHeld()
         update(closeNow: !on)
     }
 
     func setSilent(_ silent: Bool) {
         params.withLock { $0.silent = silent }
+    }
+
+    // Push-to-talk: the mic is silent unless its key is down (`talking`). Test always gets the mic.
+    var pushToTalk = false { didSet { sendMicHeld() } }
+    var talking = false { didSet { sendMicHeld() } }
+
+    private func sendMicHeld() {
+        let held = pushToTalk && !talking && holdCount == 0
+        params.withLock { $0.micHeld = held }
     }
 
     // The AI voice's fixed delay in seconds (0 without the AI voice): what is said comes out this much later.
