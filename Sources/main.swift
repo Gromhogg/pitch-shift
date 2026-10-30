@@ -108,6 +108,17 @@
 //                                              checks only: each key in F (one per line): unlocks, typo or wrong
 //   --pro-test tools/pro-keys-test.txt         checks only: the app accepts the same fixed test keys as
 //                                              tools/pro-keys.sh, and only those
+// Auto-update (Sources/Updater.swift). Both are checks only: they never open the Installer or change a setting:
+//   --check-update FILE [--sig F.sig] [--update-public-key HEX] [--current-version 3.5.0]
+//                                              does FILE pass what the app checks before it opens an update? FILE is a
+//                                              pkg with its --sig, or a .sig alone (signature and version only). Prints
+//                                              "good" (exit 0) or "refused" and why (exit 1), for a tampered, unsigned
+//                                              or older file. Uses this build's key and version unless given others.
+//   --check-update-from URL --update-folder DIR [--update-public-key HEX] [--current-version 3.5.0]
+//                                              the app's own steps online, with URL as the releases address (for GitHub:
+//                                              https://github.com/Gromhogg/pitch-shift/releases): fetch the .sig, and if
+//                                              it's newer download the pkg into DIR and check it, stopping just before
+//                                              the Installer.
 import AppKit
 import AVFoundation
 import CoreAudio
@@ -142,6 +153,7 @@ func arg(_ name: String) -> String? {
 // the "Unlocked" message, with pro-alone as its own window instead of a sheet;
 // switch-flip shows the switches slowed down 10 times: the first card's goes on and turns back halfway, the second
 // card's is held down). --steps 3,-2 sets the two cards' big numbers (one number: both).
+// update shows the Update button, update-progress with a download part way (listening hides it, as an app would).
 let preview = arg("--preview")
 let previewStates = Set((preview ?? "").split(separator: ",").map(String.init))
 
@@ -568,6 +580,48 @@ if let path = arg("--pro-test") {
     }
     print("pro-test: \(good) of \(good + bad) checks pass")
     exit(bad == 0 && good > 0 ? 0 : 1)
+}
+
+// The keys given here only reach these two checks, never the app's real updates: a key pair anyone can make must not
+// be able to install anything.
+if let i = args.firstIndex(of: "--check-update") {
+    guard i + 1 < args.count else {
+        print("usage: --check-update FILE [--sig F.sig] [--update-public-key HEX] [--current-version 3.5.0]"); exit(1)
+    }
+    let file = args[i + 1], current = arg("--current-version") ?? AppVersion.current
+    do {
+        guard let sig = arg("--sig") ?? (file.hasSuffix(".sig") ? file : nil) else { throw Problem(message: "it's unsigned (no signature given)") }
+        guard let text = try? String(contentsOfFile: sig, encoding: .utf8) else { throw Problem(message: "can't read \(sig)") }
+        let update = try SignedUpdate(sig: text, publicKey: arg("--update-public-key") ?? UpdateConfig.publicKey)
+        guard AppVersion.isNewer(update.version, than: current) else { throw Problem(message: "version \(update.version) isn't newer than \(current)") }
+        if !file.hasSuffix(".sig") { try update.check(file: URL(fileURLWithPath: file)) }
+        print("good: signed version \(update.version), newer than \(current)")
+        exit(0)
+    } catch {
+        print("refused: \((error as? Problem)?.message ?? "\(error)")")
+        exit(1)
+    }
+}
+if let address = arg("--check-update-from") {
+    guard let url = URL(string: address), let folder = arg("--update-folder") else {
+        print("usage: --check-update-from URL --update-folder DIR [--update-public-key HEX] [--current-version 3.5.0]"); exit(1)
+    }
+    let updater = Updater(publicKey: arg("--update-public-key") ?? UpdateConfig.publicKey, current: arg("--current-version") ?? AppVersion.current,
+                          releases: url, folder: URL(fileURLWithPath: folder), saves: false)
+    guard updater.enabled else { print("refused: no public key to check it with"); exit(1) }
+    var installing = false, shown = -1
+    updater.onChange = {
+        if let percent = updater.percent, percent / 25 != shown { shown = percent / 25; print("downloading: \(percent)%") }
+    }
+    updater.tell = { title, text in
+        print("\(title). \(text)")
+        guard updater.found != nil, !installing else { exit(1) }
+        installing = true
+        updater.install()
+    }
+    updater.stopsBeforeOpening = { file in print("good: \(file.path) passed; the app would open it in the Installer now"); exit(0) }
+    updater.checkNow()
+    dispatchMain()
 }
 
 // Read only: once a second, the sound output's sample rate and streams, its own mic (Bluetooth headphones), and
