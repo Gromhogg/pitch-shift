@@ -23,11 +23,28 @@ if [[ -n ${PRO_PUBLIC_KEY-x} && -z ${PRO_ISSUED+x} && ! -f "$keys_dir/issued.txt
   echo "Copy the saved Pitch Shift Keys folder back, or release without them: PRO_ISSUED= ./release.sh $version"
   exit 1
 fi
+# Auto-update: build.sh builds in the public half of the update key pair from update-public.txt there (or
+# UPDATE_PUBLIC_KEY), and the pkg is signed below with its private half, so the app can check what it downloads. Without
+# them this version couldn't update itself and people's apps wouldn't offer it, so it stops, unless that's what's wanted:
+# UPDATE_PUBLIC_KEY= ./release.sh 1.2.3 (no update check in this version, and no signature file).
+if [[ -z ${UPDATE_PUBLIC_KEY+x} && ! -s "$keys_dir/update-public.txt" ]]; then
+  echo "No update key on this Mac ($keys_dir/update-public.txt), so this release couldn't update itself and people's"
+  echo "apps wouldn't offer it. Make the key pair with tools/update-keys.sh setup (or copy the saved Pitch Shift Keys"
+  echo "folder back), or release without updates: UPDATE_PUBLIC_KEY= ./release.sh $version"
+  exit 1
+fi
+if [[ -n ${UPDATE_PUBLIC_KEY-x} ]]; then tools/update-keys.sh check; fi
 # The app's version only; the Pitch Shift Mic driver keeps its own version so updates don't restart Mac sound.
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $version" -c "Set :CFBundleVersion $version" Info.plist
 ./build.sh --no-install
 packaging/make-pkg.sh $version
 rm -f build/PitchShift.zip
 ditto -c -k --keepParent "build/Pitch Shift.app" build/PitchShift.zip
-gh release create "v$version" build/PitchShift.pkg build/PitchShift.zip --title "Pitch Shift $version" \
+rm -f build/PitchShift.pkg.sig
+signature=()
+if [[ -n ${UPDATE_PUBLIC_KEY-x} ]]; then
+  tools/update-keys.sh sign build/PitchShift.pkg $version
+  signature=(build/PitchShift.pkg.sig)
+fi
+gh release create "v$version" build/PitchShift.pkg build/PitchShift.zip $signature --title "Pitch Shift $version" \
   --notes "Install or update: see the README. Mac: PitchShift.pkg. Windows (beta): PitchShift-Setup.exe (added a few minutes after the Mac files)."
