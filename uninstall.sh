@@ -12,5 +12,6 @@ sudo /bin/bash -c '
 desktop="$HOME/Desktop/Pitch Shift.app"
 if [ -L "$desktop" ]; then rm "$desktop"; fi
 defaults delete local.pitch-shift >/dev/null 2>&1
+rm -rf "$HOME/Library/Caches/Pitch Shift"
 tccutil reset All local.pitch-shift >/dev/null 2>&1
 echo "Pitch Shift is removed."

@@ -1731,6 +1731,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     // "Unlock Pro" in the title bar while Pitch Shift Pro is locked.
     let unlockButton = NSButton(title: "Unlock Pro", target: nil, action: nil)
     let unlockAccessory = NSTitlebarAccessoryViewController()
+    // "Update" in the title bar while a newer version is there (Updater.swift).
+    let updateButton = NSButton(title: "Update", target: nil, action: nil)
+    let updateAccessory = NSTitlebarAccessoryViewController()
     private var soundsSize: NSControl.ControlSize = .regular
     private var installed: Bool?
     private var lastPhase: VoiceTest.Phase = .idle
@@ -1756,8 +1759,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         test.onChange = { [weak self] in self?.endTestAlone(); self?.refresh() }
         board.onChange = { [weak self] in self?.soundboard.update() }
         soundboard.onClose = { [weak self] in self?.soundboardClosed() }
+        Updater.shared.onChange = { [weak self] in self?.showUpdateButton() }
+        Updater.shared.heldBack = { [weak self] in self?.updateHeldBack ?? true }
+        Updater.shared.tell = { [weak self] title, text in self?.showUpdateNote(title, text) }
         deviceListeners = [kAudioHardwarePropertyDevices, kAudioHardwarePropertyDefaultInputDevice, kAudioHardwarePropertyDefaultOutputDevice].map {
             Listener(system, $0) { [weak self] in self?.deviceDebounce.call { self?.refresh() } }
+        }
+        // The voice's own watch stops while it's off, and the Update button must still hide for an app using the mic.
+        if Updater.shared.enabled, let mic = Mics.virtualMic {
+            deviceListeners.append(Listener(mic, kAudioDevicePropertyDeviceIsRunningSomewhere) { [weak self] in
+                self?.deviceDebounce.call { self?.refresh() }
+            })
         }
         refresh()
         showWindow()
@@ -1775,6 +1787,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
                 DefaultMic.giveBack()  // in case the app didn't close cleanly last time
             }
             refresh()
+            Updater.shared.start()
         }
     }
 
@@ -1826,7 +1839,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             ? [(Pro.shared.unlocked ? "Pitch Shift Pro…" : "Unlock Pitch Shift Pro…", #selector(showUnlock), "", []),
                ("-", #selector(showUnlock), "", [])]
             : []
-        submenu("Pitch Shift", pro + [
+        let updates: [(String, Selector, String, NSEvent.ModifierFlags)] = Updater.shared.enabled
+            ? [("Check for Updates…", #selector(checkForUpdates), "", []), ("-", #selector(checkForUpdates), "", [])]
+            : []
+        submenu("Pitch Shift", updates + pro + [
             ("Hide Pitch Shift", #selector(NSApplication.hide(_:)), "h", .command),
             ("-", #selector(NSApplication.hide(_:)), "", []),
             ("Quit Pitch Shift", #selector(NSApplication.terminate(_:)), "q", .command),
@@ -2054,6 +2070,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         rebuildMicMenu()
         rebuildChangerMenu()
         buildUnlockButton()
+        buildUpdateButton()
     }
 
     // "Unlock Pro" at the right end of the title bar, shown only while Pitch Shift Pro is locked.
@@ -2087,6 +2104,66 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         } else if !wanted, let index = window.titlebarAccessoryViewControllers.firstIndex(of: unlockAccessory) {
             window.removeTitlebarAccessoryViewController(at: index)
         }
+    }
+
+    private func buildUpdateButton() {
+        updateButton.bezelStyle = .rounded
+        updateButton.controlSize = .small
+        updateButton.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        titleUpdateButton("Update")
+        updateButton.target = self
+        updateButton.action = #selector(updateClicked)
+        updateButton.sizeToFit()
+        let holder = NSView(frame: NSRect(x: 0, y: 0, width: updateButton.frame.width + 10, height: updateButton.frame.height))
+        updateButton.frame.origin = .zero
+        holder.addSubview(updateButton)
+        updateAccessory.view = holder
+        updateAccessory.layoutAttribute = .trailing
+    }
+
+    private func titleUpdateButton(_ title: String) {
+        updateButton.attributedTitle = NSAttributedString(string: title, attributes: [
+            .foregroundColor: Theme.mid, .font: NSFont.systemFont(ofSize: NSFont.smallSystemFontSize, weight: .semibold)])
+    }
+
+    // Updating closes the app, so it's never offered while something depends on it. voice.listening is only kept up
+    // while the voice runs, so the mic itself is asked too.
+    private var updateHeldBack: Bool {
+        let listening = preview.map { $0.contains("listening") } ?? (voice.listening || Mics.virtualMic.map(isRunningSomewhere) == true)
+        return listening || test.phase != .idle
+    }
+
+    private func showUpdateButton() {
+        let wanted = Updater.shared.found != nil && !updateHeldBack
+        if wanted && updateAccessory.parent == nil {
+            window.addTitlebarAccessoryViewController(updateAccessory)
+        } else if !wanted, let index = window.titlebarAccessoryViewControllers.firstIndex(of: updateAccessory) {
+            window.removeTitlebarAccessoryViewController(at: index)
+        }
+        guard let found = Updater.shared.found else { return }
+        let percent = Updater.shared.percent
+        titleUpdateButton(percent.map { "\($0)%" } ?? "Update")
+        updateButton.isEnabled = percent == nil
+        updateButton.toolTip = "Pitch Shift \(found.version)"
+        updateButton.setAccessibilityLabel(percent.map { "Downloading the update, \($0) percent" } ?? "Update to Pitch Shift \(found.version)")
+    }
+
+    @objc func updateClicked() {
+        guard preview == nil else { return }  // pictures change nothing
+        Updater.shared.install()
+    }
+
+    @objc func checkForUpdates() {
+        guard preview == nil else { return }  // pictures change nothing
+        Updater.shared.checkNow()
+    }
+
+    private func showUpdateNote(_ title: String, _ text: String) {
+        showWindow()
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = text
+        alert.beginSheetModal(for: window)
     }
 
     // The Sounds button: in the middle color, or dimmed with a small lock while Pitch Shift Pro is locked.
@@ -2852,6 +2929,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     // changer state, Your voice shows off (only one at a time).
     func showPreview() {
         guard let preview else { return }
+        if preview.contains("update") { Updater.shared.pretend(percent: preview.contains("update-progress") ? 42 : nil) }
         // With Pitch Shift Pro locked (pro-locked, pro-unlock), the paid controls keep the free version's values.
         let pro = Pro.shared.unlocked
         if preview.contains("light") {
@@ -3062,6 +3140,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             testButton.setAccessibilityLabel("Stop playing")
             testButton.isEnabled = true
         }
+        showUpdateButton()
     }
 
     // The Voice changer card: on while its switch is on (`active`); the switch and picker work while
