@@ -37,7 +37,8 @@ struct HotKey: Equatable {
         let modifiers = flags.filter { event.modifierFlags.contains($0.0) }.reduce(0) { $0 | $1.1 }
         let code = Int(event.keyCode)
         let printed = (event.characters(byApplyingModifiers: []) ?? event.charactersIgnoringModifiers ?? "").uppercased()
-        self.init(code: UInt32(code), modifiers: UInt32(modifiers), label: Self.fKeys[code] ?? Self.otherKeys[code] ?? printed)
+        self.init(code: UInt32(code), modifiers: UInt32(modifiers),
+                  label: Self.fKeys[code] ?? Self.otherKeys[code] ?? (printed.isEmpty ? "Key \(code)" : printed))
     }
 
     // A saved key. One that breaks the rules (a settings file changed by hand) is dropped.
@@ -465,7 +466,7 @@ func checkHotkeys() -> Bool {
     check("a key number that doesn't exist is refused", key(200, cmdKey) == nil)
     let pressed = HotKey(event: keyEvent(kVK_ANSI_V, [.control, .option], "v"))
     check("⌃⌥V pressed reads as \(pressed?.name ?? "nothing")", pressed?.name == "⌃⌥V")
-    check("⌘⇧1 pressed reads as ⌘⇧1, shown ⇧⌘1", HotKey(event: keyEvent(kVK_ANSI_1, [.command, .shift], "1"))?.name == "⇧⌘1")
+    check("⌘⇧1 pressed reads as ⇧⌘1", HotKey(event: keyEvent(kVK_ANSI_1, [.command, .shift], "1"))?.name == "⇧⌘1")
     check("F5 pressed reads as F5", HotKey(event: keyEvent(kVK_F5, [.function], ""))?.name == "F5")
     check("a plain letter pressed gives no key", HotKey(event: keyEvent(kVK_ANSI_A, [], "a")) == nil)
 
