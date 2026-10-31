@@ -408,7 +408,10 @@ func renderFile(input: String, output: String, halfSteps: Float, advanced: Bool,
         defer { rubberband_delete(shifter) }
         rubberband_set_max_process_size(shifter, UInt32(block))
         let pad = Int(rubberband_get_preferred_start_pad(shifter))
-        var skip = Int(rubberband_get_start_delay(shifter))
+        // At normal pitch Player skips the shifter and the limiter, so the limiter stays out here too.
+        let limiter = halfSteps != 0 || changes.contains { $0.1 != 0 } ? heavy_limiter_new(rate) : nil
+        defer { if let limiter { heavy_limiter_delete(limiter) } }
+        var skip = Int(rubberband_get_start_delay(shifter)) + (limiter.map { Int(heavy_limiter_latency_frames($0)) } ?? 0)
         var position = -pad, written = 0
         var current = amount(at: 0)
         while written < length {
@@ -433,6 +436,7 @@ func renderFile(input: String, output: String, halfSteps: Float, advanced: Bool,
                         return Int(rubberband_retrieve(shifter, outs, UInt32(want)))
                     }
                 }
+                if let limiter { heavy_limiter_process(limiter, &outL, &outR, Int32(got)) }
                 let drop = min(skip, got)
                 skip -= drop
                 for i in drop..<got where written < length {

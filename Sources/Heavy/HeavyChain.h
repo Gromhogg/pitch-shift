@@ -31,6 +31,15 @@ void heavy_process(HeavyChain *chain, const float *const *in, float *const *out,
 // The delay in frames. It never changes during the chain's life, whatever the amount.
 int heavy_latency_frames(const HeavyChain *chain);
 
+// The same safety limiter on its own, for normal mode. A shift can push a very loud song well over full scale, because
+// it undoes the flat tops the song's mastering left. Under -0.3 dBFS it only delays the sound, by a fixed 2 ms.
+typedef struct HeavyLimiter HeavyLimiter;
+HeavyLimiter *heavy_limiter_new(double sampleRate);
+void heavy_limiter_delete(HeavyLimiter *limiter);
+void heavy_limiter_process(HeavyLimiter *limiter, float *left, float *right, int frames);  // in place, makes no memory
+void heavy_limiter_reset(HeavyLimiter *limiter);
+int heavy_limiter_latency_frames(const HeavyLimiter *limiter);
+
 #ifdef __cplusplus
 }
 #endif

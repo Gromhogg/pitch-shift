@@ -126,6 +126,7 @@ final class Player: HearPlayer {
     let device: AudioDeviceID
     let format: AVAudioFormat
     private var shifter: RubberBandState?
+    private let limiter: OpaquePointer?  // a shift can push a very loud song well over full scale
     private var halfSteps: Float
     private let startFrames: AVAudioFrameCount
     private let maxFrames: AVAudioFrameCount
@@ -146,6 +147,7 @@ final class Player: HearPlayer {
         let options = Int32(RubberBandOptionProcessRealTime.rawValue | RubberBandOptionEngineFiner.rawValue | RubberBandOptionChannelsTogether.rawValue)
         shifter = rubberband_new(UInt32(format.sampleRate), format.channelCount, options, 1, pow(2, Double(halfSteps) / 12))
         if let shifter { rubberband_set_max_process_size(shifter, 1024) }
+        limiter = heavy_limiter_new(format.sampleRate)
 
         guard useDevice(engine.outputNode.audioUnit!, device) else { throw Problem(message: "Could not play to \(deviceName(device)).") }
         engine.attach(node)
@@ -156,13 +158,17 @@ final class Player: HearPlayer {
     deinit {
         engine.stop()
         if let shifter { rubberband_delete(shifter) }
+        if let limiter { heavy_limiter_delete(limiter) }
     }
 
     func stop() { engine.stop() }
 
     func setHalfSteps(_ value: Float) {
         if let shifter {
-            if halfSteps == 0 && value != 0 { rubberband_reset(shifter) }  // clear out old sound
+            if halfSteps == 0 && value != 0 {  // clear out old sound
+                rubberband_reset(shifter)
+                if let limiter { heavy_limiter_reset(limiter) }
+            }
             rubberband_set_pitch_scale(shifter, pow(2, Double(value) / 12))
         }
         halfSteps = value
@@ -183,6 +189,7 @@ final class Player: HearPlayer {
         guard available > 0, let output = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: AVAudioFrameCount(available)) else { return nil }
         let outputs: [UnsafeMutablePointer<Float>?] = (0..<channels).map { output.floatChannelData![$0] }
         output.frameLength = rubberband_retrieve(shifter, outputs, UInt32(available))
+        if let limiter, channels > 1 { heavy_limiter_process(limiter, output.floatChannelData![0], output.floatChannelData![1], Int32(output.frameLength)) }
         return output
     }
 

@@ -127,9 +127,12 @@ struct Limiter {
         look = std::max(1, int(std::lround(0.002 * rate))); length = look + 1;
         release = std::exp(-1.0 / (0.120 * rate)); fastRelease = std::exp(-1.0 / (0.025 * rate));
         shortOver = int64_t(std::lround(0.005 * rate));
+        reset();
+    }
+    void reset() {
         delay[0].assign(length, 0.f); delay[1].assign(length, 0.f);
         need.assign(length, 1.0); held.assign(length, 1.0);
-        sum = length;
+        sum = length; gainHeld = 1; position = 0; sinceOver = 1 << 30; episode = 0;
     }
     inline void run(float &left, float &right) {
         double peak = std::max(std::fabs(double(left)), std::fabs(double(right)));
@@ -372,5 +375,23 @@ void heavy_process(HeavyChain *chain, const float *const *in, float *const *out,
 }
 
 int heavy_latency_frames(const HeavyChain *chain) { return chain->delay + chain->limiter.look; }
+
+struct HeavyLimiter { Limiter limiter; };
+
+HeavyLimiter *heavy_limiter_new(double sampleRate) {
+    HeavyLimiter *l = new HeavyLimiter();
+    l->limiter.init(sampleRate);
+    return l;
+}
+
+void heavy_limiter_delete(HeavyLimiter *limiter) { delete limiter; }
+
+void heavy_limiter_process(HeavyLimiter *limiter, float *left, float *right, int frames) {
+    for (int i = 0; i < frames; i++) limiter->limiter.run(left[i], right[i]);
+}
+
+void heavy_limiter_reset(HeavyLimiter *limiter) { limiter->limiter.reset(); }
+
+int heavy_limiter_latency_frames(const HeavyLimiter *limiter) { return limiter->limiter.look; }
 
 }
