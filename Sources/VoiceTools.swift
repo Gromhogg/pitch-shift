@@ -1,6 +1,7 @@
 // The small "…" button next to the Voice changer's voice picker: Add Voice…, Open Voices Folder, and Rename / Remove
-// for a voice the user added. Also watches the Voices folder, so the picker follows voices dropped in with Finder or
-// made by the converter (tools/convert-voice.sh). The work itself is in VoiceImport.swift.
+// for a voice the user added. Files dropped on the window come here too. Also watches the Voices folder, so the picker
+// follows voices dropped in with Finder or made by the Terminal converter (tools/convert-voice.sh). The work itself is
+// in VoiceImport.swift and VoiceConverter.swift.
 import AppKit
 
 final class VoiceTools: NSObject {
@@ -120,13 +121,21 @@ final class VoiceTools: NSObject {
 
     // MARK: Add Voice…
 
+    // A file dragged onto the window.
+    func dropped(_ url: URL) {
+        NSApp.activate(ignoringOtherApps: true)
+        guard !locked else { app.showUnlock(); return }  // adding voices is part of Pitch Shift Pro
+        guard !adding else { NSSound.beep(); return }
+        add(url)
+    }
+
     @objc private func addVoice() {
         guard !adding, let window = app.window else { return }
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
-        panel.message = "Choose a voice folder, or a .zip of one."
+        panel.message = "Choose a voice's .pth file, a voice folder, or a .zip of one."
         panel.prompt = "Add"
         panel.beginSheetModal(for: window) { [weak self] response in
             guard response == .OK, let url = panel.url else { return }
@@ -134,7 +143,7 @@ final class VoiceTools: NSObject {
         }
     }
 
-    // Adds a voice folder or .zip (also for files dropped on the picker later). Slow parts run in the background.
+    // Adds a .pth, a voice folder or a .zip. Slow parts run in the background, with the spinner showing.
     func add(_ url: URL) {
         setAdding(true)
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in

@@ -75,7 +75,7 @@ More help: [windows/README.md](windows/README.md).
 - **Second voice for laughs & hums** (AI voice, on unless you turn it off): each AI voice has a second version that was trained on hums, hummed tunes, laughs, sighs, breaths and singing. Pitch Shift listens to what you're doing and uses it only for those; talking always uses the main voice, and so does anything it isn't sure about. Clicks, claps and typing never go to it. Turn the switch off to use the main voice for everything.
 - **Block background sounds** (AI voice, off unless you turn it on): uses a version of the main voice that was trained to leave out typing, mouse clicks, claps, knocks and room noise like a fan or hiss, so they come out much quieter instead of turning into a voice. It sounds a little different from the usual voice, and breaths and sighs come out quieter (with **Second voice for laughs & hums** on, sighs still go to the second voice). Turning it on or off gets the other voice ready first (the backup voice plays for a moment).
 - Only one at a time: turning the voice changer on turns **Input pitch shifter** off, and turning **Input pitch shifter** on turns the voice changer off. Each keeps its own settings (pitch, sliders, **Deeper when slow**, voice) for next time. The mic menu, **Test**, **Sounds** and the Pitch Shift Mic light in the **Input pitch shifter** card work with either one on; with the voice changer on, **Test** plays the changed voice.
-- Add your own voices with the **⋯** button next to the voice menu (see [Your own voices](#your-own-voices)).
+- Add your own voices: drag a voice's `.pth` file onto the window (see [Your own voices](#your-own-voices)).
 
 **Output pitch shifter** can be on at the same time as either of the other two. Closing the window keeps Pitch Shift running. Quit it with ⌘Q.
 
@@ -90,15 +90,16 @@ More help: [windows/README.md](windows/README.md).
 The voice changer can also use voices you download. They sound best as an AI voice (Macs with Apple silicon): put the **Faster ↔ More real** slider anywhere right of **Faster**.
 
 - **Where to find voices:** people share RVC voices on sites like [Hugging Face](https://huggingface.co/models?search=rvc) (search for "RVC v2"). You need the voice's `.pth` file (it often comes in a `.zip` with an `.index` file, which Pitch Shift doesn't need). Voices made at 32, 40 or 48 kHz work; older "v1" voices don't.
-- **Turn it into a Pitch Shift voice:** open Terminal, paste this line, type a space, drag the `.pth` (or `.zip`) file onto the Terminal window, and press Return:
+- **Add it:** drag the `.pth` (or a `.zip` with one inside) onto Pitch Shift's window, or click the **⋯** button next to the voice menu and choose **Add Voice…**. It asks how high the voice is (High for most women's voices, Low for most men's) and takes a few seconds. Nothing is downloaded. It needs a Mac with Apple silicon (M1 or newer).
+- The new voice is picked for you in the Voice changer's voice menu. Move **Faster ↔ More real** right of **Faster**. A voice converted before Pitch Shift 3.1 still plays, but without hearing ahead (it can stutter a little more); add its `.pth` again to fix that.
+- **If Pitch Shift says it can't add a voice by itself** (an older kind of `.pth` file, or a voice with an unusual shape), use the Terminal converter: open Terminal, paste this line, type a space, drag the `.pth` (or `.zip`) file onto the Terminal window, and press Return:
 
 ```
 curl -fsSL https://raw.githubusercontent.com/Gromhogg/pitch-shift/main/tools/convert-voice.sh | bash -s --
 ```
 
-- It asks how high the voice is (High for most women's voices, Low for most men's). The first time, it downloads what it needs (about 0.5 GB, a few minutes) into `~/Library/Application Support/Pitch Shift/Converter` (delete that folder to remove it). It never asks for your password. After that, each voice takes about half a minute.
-- The new voice shows up in the Voice changer's voice menu. Pick it and move **Faster ↔ More real** right of **Faster**. A voice converted before Pitch Shift 3.1 still plays, but without hearing ahead (it can stutter a little more); convert its `.pth` again to fix that.
-- **The Voices folder:** click the **⋯** button next to the voice menu, then **Open Voices Folder**. Each voice is a folder in there. In the same menu, **Add Voice…** adds a voice folder (or a `.zip` of one) that someone shared with you, and **Rename…** and **Remove** change the voice you picked. Built-in voices can't be removed.
+- The Terminal converter asks how high the voice is. The first time, it downloads what it needs (about 0.5 GB, a few minutes) into `~/Library/Application Support/Pitch Shift/Converter` (delete that folder to remove it). It never asks for your password. After that, each voice takes about half a minute.
+- **The Voices folder:** click the **⋯** button next to the voice menu, then **Open Voices Folder**. Each voice is a folder in there. In the same menu, **Add Voice…** also adds a voice folder (or a `.zip` of one) that someone shared with you, and **Rename…** and **Remove** change the voice you picked. Built-in voices can't be removed.
 - Voices copied from a real person, and fan-made voices of characters, are your own responsibility: only use voices you're allowed to use, and don't pretend to be someone you're not.
 
 ## If something goes wrong

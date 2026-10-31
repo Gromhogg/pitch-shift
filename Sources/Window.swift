@@ -1059,9 +1059,23 @@ final class AmountField: NSTextField, NSTextFieldDelegate {
     }
 }
 
-// Clicking empty space in the window stops typing in the big number.
+// Clicking empty space in the window stops typing in the big number. A file dropped on the window is a voice to add.
 final class BackgroundView: NSView {
+    var onDrop: (URL) -> Void = { _ in }
+
     override func mouseDown(with event: NSEvent) { window?.makeFirstResponder(nil) }
+
+    private func file(_ drag: NSDraggingInfo) -> URL? {
+        (drag.draggingPasteboard.readObjects(forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL])?.first
+    }
+
+    override func draggingEntered(_ drag: NSDraggingInfo) -> NSDragOperation { file(drag) == nil ? [] : .copy }
+
+    override func performDragOperation(_ drag: NSDraggingInfo) -> Bool {
+        guard let url = file(drag) else { return false }
+        onDrop(url)
+        return true
+    }
 }
 
 // The dot next to "Pitch Shift Mic": grey, or green with a gentle pulse while a call app is listening.
@@ -2018,6 +2032,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
 
         let background = BackgroundView()
         background.wantsLayer = true
+        background.registerForDraggedTypes([.fileURL])
+        background.onDrop = { [unowned self] in voiceTools.dropped($0) }
         background.addSubview(hearCard)
         background.addSubview(voiceCard)
         background.addSubview(changerCard)

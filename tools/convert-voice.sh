@@ -1,5 +1,6 @@
 #!/bin/bash
-# Turns a downloaded RVC v2 voice (a .pth file, or a .zip with one inside) into a Pitch Shift voice, in one line:
+# Turns a downloaded RVC v2 voice (a .pth file, or a .zip with one inside) into a Pitch Shift voice, in one line. Most
+# voices don't need this: drag them onto Pitch Shift's window. This is for the few it can't turn into a voice by itself.
 #
 #   curl -fsSL https://raw.githubusercontent.com/Gromhogg/pitch-shift/main/tools/convert-voice.sh | bash -s -- MODEL.pth
 #
