@@ -1036,7 +1036,7 @@ if args.contains("--check-sounds-close") {
         print("\(good ? "ok" : "FAILED"): \(name) (running \(voice.running), waiting for an app \(voice.runsForListener), told \(told))")
         if !good { failed = true }
     }
-    // Each step starts 1.3 s after the one before: longer than the chain's 1 second wait.
+    // Each step starts 1.3 s after the one before ended: longer than the chain's 1 second wait.
     let steps: [() -> Void] = [
         {
             voice.keepForSounds(true)
@@ -1084,7 +1084,11 @@ if args.contains("--check-sounds-close") {
             exit(failed ? 1 : 0)
         },
     ]
-    for (i, step) in steps.enumerated() { DispatchQueue.main.asyncAfter(deadline: .now() + 1.3 * Double(i), execute: step) }
+    func run(_ i: Int) {
+        steps[i]()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.3) { run(i + 1) }
+    }
+    run(0)
     dispatchMain()
 }
 
