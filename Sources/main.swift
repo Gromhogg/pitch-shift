@@ -119,6 +119,9 @@
 //                                              https://github.com/Gromhogg/pitch-shift/releases): fetch the .sig, and if
 //                                              it's newer download the pkg into DIR and check it, stopping just before
 //                                              the Installer.
+//   --update-from URL                          opens the normal app, with URL in place of GitHub as the releases address
+//                                              (a test of a real update from a folder on this Mac, before any release:
+//                                              the file must still be signed with this build's key)
 import AppKit
 import AVFoundation
 import CoreAudio

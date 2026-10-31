@@ -100,7 +100,7 @@ struct SignedUpdate: Equatable {
 final class Updater: NSObject, URLSessionDownloadDelegate {
     static let github = URL(string: "https://github.com/Gromhogg/pitch-shift/releases")!
     static let shared = Updater(
-        publicKey: UpdateConfig.publicKey, current: AppVersion.current, releases: github,
+        publicKey: UpdateConfig.publicKey, current: AppVersion.current, releases: arg("--update-from").flatMap { URL(string: $0) } ?? github,
         folder: FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0].appendingPathComponent("Pitch Shift/Updates"),
         saves: true)
 
