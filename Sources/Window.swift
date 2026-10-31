@@ -1539,6 +1539,7 @@ enum Keys {
     static let voiceNatural = "voiceNatural"  // the old Natural/Cartoon switch (version 2.0), read once to carry over
     static let voiceSlowDeeper = "voiceSlowDeeper"  // "Deeper when slow"
     static let voiceFastHigher = "voiceFastHigher"  // "Higher when fast": 0 (off) ... 8 half-steps (not set: +4)
+    static let voiceEcho = "voiceEcho", voiceRadio = "voiceRadio"  // "Echo" and "Radio": 0 (off) ... 1 (full) (not set: 0)
     // The Voice changer: on/off, the voice's id ("woman", "man", or an added voice), Strength 0 (light) ... 1 (full),
     // and "Faster ↔ More real" 0 ... 1 (ChangerSettings.realism). changerQuality ("natural" / "realistic", the
     // switch before the slider) is read once to carry over, then removed.
@@ -1564,6 +1565,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         cartoon: Pro.shared.unlocked ? AppDelegate.savedCartoon(defaults) : Free.cartoon,
         slowDeeper: Pro.shared.unlocked ? defaults.bool(forKey: Keys.voiceSlowDeeper) : Free.slowDeeper,
         fastHigher: Pro.shared.unlocked ? AppDelegate.savedFastHigher(defaults) : Free.fastHigher,
+        echo: Pro.shared.unlocked ? AppDelegate.savedEffect(defaults, Keys.voiceEcho) : Free.echo,
+        radio: Pro.shared.unlocked ? AppDelegate.savedEffect(defaults, Keys.voiceRadio) : Free.radio,
         micUID: defaults.string(forKey: Keys.voiceMic))
     lazy var test = VoiceTest(voice: voice)
     // Sound effects into Pitch Shift Mic. Pictures show example names and change nothing.
@@ -1591,6 +1594,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     static func savedFastHigher(_ defaults: UserDefaults) -> Float {
         guard let value = (defaults.object(forKey: Keys.voiceFastHigher) as? NSNumber)?.floatValue else { return fastHigherDefault }
         return VoiceShifter.cleanFastHigher(value.rounded())
+    }
+
+    // Echo or Radio as saved (not set yet: off).
+    static func savedEffect(_ defaults: UserDefaults, _ key: String) -> Float {
+        VoiceShifter.cleanEffect((defaults.object(forKey: key) as? NSNumber)?.floatValue ?? 0)
     }
 
     // The saved Bass ↔ Treble per speakers or headphones (device UID → −1 … 1).
@@ -1708,6 +1716,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         return steps == 0 ? "Off" : "\(steps) half-steps higher"
     }
     let fastLabel = NSTextField(labelWithString: "Higher when fast")
+    // Echo and Radio: they work on Your voice and on the Voice changer, so they stay as they are with this card off.
+    let echoSlider = GradientSlider(left: "Off", right: "Full", name: "Echo", describe: AppDelegate.effectAmount)
+    let echoLabel = NSTextField(labelWithString: "Echo")
+    let radioSlider = GradientSlider(left: "Off", right: "Full", name: "Radio", describe: AppDelegate.effectAmount)
+    let radioLabel = NSTextField(labelWithString: "Radio")
+    static func effectAmount(_ value: Float) -> String {
+        value <= 0 ? "Off" : value >= 1 ? "Full" : "\(Int((value * 100).rounded())) percent"
+    }
     // Advanced processing's tone for the speakers or headphones playing now: 0 = more bass, 0.5 = middle, 1 = more treble.
     let tone = GradientSlider(left: "Bass", right: "Treble", name: "Tone") { value in
         let percent = Int(((value * 2 - 1) * 100).rounded())
@@ -1868,7 +1884,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         tone.mark = 0.5
         tone.onChange = { [weak self] value in self?.tonePicked(value) }
         // Locked controls (Pitch Shift Pro) only open the unlock window.
-        for slider in [tone, style, strength, realism, fastSlider] { slider.onLockedClick = { [weak self] in self?.showUnlock() } }
+        for slider in [tone, style, strength, realism, fastSlider, echoSlider, radioSlider] {
+            slider.onLockedClick = { [weak self] in self?.showUnlock() }
+        }
         for toggle in [slowSwitch, autoEQSwitch] { toggle.onLockedClick = { [weak self] in self?.showUnlock() } }
         let toneRow = CardRow(views: [tone])
         toneRow.onScale = { [unowned self] scale in
@@ -1950,10 +1968,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             fastRow.spacing = (10 * scale).rounded()
         }
 
+        echoSlider.onChange = { [weak self] value in self?.echoPicked(value) }
+        radioSlider.onChange = { [weak self] value in self?.radioPicked(value) }
+        let echoRow = effectRow(echoLabel, echoSlider), radioRow = effectRow(radioLabel, radioSlider)
+
         voiceCard = ShiftCard(title: "Input pitch shifter", extraRows: [styleRow, slowRow])
         voiceCard.addRow(fastRow, tight: true)
+        voiceCard.addRow(echoRow)
+        voiceCard.addRow(radioRow, tight: true)
         voiceCard.addRow(footer)
-        voiceCard.keepsLook = [footer]  // Pitch Shift Mic and the Soundboard work whether the voice is on or off
+        echoLabel.widthAnchor.constraint(equalTo: radioLabel.widthAnchor).isActive = true  // the two sliders line up
+        voiceCard.keepsLook = [footer, echoRow, radioRow]  // these work whether the voice is on or off (Echo and Radio on the Voice changer)
         voiceCard.picker.menu?.delegate = self
         voiceCard.picker.target = self
         voiceCard.picker.action = #selector(micPicked)
@@ -2025,7 +2050,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         // Tab goes through one card, then the next.
         let autoEQViews: [NSView] = [autoEQSwitch] + autoEQStrip.bands + [autoEQStrip.reset]
         let hearViews: [NSView] = hearCard.keyViews + [advancedSwitch, tone] + autoEQViews
-        let voiceViews: [NSView] = voiceCard.keyViews + [style, testButton, slowSwitch, fastSlider, installButton, soundsButton]
+        let voiceViews: [NSView] = voiceCard.keyViews + [style, testButton, slowSwitch, fastSlider, echoSlider, radioSlider, installButton, soundsButton]
         let changerViews: [NSView] = changerCard.keyViews + [strength, realism, secondSwitch, quietSwitch]
         let order: [NSView] = hearViews + voiceViews + changerViews
         background.nextKeyView = order[0]
@@ -2054,6 +2079,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         rebuildMicMenu()
         rebuildChangerMenu()
         buildUnlockButton()
+    }
+
+    // A row like Higher when fast's: the label on the left, the slider's track level with the label's middle.
+    private func effectRow(_ label: NSTextField, _ slider: GradientSlider) -> CardRow {
+        label.setAccessibilityElement(false)  // the slider says it
+        label.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        label.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let row = CardRow(views: [label, slider])
+        row.distribution = .fill
+        row.alignment = .top
+        row.onScale = { [unowned row] scale in
+            label.font = .systemFont(ofSize: 12 + (scale - 1) * 2.5)  // like the switch rows' labels
+            slider.scale = scale
+            slider.rowHeight = label.intrinsicContentSize.height
+            row.spacing = (10 * scale).rounded()
+        }
+        return row
     }
 
     // "Unlock Pro" at the right end of the title bar, shown only while Pitch Shift Pro is locked.
@@ -2124,6 +2166,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             voice.cartoon = AppDelegate.savedCartoon(defaults)
             voice.slowDeeper = defaults.bool(forKey: Keys.voiceSlowDeeper)
             voice.fastHigher = AppDelegate.savedFastHigher(defaults)
+            voice.echo = AppDelegate.savedEffect(defaults, Keys.voiceEcho)
+            voice.radio = AppDelegate.savedEffect(defaults, Keys.voiceRadio)
             for (uid, tilt) in AppDelegate.savedTones(defaults) { hear.setTone(tilt, for: uid) }
             for (uid, eq) in AppDelegate.savedAutoEQs(defaults) { hear.setAutoEQ(on: eq.on, offsets: eq.offsets, for: uid) }
             restoreChanger()  // the Voice changer as saved; if it's on, it starts (and Your voice goes off)
@@ -2132,6 +2176,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             voice.cartoon = Free.cartoon
             voice.slowDeeper = Free.slowDeeper
             voice.fastHigher = Free.fastHigher
+            voice.echo = Free.echo
+            voice.radio = Free.radio
             for uid in hear.tones.keys { hear.setTone(Free.tone, for: uid) }
             for uid in hear.autoEQs.keys { hear.setAutoEQ(on: false, offsets: [], for: uid) }
             voice.changer.on = false
@@ -2198,8 +2244,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         }
     }
 
-    // A size where at least one layout fits. Otherwise the window grows to the closest one, preferring a layout the
-    // window fits now (`current`), so a drag doesn't flip between them.
+    // A size where at least one layout fits. Otherwise the window grows to the closest one that stays on the screen,
+    // preferring a layout the window fits now (`current`), so a drag doesn't flip between them.
     private func allowed(_ size: NSSize, from current: NSSize?) -> NSSize {
         let biggest = window.contentMaxSize
         let size = NSSize(width: min(size.width, biggest.width), height: min(size.height, biggest.height))
@@ -2211,7 +2257,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         var choices = ([layout] + Layout.allCases).filter { minimums[$0] != nil }  // the arranged layout first
         if let current, choices.contains(where: { fits(current, $0) }) { choices = choices.filter { fits(current, $0) } }
         let grown = choices.map { NSSize(width: max(size.width, minimums[$0]!.width), height: max(size.height, minimums[$0]!.height)) }
-        return grown.min { $0.width + $0.height < $1.width + $1.height } ?? size
+        let onScreen = grown.filter { $0.width <= biggest.width && $0.height <= biggest.height }
+        return (onScreen.isEmpty ? grown : onScreen).min { $0.width + $0.height < $1.width + $1.height } ?? size
     }
 
     func windowWillResize(_ sender: NSWindow, to frameSize: NSSize) -> NSSize {
@@ -2559,6 +2606,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         refresh()
     }
 
+    func echoPicked(_ value: Float) {
+        voice.echo = value
+        if preview == nil { defaults.set(value, forKey: Keys.voiceEcho) }  // pictures change nothing
+    }
+
+    func radioPicked(_ value: Float) {
+        voice.radio = value
+        if preview == nil { defaults.set(value, forKey: Keys.voiceRadio) }  // pictures change nothing
+    }
+
     @objc func testClicked() {
         guard preview == nil else { return }  // pictures: see setHear
         // With Input pitch shifter off, the voice runs with the card's settings just for the test: the switch stays
@@ -2867,6 +2924,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
             if preview.contains("drop") { soundboard.showDropping() }  // sound files dragged over it
         }
         if let cartoonArg, pro { voice.cartoon = cartoonArg }  // where the style slider is (--cartoon-amount 0.5)
+        if pro {  // where the Echo and Radio sliders are (--echo 0.5 --radio 0.5)
+            voice.echo = echoArg
+            voice.radio = radioArg
+        }
         if let steps = arg("--steps")?.split(separator: ",").compactMap({ Float($0) }), let first = steps.first {
             hear.halfSteps = AmountField.clamp(first)  // the two big numbers (--steps 3,-2)
             voice.halfSteps = AmountField.clamp(steps.last ?? first)
@@ -3029,6 +3090,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         fastSlider.isEnabled = installed && voice.slowDeeper
         fastLabel.textColor = fastSlider.isEnabled && !locked ? .secondaryLabelColor : .tertiaryLabelColor
         fastLabel.toolTip = locked ? "Pitch Shift Pro" : nil
+        for (slider, label, value) in [(echoSlider, echoLabel, voice.echo), (radioSlider, radioLabel, voice.radio)] {
+            slider.locked = locked
+            slider.value = value
+            slider.isEnabled = installed
+            label.textColor = installed && !locked ? .secondaryLabelColor : .tertiaryLabelColor
+            label.toolTip = locked ? "Pitch Shift Pro" : nil
+        }
         soundsButton.isEnabled = installed && hasMic  // the Soundboard works with the voice off too
         if case .problem(let message) = voice.state { voiceCard.amount.toolTip = message } else { voiceCard.amount.toolTip = nil }
         showChanger(active: changerActive, usable: installed && hasMic, locked: locked)
