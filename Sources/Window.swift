@@ -1753,6 +1753,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         Pro.shared.onChange = { [weak self] in self?.proChanged() }
         hear.onChange = { [weak self] in self?.refresh() }
         voice.onChange = { [weak self] in self?.refresh() }
+        voice.onListenerGone = { [weak self] in
+            DefaultMic.giveBack()
+            self?.refresh()
+        }
         test.onChange = { [weak self] in self?.endTestAlone(); self?.refresh() }
         board.onChange = { [weak self] in self?.soundboard.update() }
         soundboard.onClose = { [weak self] in self?.soundboardClosed() }
@@ -2590,7 +2594,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private func endTestAlone() {
         guard testAlone, test.phase == .idle else { return }
         testAlone = false
-        voice.stop()
+        voice.stop(soundsClosed: testSounds && !voice.runsForSounds)
         // The Soundboard opened or closed during the test (it leaves the default mic alone while the voice runs):
         // Pitch Shift Mic is the default mic only while something still runs.
         if testSounds && !voice.runsForSounds && voice.state == .off { DefaultMic.giveBack() }
@@ -2618,7 +2622,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
     private var soundsOff: DispatchWorkItem?
 
     // The Soundboard closed: with Your voice and the Voice changer off, the chain stops and the real mic is given back
-    // a second later (like when an app stops listening; a sound that was just stopped fades out first).
+    // a second later (like when an app stops listening; a sound that was just stopped fades out first). If an app is
+    // still listening, that waits until it stops (voice.onListenerGone), so its mic doesn't change mid-call.
     func soundboardClosed() {
         guard preview == nil else { return }
         soundsOff?.cancel()
@@ -2828,13 +2833,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         // The Mac's sound system restarted; reconnect everything.
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [self] in
             let hearOn = hear.isOn, voiceOn = voice.isOn, changerOn = voice.changerIsOn, sounds = voice.runsForSounds
+            let forListener = voice.runsForListener
             hear.stop()
             voice.stopAll()
             if hearOn { hear.start() }
-            if voiceOn || changerOn || sounds {
+            if voiceOn || changerOn || sounds || forListener {
                 if voiceOn { voice.start() }
                 if changerOn { voice.startChanger() }
                 voice.keepForSounds(sounds)
+                if forListener { voice.keepForListener() }
                 DefaultMic.takeOver()
             }
             rebuildMicMenu()
@@ -3034,7 +3041,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWind
         showChanger(active: changerActive, usable: installed && hasMic, locked: locked)
 
         let listening = preview.map { $0.contains("listening") } ?? voice.listening
-        dot.isLive = (voiceOn || voice.changer.on || voice.runsForSounds) && installed && listening
+        dot.isLive = (voiceOn || voice.changer.on || voice.runsForSounds || voice.runsForListener) && installed && listening
         footer.toolTip = dot.isLive ? "An app is using Pitch Shift Mic" : "Choose Pitch Shift Mic as the microphone in Discord, Zoom or any app"
         micName.setAccessibilityValue(dot.isLive ? "Pitch Shift Mic, in use" : "Pitch Shift Mic, not in use")
 

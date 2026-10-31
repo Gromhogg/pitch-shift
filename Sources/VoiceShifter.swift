@@ -1367,10 +1367,14 @@ final class VoiceShifter {
     private(set) var chain: VoiceChain?
     let params: OSAllocatedUnfairLock<VoiceParams>
     let sounds = OSAllocatedUnfairLock(uncheckedState: SoundPlay())  // the Soundboard's sound, for the chain
-    private(set) var running = false  // the chain may run (Your voice or the Voice changer is on, or the Soundboard is open)
+    private(set) var running = false  // the chain may run (Your voice or the Voice changer is on, the Soundboard is open, or runsForListener)
     private var voiceSwitch = false    // "Your voice" is on
     private var changerSwitch = false  // the Voice changer is on
     private(set) var runsForSounds = false  // the Soundboard is open (with the voice off: no pitch change)
+    // The Soundboard closed while an app was listening, so that app's mic doesn't change or go silent mid-call: the
+    // chain keeps going until the app stops listening. Then onListenerGone is called, for giving the real mic back.
+    private(set) var runsForListener = false
+    var onListenerGone: () -> Void = {}
     private var holdCount = 0
     private var listeners: [Listener] = []
     private var micListeners: [Listener] = []
@@ -1403,12 +1407,14 @@ final class VoiceShifter {
         begin()
     }
 
-    // "Your voice" off. With the Voice changer on or the Soundboard open, the chain keeps going.
-    func stop() {
+    // "Your voice" off. With the Voice changer on or the Soundboard open, the chain keeps going. `soundsClosed`: the
+    // Soundboard closed while the voice ran just for Test, so this counts as closing it.
+    func stop(soundsClosed: Bool = false) {
         guard voiceSwitch else { return }
         voiceSwitch = false
         pushParams()
-        if changerSwitch || runsForSounds { onChange() } else { end() }
+        if soundsClosed && !changerSwitch && appIsListening { runsForListener = true }
+        if changerSwitch || runsForSounds { onChange() } else if runsForListener { update() } else { end() }
     }
 
     // The Voice changer on: the chain runs for it on its own, with "Your voice" off.
@@ -1423,23 +1429,41 @@ final class VoiceShifter {
         guard changerSwitch else { return }
         changerSwitch = false
         pushParams()
-        if voiceSwitch || runsForSounds { onChange() } else { end() }
+        if voiceSwitch || runsForSounds { onChange() } else if runsForListener { update() } else { end() }
     }
 
-    // The Soundboard opened or closed: while it's open the chain runs even with the voice off.
+    // The Soundboard opened or closed: while it's open the chain runs even with the voice off. Closing it leaves the
+    // chain on if an app is still listening.
     func keepForSounds(_ on: Bool) {
         guard on != runsForSounds else { return }
         runsForSounds = on
-        if on { begin() } else if !voiceSwitch && !changerSwitch { end() }
+        if on {
+            runsForListener = false
+            begin()
+        } else if !voiceSwitch && !changerSwitch {
+            if appIsListening { keepForListener() } else { end() }
+        }
+    }
+
+    // The chain runs until no app is listening (a second after the last one stops, or a second from now if none is).
+    func keepForListener() {
+        runsForListener = true
+        begin()
     }
 
     // Everything off (quitting).
     func stopAll() {
         runsForSounds = false
+        runsForListener = false
         changerSwitch = false
         stop()
         end()
     }
+
+    private var appIsListening: Bool { chain != nil && Mics.virtualMic.map(isRunningSomewhere) == true }
+
+    // Nothing but runsForListener keeps the chain on.
+    private var onlyForListener: Bool { runsForListener && !voiceSwitch && !changerSwitch && !runsForSounds }
 
     private func begin() {
         pushParams()
@@ -1465,6 +1489,7 @@ final class VoiceShifter {
         listeners = []
         micListeners = []
         stopLater?.cancel()
+        stopLater = nil
         closeChain()
         listening = false
         setState(.off)
@@ -1726,10 +1751,16 @@ final class VoiceShifter {
                 closeChain()
             }
             // Wait a moment before stopping: apps often stop and restart the mic right away.
-            if chain != nil && stopLater == nil {
+            if (chain != nil || onlyForListener) && stopLater == nil {
                 let work = DispatchWorkItem { [weak self] in
                     self?.stopLater = nil
                     guard let self, !isRunningSomewhere(virtualMic), self.holdCount == 0 else { return }
+                    if self.onlyForListener {
+                        self.runsForListener = false
+                        self.end()
+                        self.onListenerGone()
+                        return
+                    }
                     self.closeChain()
                     self.setState(.ready)
                 }
