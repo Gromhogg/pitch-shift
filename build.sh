@@ -37,6 +37,23 @@ if [[ -n $PRO_PUBLIC_KEY ]]; then
 else
   echo "Pitch Shift Pro: no public key, so nothing is locked in this build"
 fi
+# Auto-update: what the app checks updates with. The app gets only the public half of the owner's update key pair, from
+# UPDATE_PUBLIC_KEY or else update-public.txt in the same folder (made by tools/update-keys.sh setup), put into a copy
+# of UpdateConfig.swift in build/obj. With no public key (or UPDATE_PUBLIC_KEY= set to nothing) the app never checks.
+if [[ -z ${UPDATE_PUBLIC_KEY+x} ]]; then
+  UPDATE_PUBLIC_KEY=$( [[ -f $keys_dir/update-public.txt ]] && tr -d ' \t\r\n' < "$keys_dir/update-public.txt" || true )
+fi
+UPDATE_PUBLIC_KEY=${UPDATE_PUBLIC_KEY//[[:space:]]/}
+if [[ -n $UPDATE_PUBLIC_KEY ]]; then
+  [[ $UPDATE_PUBLIC_KEY =~ ^[0-9a-f]{64}$ ]] || { echo "Auto-update: the public key must be 64 hex characters (update-public.txt)" >&2; exit 1; }
+  mkdir -p build/obj
+  sed "s/static let publicKey = \"\"/static let publicKey = \"$UPDATE_PUBLIC_KEY\"/" Sources/UpdateConfig.swift > build/obj/UpdateConfig.swift
+  grep -q "publicKey = \"$UPDATE_PUBLIC_KEY\"" build/obj/UpdateConfig.swift || { echo "Couldn't put the update public key into build/obj/UpdateConfig.swift" >&2; exit 1; }
+  swift_sources=(${swift_sources:#Sources/UpdateConfig.swift} build/obj/UpdateConfig.swift)
+  echo "Auto-update: on (public key built in)"
+else
+  echo "Auto-update: no public key, so this build never checks for updates"
+fi
 for arch in arm64 x86_64; do
   obj=build/obj/$arch
   mkdir -p $obj
@@ -60,7 +77,7 @@ for arch in arm64 x86_64; do
     -framework CoreML -Xlinker -dead_strip
 done
 lipo -create build/obj/arm64/PitchShift build/obj/x86_64/PitchShift -output "$app/Contents/MacOS/PitchShift"
-rm -f build/obj/ProConfig.swift  # the filled-in copy (public key and older keys' fingerprints)
+rm -f build/obj/ProConfig.swift build/obj/UpdateConfig.swift  # the filled-in copies (public keys and older keys' fingerprints)
 
 if [[ ! -f AppIcon.icns ]]; then
   swift make-icon.swift build/AppIcon.iconset && iconutil -c icns build/AppIcon.iconset -o AppIcon.icns

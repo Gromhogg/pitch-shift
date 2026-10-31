@@ -20,7 +20,13 @@ If you think this is a virus, you can check the source code and throw it into an
 curl -fsSL https://raw.githubusercontent.com/Gromhogg/pitch-shift/main/install.sh | bash
 ```
 
-Run either one again any time to update. Works on Macs with Apple silicon or Intel and macOS 14.4 or newer. Nothing else to install: Pitch Shift Mic comes with it.
+Works on Macs with Apple silicon or Intel and macOS 14.4 or newer. Nothing else to install: Pitch Shift Mic comes with it.
+
+**To update:** when a new version is out, an **Update** button shows at the top of the window. Click it, wait for the download, then click **Continue** and **Install** and type your password. Pitch Shift closes and opens again by itself. Click **Allow** if your Mac asks again about recording audio or the microphone. The button stays hidden while an app is using Pitch Shift Mic, so an update can't cut off a call. To look for one right away, choose **Check for Updates…** in the Pitch Shift menu.
+
+If you have version 3.5.0 or older, install the new version once with either way above. After that the **Update** button works.
+
+Pitch Shift asks GitHub once a day whether there's a new version, and downloads it when you click **Update**. That's the only thing it does online.
 
 ## Install on Windows (beta)
 
@@ -125,6 +131,8 @@ brew install rubberband
 `build.sh` builds `Pitch Shift.app` for Apple silicon and Intel (with Pitch Shift Mic inside), puts it in Applications and puts a shortcut on your Desktop. The first time, it downloads the source of Rubber Band and libsamplerate to build the Intel part (`libs/build.sh`), and the Realistic voice changer's AI model files (about 130 MB, listed in `voices/models.txt`; without them the app still builds and only the Natural voice changer works). `packaging/make-pkg.sh` makes the installer, and `./release.sh 1.2.3` posts a new version.
 
 Pitch Shift Pro: the app's side is `Sources/Pro.swift` and `Sources/ProConfig.swift`, and keys are made with `tools/pro-keys.sh` (`setup` once, then `new "name"`). Keys are signed: the private half of the key pair stays in `~/Library/Application Support/Pitch Shift Keys/` and makes keys; `build.sh` builds in only the public half (`signing-public.txt` there, or `PRO_PUBLIC_KEY`), which can check keys but not make them, plus fingerprints of the older keys listed in `issued.txt` (or `PRO_ISSUED`) so they keep working. A build without the public key has nothing locked. Back up the whole Pitch Shift Keys folder: without it no more keys can be made. The [server/](server/README.md) folder isn't used yet.
+
+Updates: the app's side is `Sources/Updater.swift`. The installer runs as the Mac's admin, so `release.sh` signs each `PitchShift.pkg` with a separate update key (`tools/update-keys.sh setup`, once) and posts `PitchShift.pkg.sig` with it. That file holds the version and the pkg's size and SHA-256, and the app refuses anything that doesn't match its signature or isn't newer. `build.sh` builds in only the public half (`update-public.txt` in the same folder, or `UPDATE_PUBLIC_KEY`). A build without it never checks for updates. Without the private half, the app can't be sent updates: back it up with the rest of the folder.
 
 ## How it works
 
