@@ -487,6 +487,9 @@ func checkHotkeys() -> Bool {
     let folder = FileManager.default.temporaryDirectory.appendingPathComponent(suite, isDirectory: true)
     defer {
         defaults.removePersistentDomain(forName: suite)
+        defaults.synchronize()
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        try? FileManager.default.removeItem(at: home.appendingPathComponent("Library/Preferences/\(suite).plist"))
         try? FileManager.default.removeItem(at: folder)
     }
     try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
