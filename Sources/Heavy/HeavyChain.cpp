@@ -11,7 +11,7 @@ namespace {
 // Times in ms. Chosen on the test set, see the research notes.
 const double DelayMs = 350, FadeMs = 15, JumpMinMs = 4, JumpMaxMs = 160, MatchMs = 25, ToleranceMs = 5, HoldMs = 25, GuardMs = 5;
 const double MatchLowHz = 300, MatchHighHz = 5000;  // what the matching listens to
-const double HitSensitivity = 2.5;                  // lower finds more hits
+const double HitSensitivity = 1.5;                  // lower finds more hits
 const double LimiterCeiling = 0.966;                // -0.3 dBFS
 
 double bessel0(double x) {
